@@ -22,8 +22,8 @@ final class RtRewriteCharacterizationTest {
             "src/main/java/dev/comfyfluffy/caustica/rt/lighting/RestirHistory.java");
     private static final Path LOD_TERRAIN = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtDistantHorizonsTerrain.java");
-    private static final Path LOD_COMPAT = REPO_ROOT.resolve(
-            "src/main/java/dev/comfyfluffy/caustica/compat/DistantHorizonsCompat.java");
+    private static final Path LOD_SELECTOR = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/lod/LodProviderSelector.java");
     private static final Path NRD = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdDenoiser.java");
 
@@ -94,14 +94,15 @@ final class RtRewriteCharacterizationTest {
 
     @Test
     void voxyOwnsTheHorizonBeforeDistantHorizonsFallback() throws IOException {
-        String source = Files.readString(LOD_COMPAT);
+        String source = Files.readString(LOD_SELECTOR);
 
         assertMatches(source,
-                "List<LodMesh> voxy\\s*=\\s*VOXY_SOURCE\\.active\\(\\)\\s*\\?\\s*"
-                        + "VOXY_SOURCE\\.snapshot\\(\\)\\.meshes\\(\\)\\s*:\\s*List\\.of\\(\\);"
-                        + ".*?if\\s*\\(!voxy\\.isEmpty\\(\\)\\)\\s*return voxy;"
-                        + ".*?if\\s*\\(!LOADED\\)\\s*return List\\.of\\(\\);",
-                "a valid Voxy source snapshot must win before the DH fallback is considered");
+                "LodMeshSnapshot voxy\\s*=\\s*voxySource\\.snapshot\\(\\);"
+                        + ".*?if\\s*\\(!voxy\\.meshes\\(\\)\\.isEmpty\\(\\)\\)\\s*\\{"
+                        + ".*?Provider\\.VOXY"
+                        + ".*?LodMeshSnapshot dh\\s*=\\s*dhSource\\.snapshot\\(\\);"
+                        + ".*?Provider\\.DH",
+                "a valid Voxy source snapshot must win before the DH source is queried");
     }
 
     @Test

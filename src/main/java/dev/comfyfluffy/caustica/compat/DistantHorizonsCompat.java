@@ -16,7 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import dev.comfyfluffy.caustica.rt.lod.DhLodMeshSource;
 import dev.comfyfluffy.caustica.rt.lod.LodMesh;
-import dev.comfyfluffy.caustica.rt.lod.VoxyBridgeLodMeshSource;
+import dev.comfyfluffy.caustica.rt.lod.LodProviderSelector;
 
 /** Lightweight, API-independent Distant Horizons hybrid-rendering gate. */
 public final class DistantHorizonsCompat {
@@ -33,8 +33,7 @@ public final class DistantHorizonsCompat {
      */
     private static final Object WORLD_SCOPE_LOCK = new Object();
     private static volatile Object captureWorld;
-    private static final DhLodMeshSource DH_SOURCE = new DhLodMeshSource();
-    private static final VoxyBridgeLodMeshSource VOXY_SOURCE = new VoxyBridgeLodMeshSource();
+    private static final LodProviderSelector PROVIDER_SELECTOR = new LodProviderSelector();
 
     private DistantHorizonsCompat() {
     }
@@ -105,13 +104,7 @@ public final class DistantHorizonsCompat {
     }
 
     public static List<LodMesh> lodMeshesSnapshot() {
-        if (!enabled()) return List.of();
-        List<LodMesh> voxy = VOXY_SOURCE.active() ? VOXY_SOURCE.snapshot().meshes() : List.of();
-        // Never render two independently simplified copies of the same horizon. Prefer Voxy while it has
-        // an active snapshot, then fall back to DH during Voxy bootstrap or when only DH is installed.
-        if (!voxy.isEmpty()) return voxy;
-        if (!LOADED) return List.of();
-        return DH_SOURCE.snapshot().meshes();
+        return PROVIDER_SELECTOR.snapshot().meshes();
     }
 
     /** DH-only snapshot used by {@link DhLodMeshSource}; Voxy selection stays in {@link #lodMeshesSnapshot()}. */
@@ -176,14 +169,11 @@ public final class DistantHorizonsCompat {
 
     /** Drop captured buffers when disabling the integration or performing final shutdown. */
     public static void clearCapturedLods() {
-        VOXY_SOURCE.reset();
-        DH_SOURCE.reset();
+        PROVIDER_SELECTOR.reset();
     }
 
     public static long lodRevision() {
-        long dh = DH_SOURCE.revision();
-        long voxy = VOXY_SOURCE.revision();
-        return dh ^ Long.rotateLeft(voxy, 29);
+        return PROVIDER_SELECTOR.revision();
     }
 
     /** DH-only revision used by {@link DhLodMeshSource}. */
@@ -358,8 +348,7 @@ public final class DistantHorizonsCompat {
 
     public static int renderDistanceChunks() {
         if (!enabled()) return 0;
-        int voxyDistance = VOXY_SOURCE.renderDistanceChunks();
-        return Math.max(voxyDistance, DH_SOURCE.renderDistanceChunks());
+        return PROVIDER_SELECTOR.renderDistanceChunks();
     }
 
     /** DH-only render distance used by {@link DhLodMeshSource}. */

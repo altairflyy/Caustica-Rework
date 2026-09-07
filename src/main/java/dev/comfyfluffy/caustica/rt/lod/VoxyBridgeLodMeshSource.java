@@ -2,6 +2,8 @@ package dev.comfyfluffy.caustica.rt.lod;
 
 import dev.comfyfluffy.caustica.compat.VoxyCompat;
 
+import java.util.List;
+
 /**
  * Provider source for the Caustica Voxy bridge.
  *
@@ -23,7 +25,7 @@ public final class VoxyBridgeLodMeshSource implements LodMeshSource {
 
     @Override
     public LodMeshSnapshot snapshot() {
-        return new LodMeshSnapshot(VoxyCompat.meshes());
+        return active() ? new LodMeshSnapshot(VoxyCompat.meshes()) : new LodMeshSnapshot(List.of());
     }
 
     @Override
