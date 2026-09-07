@@ -86,6 +86,8 @@ import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.reconstruction.SvgfResources;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
+import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
+import dev.comfyfluffy.caustica.rt.frame.LegacyCompositePass;
 import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
 import dev.comfyfluffy.caustica.rt.frame.TemporalState;
 
@@ -707,6 +709,11 @@ public final class RtComposite {
     private boolean frameCaptured;
     private FrameContext frameContext;
     private final TemporalState temporalState = new TemporalState();
+    private final FramePipeline framePipeline = new FramePipeline(new LegacyCompositePass(this::executeLegacyComposite));
+    private RtContext pipelineContext;
+    private RtPipeline pipelineActive;
+    private GpuTexture pipelineNativeColor;
+    private FrameInputs pipelineInputs;
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -954,7 +961,25 @@ public final class RtComposite {
             }
             refreshMaterialBindingsIfNeeded(ctx);
             updateMotion();
-            recordFrame(ctx, active, nativeColor);
+            FrameInputs inputs = prepareFrameInputs();
+            frameContext = createFrameContext(inputs);
+            temporalState.snapshot(frameContext);
+            // FG reads the frame's jitter at present time (PREPARE wants the offset the rays used).
+            fgJitterX = inputs.jitterX();
+            fgJitterY = inputs.jitterY();
+
+            pipelineContext = ctx;
+            pipelineActive = active;
+            pipelineNativeColor = nativeColor;
+            pipelineInputs = inputs;
+            try {
+                framePipeline.execute(frameContext);
+            } finally {
+                pipelineContext = null;
+                pipelineActive = null;
+                pipelineNativeColor = null;
+                pipelineInputs = null;
+            }
             if (!loggedActive) {
                 loggedActive = true;
                 CausticaMod.LOGGER.info("RT composite active (terrain): {}x{}, RT output replaces the world target", width, height);
@@ -1427,7 +1452,56 @@ public final class RtComposite {
         mvHasPrev = true;
     }
 
-    private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor) {
+    private void executeLegacyComposite(FrameContext frame) {
+        if (frame != frameContext || pipelineContext == null || pipelineActive == null
+                || pipelineNativeColor == null || pipelineInputs == null) {
+            throw new IllegalStateException("legacy composite pass has no active frame invocation");
+        }
+        recordFrame(pipelineContext, pipelineActive, pipelineNativeColor, pipelineInputs);
+    }
+
+    private FrameInputs prepareFrameInputs() {
+        int debugView = debugView();
+        boolean rrPath = RtDlssRr.enabled() && debugView == 0;
+        boolean fsrPath = !rrPath && RtFsrUpscaler.enabled() && debugView == 0;
+        boolean xessPath = !rrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;
+        boolean nrdPath = !rrPath && RtNrdDenoiser.active() && debugView == 0;
+        boolean svgfDebugView = debugView >= SVGF_DEBUG_FIRST && debugView <= SVGF_DEBUG_LAST;
+        boolean svgfPath = !rrPath && CausticaConfig.Rt.Denoise.ENABLED.value()
+                && (debugView == 0 || svgfDebugView);
+        float jitterX = 0f;
+        float jitterY = 0f;
+        if (rrPath) {
+            CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW);
+            jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
+            jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
+        } else if (fsrPath) {
+            CausticaJitter.INSTANCE.prepareFsr(renderW, displayW);
+            jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
+            jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
+        } else if (xessPath) {
+            CausticaJitter.INSTANCE.prepareXess();
+            jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
+            jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
+        } else if (nrdPath || svgfPath) {
+            CausticaJitter.INSTANCE.prepareFsr(renderW, displayW);
+            jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
+            jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
+        }
+        return new FrameInputs(rrPath, fsrPath, xessPath, nrdPath, svgfPath, jitterX, jitterY);
+    }
+
+    private FrameContext createFrameContext(FrameInputs inputs) {
+        return new FrameContext(frameCounter,
+                Minecraft.getInstance().getDeltaTracker().getRealtimeDeltaTicks() * 0.05f,
+                new FrameContext.Extent(displayW, displayH), new FrameContext.Extent(renderW, renderH),
+                new FrameContext.Camera(camX, camY, camZ, mvCurProjView),
+                new FrameContext.Camera(previousFrameCamX, previousFrameCamY, previousFrameCamZ, mvPushMatrix),
+                new FrameContext.Jitter(inputs.jitterX(), inputs.jitterY()), Minecraft.getInstance().level,
+                dimensionId(Minecraft.getInstance().level), FrameContext.LEGACY_SCENE_GENERATION);
+    }
+
+    private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor, FrameInputs inputs) {
         long dstImage = vkImage(nativeColor);
         var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
         RtGpuExecutor gpuExecutor = ctx.gpuExecutor();
@@ -1445,14 +1519,14 @@ public final class RtComposite {
             // (denoise+upscale) or FSR 3 (upscale only) brings it to display res. They occupy one
             // slot — RR wins if both are somehow on — and jitter is suppressed for the no-upscaler
             // reference and for the debug guide views (raw inspection).
-            boolean rrPath = RtDlssRr.enabled() && debugView == 0;
-            boolean fsrPath = !rrPath && RtFsrUpscaler.enabled() && debugView == 0;
-            boolean xessPath = !rrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;
+            boolean rrPath = inputs.rrPath();
+            boolean fsrPath = inputs.fsrPath();
+            boolean xessPath = inputs.xessPath();
             // The denoise slot, in the same priority order ensureOutput allocated for:
             // RR > NRD > SVGF. Both denoisers want a jittered trace — their temporal stage
             // integrates the sub-pixel sequence, which is what resolves detail below the pixel grid
             // and lets the upscaler reconstruct it — and both are told the exact jitter used.
-            boolean nrdPath = !rrPath && RtNrdDenoiser.active() && debugView == 0;
+            boolean nrdPath = inputs.nrdPath();
             // SVGF is the fallback as well as the primary: if NRD is selected but its denoise call
             // fails this frame, the gate below (svgfPath && !nrdDone) lets SVGF take the slot
             // instead of presenting the raw trace. Its resources are allocated whenever
@@ -1462,43 +1536,9 @@ public final class RtComposite {
             // They exist because four rounds of fixes reasoned from the source produced no visible
             // change for the user; the filter's state has to be measured in the actual frame.
             boolean svgfDebugView = debugView >= SVGF_DEBUG_FIRST && debugView <= SVGF_DEBUG_LAST;
-            boolean svgfPath = !rrPath && CausticaConfig.Rt.Denoise.ENABLED.value()
-                    && (debugView == 0 || svgfDebugView);
-            float jitterX = 0f;
-            float jitterY = 0f;
-            if (rrPath) {
-                CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW);
-                jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
-                jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
-            } else if (fsrPath) {
-                // Same Halton(2,3) sequence, FSR 3's own phase-count rule (see CausticaJitter).
-                CausticaJitter.INSTANCE.prepareFsr(renderW, displayW);
-                jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
-                jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
-            } else if (xessPath) {
-                // Same Halton(2,3) sequence, Intel's fixed 32-phase cycle (see CausticaJitter).
-                CausticaJitter.INSTANCE.prepareXess();
-                jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
-                jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
-            } else if (nrdPath || svgfPath) {
-                // A denoiser with no upscaler: still jitter, because the denoiser's temporal stage
-                // integrates the sequence into sub-pixel detail. FSR's phase-count rule is the
-                // renderer's long-standing default for this case.
-                CausticaJitter.INSTANCE.prepareFsr(renderW, displayW);
-                jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
-                jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
-            }
-            frameContext = new FrameContext(frameCounter,
-                    Minecraft.getInstance().getDeltaTracker().getRealtimeDeltaTicks() * 0.05f,
-                    new FrameContext.Extent(displayW, displayH), new FrameContext.Extent(renderW, renderH),
-                    new FrameContext.Camera(camX, camY, camZ, mvCurProjView),
-                    new FrameContext.Camera(previousFrameCamX, previousFrameCamY, previousFrameCamZ, mvPushMatrix),
-                    new FrameContext.Jitter(jitterX, jitterY), Minecraft.getInstance().level,
-                    dimensionId(Minecraft.getInstance().level), FrameContext.LEGACY_SCENE_GENERATION);
-            temporalState.snapshot(frameContext);
-            // FG reads the frame's jitter at present time (PREPARE wants the offset the rays used).
-            fgJitterX = jitterX;
-            fgJitterY = jitterY;
+            boolean svgfPath = inputs.svgfPath();
+            float jitterX = inputs.jitterX();
+            float jitterY = inputs.jitterY();
 
             boolean rrDone = false;
             // Optional coarse LOD proxy (Distant Horizons / Voxy). A no-op when neither mod is present.
@@ -2096,6 +2136,9 @@ public final class RtComposite {
 
     private record SkyPush(Float4 sunDir, Float4 lightDir, Float4 lightRadiance, Float4 moonDir,
                            Float4 celestial, Float4 sunUv, Float4 moonUv) {}
+
+    private record FrameInputs(boolean rrPath, boolean fsrPath, boolean xessPath, boolean nrdPath,
+                               boolean svgfPath, float jitterX, float jitterY) {}
 
     private record CelestialUv(Float4 sun, Float4 moon) {}
 

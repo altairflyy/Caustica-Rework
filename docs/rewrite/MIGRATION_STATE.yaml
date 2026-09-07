@@ -58,9 +58,9 @@ tasks:
     state: DONE
 
   AER-030:
-    state: READY
+    state: DONE
   AER-031:
-    state: PENDING
+    state: READY
   AER-032:
     state: PENDING
   AER-033:
