@@ -7,6 +7,8 @@ import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.lod.LodMesh;
+import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver;
+import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver.CoverageRect;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.material.RtMaterials;
@@ -307,7 +309,7 @@ public final class RtLodTerrain {
         ArrayList<LodMesh> snapshot =
                 new ArrayList<>(DistantHorizonsCompat.lodMeshesSnapshot());
         if (snapshot.isEmpty()) return List.of();
-        snapshot = removeFullyCoveredCoarseMeshes(snapshot);
+        snapshot = LodCoverageResolver.removeFullyCoveredCoarseMeshes(snapshot);
         int qualityBandBlocks = switch (Math.clamp(quality.horizontalQualityRank(), 0, 4)) {
             case 0 -> 128;
             case 1 -> 192;
@@ -406,93 +408,6 @@ public final class RtLodTerrain {
         int cx = mesh.originX() + mesh.width() / 2;
         int cz = mesh.originZ() + mesh.width() / 2;
         return Math.max(Math.abs(cx - originX), Math.abs(cz - originZ));
-    }
-
-    /**
-     * DH can temporarily report a coarse parent together with its refined children while changing quality.
-     * Keep the parent only until the finer active sections cover its complete square; otherwise both meshes
-     * enter the RT proxy and the coarse surface masks the better LOD in camera, shadow, and reflection rays.
-     */
-    private static ArrayList<LodMesh> removeFullyCoveredCoarseMeshes(
-            List<LodMesh> meshes) {
-        ArrayList<LodMesh> ordered = new ArrayList<>(meshes);
-        ordered.sort((a, b) -> {
-            int byDetail = Integer.compare(a.dataPointWidth(), b.dataPointWidth());
-            if (byDetail != 0) return byDetail;
-            int byWidth = Integer.compare(a.width(), b.width());
-            return byWidth != 0 ? byWidth : Long.compareUnsigned(a.key(), b.key());
-        });
-        ArrayList<LodMesh> selected = new ArrayList<>(ordered.size());
-        ArrayList<LodRect> selectedRects = new ArrayList<>(ordered.size());
-        for (LodMesh mesh : ordered) {
-            LodRect rect = new LodRect(mesh.key(), mesh.originX(), mesh.originZ(), mesh.width(),
-                    mesh.dataPointWidth());
-            if (!fullyCoveredBy(rect, selectedRects)) {
-                selected.add(mesh);
-                selectedRects.add(rect);
-            }
-        }
-        return selected;
-    }
-
-    private static boolean fullyCoveredBy(LodRect target, List<LodRect> candidates) {
-        ArrayList<LodRect> relevant = new ArrayList<>();
-        for (LodRect candidate : candidates) {
-            if (candidate.key == target.key) continue;
-            boolean finer = candidate.detailWidth < target.detailWidth
-                    || (candidate.detailWidth == target.detailWidth && candidate.width < target.width);
-            if (finer && intersects(target, candidate)) relevant.add(candidate);
-        }
-        return !relevant.isEmpty() && coveredSquare(target.x, target.z, target.width, relevant);
-    }
-
-    private static boolean coveredSquare(int x, int z, int width, List<LodRect> candidates) {
-        for (LodRect candidate : candidates) {
-            if (contains(candidate, x, z, width)) return true;
-        }
-        if (width <= 1) return false;
-        int first = width / 2;
-        int second = width - first;
-        return coveredSquarePart(x, z, first, first, candidates)
-                && coveredSquarePart(x + first, z, second, first, candidates)
-                && coveredSquarePart(x, z + first, first, second, candidates)
-                && coveredSquarePart(x + first, z + first, second, second, candidates);
-    }
-
-    private static boolean coveredSquarePart(int x, int z, int width, int depth,
-                                             List<LodRect> candidates) {
-        if (width <= 0 || depth <= 0) return true;
-        ArrayList<LodRect> relevant = new ArrayList<>();
-        for (LodRect candidate : candidates) {
-            if (intersects(candidate, x, z, width, depth)) relevant.add(candidate);
-        }
-        if (relevant.isEmpty()) return false;
-        if (width == depth) return coveredSquare(x, z, width, relevant);
-        // DH section widths are powers of two, but keep a safe rectangular fallback for malformed metadata.
-        if (width > depth) {
-            int first = width / 2;
-            return coveredSquarePart(x, z, first, depth, relevant)
-                    && coveredSquarePart(x + first, z, width - first, depth, relevant);
-        }
-        int first = depth / 2;
-        return coveredSquarePart(x, z, width, first, relevant)
-                && coveredSquarePart(x, z + first, width, depth - first, relevant);
-    }
-
-    private static boolean contains(LodRect outer, int x, int z, int width) {
-        long outerEndX = (long) outer.x + outer.width;
-        long outerEndZ = (long) outer.z + outer.width;
-        return outer.x <= x && outer.z <= z
-                && outerEndX >= (long) x + width && outerEndZ >= (long) z + width;
-    }
-
-    private static boolean intersects(LodRect a, LodRect b) {
-        return intersects(a, b.x, b.z, b.width, b.width);
-    }
-
-    private static boolean intersects(LodRect a, int x, int z, int width, int depth) {
-        return (long) a.x < (long) x + width && (long) x < (long) a.x + a.width
-                && (long) a.z < (long) z + depth && (long) z < (long) a.z + a.width;
     }
 
     private static long batchKey(long sourceKey, int batchIndex) {
@@ -972,9 +887,9 @@ public final class RtLodTerrain {
     }
 
     private void evictSupersededSources(BuildSession session) {
-        List<LodRect> ready = session.readyRects();
+        List<CoverageRect> ready = session.readyRects();
         if (ready.isEmpty()) return;
-        HashMap<Long, LodRect> stale = new HashMap<>();
+        HashMap<Long, CoverageRect> stale = new HashMap<>();
         for (GeomEntry entry : session.workingEntries.values()) {
             if (!session.finalSourceKeys.contains(entry.sourceKey)) {
                 stale.putIfAbsent(entry.sourceKey, entry.rect());
@@ -982,8 +897,8 @@ public final class RtLodTerrain {
         }
         if (stale.isEmpty()) return;
         HashSet<Long> removable = new HashSet<>();
-        for (Map.Entry<Long, LodRect> entry : stale.entrySet()) {
-            if (fullyCoveredBy(entry.getValue(), ready)) removable.add(entry.getKey());
+        for (Map.Entry<Long, CoverageRect> entry : stale.entrySet()) {
+            if (LodCoverageResolver.fullyCoveredBy(entry.getValue(), ready)) removable.add(entry.getKey());
         }
         if (removable.isEmpty()) return;
         int before = session.workingEntries.size();
@@ -1224,7 +1139,7 @@ public final class RtLodTerrain {
                 finalBatchKeys.add(batch.batchKey);
                 finalSourceKeys.add(batch.sourceKey);
                 sourceProgress.computeIfAbsent(batch.sourceKey, ignored -> new SourceProgress(
-                        new LodRect(batch.sourceKey, batch.originX, batch.originZ,
+                        new CoverageRect(batch.sourceKey, batch.originX, batch.originZ,
                                 batch.sourceWidth, batch.dataPointWidth))).totalBatches++;
                 if (batch.reused != null) reusedCount++;
                 else builds++;
@@ -1243,8 +1158,8 @@ public final class RtLodTerrain {
             return false;
         }
 
-        List<LodRect> readyRects() {
-            ArrayList<LodRect> result = new ArrayList<>();
+        List<CoverageRect> readyRects() {
+            ArrayList<CoverageRect> result = new ArrayList<>();
             for (SourceProgress progress : sourceProgress.values()) {
                 if (progress.ready) result.add(progress.rect);
             }
@@ -1253,24 +1168,21 @@ public final class RtLodTerrain {
     }
 
     private static final class SourceProgress {
-        final LodRect rect;
+        final CoverageRect rect;
         int totalBatches;
         int readyBatches;
         boolean ready;
 
-        SourceProgress(LodRect rect) {
+        SourceProgress(CoverageRect rect) {
             this.rect = rect;
         }
-    }
-
-    private record LodRect(long key, int x, int z, int width, int detailWidth) {
     }
 
     private record GeomEntry(long batchKey, long sourceKey, long sourceVersion,
                              int originX, int originZ, int sourceWidth, int dataPointWidth,
                              RtSectionTable.SectionGeom geom) {
-        LodRect rect() {
-            return new LodRect(sourceKey, originX, originZ, sourceWidth, dataPointWidth);
+        CoverageRect rect() {
+            return new CoverageRect(sourceKey, originX, originZ, sourceWidth, dataPointWidth);
         }
     }
 
