@@ -1,0 +1,169 @@
+schema: 1
+
+reference:
+  tag: reference/validated-caustica-0.2.0
+  upstream_commit: 3c54fc201f93598246db62ebb1947dfb1e274e92
+  working_branch: rewrite/aer
+
+active_task: null
+
+tasks:
+  AER-000:
+    state: DONE
+
+  AER-001:
+    state: DONE
+
+  AER-002:
+    state: DONE
+
+  AER-003:
+    state: DONE
+
+  AER-004:
+    state: DONE
+
+  AER-010:
+    state: PENDING
+  AER-011:
+    state: PENDING
+  AER-012:
+    state: PENDING
+  AER-013:
+    state: PENDING
+  AER-014:
+    state: PENDING
+  AER-015:
+    state: PENDING
+  AER-016:
+    state: PENDING
+
+  AER-020:
+    state: PENDING
+  AER-021:
+    state: PENDING
+  AER-022:
+    state: PENDING
+  AER-023:
+    state: PENDING
+  AER-024:
+    state: PENDING
+  AER-025:
+    state: PENDING
+  AER-026:
+    state: PENDING
+  AER-027:
+    state: PENDING
+  AER-028:
+    state: PENDING
+
+  AER-030:
+    state: PENDING
+  AER-031:
+    state: PENDING
+  AER-032:
+    state: PENDING
+  AER-033:
+    state: PENDING
+  AER-034:
+    state: PENDING
+  AER-035:
+    state: PENDING
+
+  AER-040:
+    state: PENDING
+  AER-041:
+    state: PENDING
+  AER-042:
+    state: PENDING
+  AER-043:
+    state: PENDING
+  AER-044:
+    state: PENDING
+  AER-045:
+    state: PENDING
+  AER-046:
+    state: PENDING
+
+  AER-050:
+    state: PENDING
+  AER-051:
+    state: PENDING
+  AER-052:
+    state: PENDING
+  AER-053:
+    state: PENDING
+  AER-054:
+    state: PENDING
+  AER-055:
+    state: PENDING
+  AER-056:
+    state: PENDING
+  AER-057:
+    state: PENDING
+  AER-058:
+    state: PENDING
+
+  AER-060:
+    state: PENDING
+  AER-061:
+    state: PENDING
+  AER-062:
+    state: PENDING
+  AER-063:
+    state: PENDING
+  AER-064:
+    state: PENDING
+
+  AER-070:
+    state: PENDING
+  AER-071:
+    state: PENDING
+  AER-072:
+    state: PENDING
+  AER-073:
+    state: PENDING
+
+  AER-080:
+    state: PENDING
+  AER-081:
+    state: PENDING
+  AER-082:
+    state: PENDING
+  AER-083:
+    state: PENDING
+  AER-084:
+    state: PENDING
+
+  AER-090:
+    state: PENDING
+  AER-091:
+    state: PENDING
+  AER-092:
+    state: PENDING
+  AER-093:
+    state: PENDING
+
+gates:
+  GATE-0: PASS
+  GATE-1: PENDING
+  GATE-2: PENDING
+  GATE-3: PENDING
+  GATE-4: PENDING
+  GATE-5: PENDING
+  GATE-6: PENDING
+  GATE-7: PENDING
+  GATE-8: PENDING
+  FINAL: PENDING
+
+last_verified_reference: reference/validated-caustica-0.2.0
+
+notes:
+  - The validated reference is tag reference/validated-caustica-0.2.0 at commit 3c54fc201f93598246db62ebb1947dfb1e274e92.
+  - DLSS-RR runtime initialization passes with the NGX shim rebuilt from source.
+  - The external ngx.path override is not required.
+  - ReSTIR temporal boiling/flickering is a known pre-refactor baseline issue.
+  - The baseline Gradle run reported 123 tests: 114 PASS and 9 existing shader regression failures.
+  - AER-004 characterization tests PASS: 7/7. The exact 9-test pre-refactor failure set is frozen as the accepted baseline.
+  - GATE-0 PASS: AER-000 through AER-004 are complete and V0/V1/V2 are baseline-equivalent PASS.
+  - Only one architectural modification task may be ACTIVE per worktree.
