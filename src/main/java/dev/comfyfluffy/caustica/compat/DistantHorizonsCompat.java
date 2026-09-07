@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import dev.comfyfluffy.caustica.rt.lod.DhLodMeshSource;
 import dev.comfyfluffy.caustica.rt.lod.LodMesh;
 
 /** Lightweight, API-independent Distant Horizons hybrid-rendering gate. */
@@ -31,6 +32,7 @@ public final class DistantHorizonsCompat {
      */
     private static final Object WORLD_SCOPE_LOCK = new Object();
     private static volatile Object captureWorld;
+    private static final DhLodMeshSource DH_SOURCE = new DhLodMeshSource();
 
     private DistantHorizonsCompat() {
     }
@@ -107,6 +109,12 @@ public final class DistantHorizonsCompat {
         // an active snapshot, then fall back to DH during Voxy bootstrap or when only DH is installed.
         if (!voxy.isEmpty()) return voxy;
         if (!LOADED) return List.of();
+        return DH_SOURCE.snapshot().meshes();
+    }
+
+    /** DH-only snapshot used by {@link DhLodMeshSource}; Voxy selection stays in {@link #lodMeshesSnapshot()}. */
+    public static List<LodMesh> dhLodMeshesSnapshot() {
+        if (!LOADED) return List.of();
         ensureCurrentWorldScope();
         try {
             Set<Long> active = RenderApi.INSTANCE.activeLodPositions();
@@ -167,6 +175,24 @@ public final class DistantHorizonsCompat {
     /** Drop captured buffers when disabling the integration or performing final shutdown. */
     public static void clearCapturedLods() {
         VoxyCompat.reset();
+        DH_SOURCE.reset();
+    }
+
+    public static long lodRevision() {
+        long dh = DH_SOURCE.revision();
+        long voxy = VoxyCompat.revision();
+        return dh ^ Long.rotateLeft(voxy, 29);
+    }
+
+    /** DH-only revision used by {@link DhLodMeshSource}. */
+    public static long dhLodRevision() {
+        if (!LOADED) return 0L;
+        ensureCurrentWorldScope();
+        return LOD_REVISION.get();
+    }
+
+    /** Clear only DH's captured CPU meshes; Voxy state belongs to its own source. */
+    public static void resetDhCapturedLods() {
         synchronized (WORLD_SCOPE_LOCK) {
             if (!LOD_MESHES.isEmpty()) {
                 LOD_MESHES.clear();
@@ -174,15 +200,16 @@ public final class DistantHorizonsCompat {
             }
             // Adopt the currently visible level. A later real level-identity change still advances the
             // revision through ensureCurrentWorldScope(), while same-world re-uploads can repopulate normally.
-            captureWorld = Minecraft.getInstance().level;
+            captureWorld = currentClientLevel();
         }
     }
 
-    public static long lodRevision() {
-        if (LOADED) ensureCurrentWorldScope();
-        long dh = LOADED ? LOD_REVISION.get() : 0L;
-        long voxy = VoxyCompat.revision();
-        return dh ^ Long.rotateLeft(voxy, 29);
+    private static Object currentClientLevel() {
+        try {
+            return Minecraft.getInstance().level;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static long quadByteCount(List<ByteBuffer> buffers) {
@@ -330,11 +357,16 @@ public final class DistantHorizonsCompat {
     public static int renderDistanceChunks() {
         if (!enabled()) return 0;
         int voxyDistance = VoxyCompat.renderDistanceChunks();
-        if (!LOADED) return voxyDistance;
+        return Math.max(voxyDistance, DH_SOURCE.renderDistanceChunks());
+    }
+
+    /** DH-only render distance used by {@link DhLodMeshSource}. */
+    public static int dhRenderDistanceChunks() {
+        if (!LOADED) return 0;
         try {
-            return Math.max(voxyDistance, Api.INSTANCE.renderDistanceChunks());
+            return Api.INSTANCE.renderDistanceChunks();
         } catch (Throwable ignored) {
-            return voxyDistance;
+            return 0;
         }
     }
 
