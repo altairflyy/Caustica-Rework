@@ -626,6 +626,7 @@ public final class RtLodTerrain {
                 if (session.markBatchReady(next)) evictSupersededSources(session);
                 continue;
             }
+            session.lifecycle.beginPacking();
             schedulePack(next, session);
             return;
         }
@@ -681,6 +682,7 @@ public final class RtLodTerrain {
                 }
                 continue;
             }
+            session.lifecycle.beginGpuBuilding();
             schedule(ctx, done.item, done.mesh, done.epoch, done.revision);
         }
     }
@@ -823,6 +825,7 @@ public final class RtLodTerrain {
             session.workingEntries.put(item.batchKey, entry);
             session.owned.add(geom);
             session.builtCount++;
+            session.lifecycle.markCheckpointReady();
             if (session.markBatchReady(item)) evictSupersededSources(session);
             session.lastBuild = done.build;
             maybePublishProgress(ctx, session);
@@ -916,6 +919,7 @@ public final class RtLodTerrain {
             }
 
             if (finished) {
+                session.lifecycle.publishFinal();
                 bootstrapComplete = true;
                 buildSession = null;
                 long now = System.nanoTime();
@@ -924,6 +928,7 @@ public final class RtLodTerrain {
                         "Published final DH RT proxy as {} compacted BLAS instances ({} reused, {} rebuilt)",
                         count, session.reusedCount, session.builtCount);
             } else {
+                session.lifecycle.publishCheckpoint();
                 CausticaMod.LOGGER.info(
                         "Published progressive DH RT checkpoint: {} BLAS instances, {}/{} changed batches ready",
                         count, session.builtCount, session.totalBuildCount);
@@ -940,6 +945,7 @@ public final class RtLodTerrain {
         BuildSession session = buildSession;
         buildSession = null;
         if (session != null) {
+            session.lifecycle.cancel();
             for (RtSectionTable.SectionGeom geom : session.owned) geom.destroy();
             session.owned.clear();
             session.workingEntries.clear();
@@ -1052,6 +1058,7 @@ public final class RtLodTerrain {
     private static final class BuildSession {
         final long epoch;
         final long revision;
+        final LodBuildSession lifecycle = new LodBuildSession();
         final ArrayDeque<PlannedBatch> remaining;
         final RtMaterialRegistry.Snapshot materials;
         final LinkedHashMap<Long, GeomEntry> workingEntries = new LinkedHashMap<>();
