@@ -130,3 +130,131 @@ Documentation/infrastructure tasks may use an appropriate `docs(...)` or
 Do not start architectural refactoring before GATE-0. A BLOCKER or MAJOR regression
 prevents task completion. If a task cannot be safely completed, write the evidence to
 `docs/rewrite/BLOCKERS.md` and stop only the dependency chain that relies on it.
+
+
+## Canonical roadmap governance
+
+## 1. Source of truth
+
+Ordine di precedenza obbligatorio:
+
+```text
+1. docs/rewrite/ROADMAP.md
+2. docs/rewrite/INVARIANTS.md
+3. docs/rewrite/MIGRATION_STATE.yaml
+4. AGENTS.md per regole operative non in conflitto
+5. prompt/chat/note esterne
+```
+
+Prima di iniziare un AER, leggere sempre `ROADMAP.md`, lo stato corrente e le invarianti rilevanti. Una copia esterna più permissiva non può ridurre acceptance o forbidden changes del roadmap versionato.
+
+## 2. Significato di DONE
+
+Salvo task esplicitamente marcati `CONTRACT_ONLY`, `DOC_ONLY`, `SHADOW_ONLY` o equivalente, `DONE` richiede integrazione reale nel production runtime.
+
+Non sono sufficienti da soli:
+
+- classe/record/facade/container creati;
+- unit test isolato PASS;
+- compilazione riuscita;
+- API presente ma mai referenziata da `src/main`.
+
+Per extraction/ownership/coordinator/facade:
+
+- il nuovo component deve essere usato dal percorso runtime previsto;
+- la responsabilità migrata deve essere rimossa o delegata dal vecchio owner;
+- nessuna doppia authority/stato duplicato al momento di DONE, salvo eccezione esplicita;
+- API minima obbligatoria completa salvo `optional/deferred` documentato;
+- characterization aggiornata all'owner nuovo senza indebolire la semantica.
+
+## 3. Eccezioni intenzionali
+
+- `CONTRACT_ONLY`: il task può chiudersi senza adozione runtime solo se il contract rappresenta esattamente il comportamento reale che i task dipendenti adotteranno.
+- `DOC_ONLY`: nessuna modifica production necessaria; il documento deve descrivere lo stato reale, non un target futuro spacciato per attuale.
+- `SHADOW_ONLY`: il componente deve osservare/descrivere il runtime reale ma non diventa ancora authority di esecuzione.
+
+Non usare queste etichette per aggirare acceptance.
+
+## 4. Task transaction
+
+Ogni AER riuscito termina nello stesso ciclo con:
+
+```text
+acceptance verificata
+validation richiesta PASS
+git diff --check PASS
+review del diff
+forbidden-change audit
+result.md aggiornato
+MIGRATION_STATE coerente
+commit atomico
+worktree clean
+```
+
+Al primo mismatch: STOP. Non iniziare il task successivo. Non accumulare due AER nello stesso commit.
+
+## 5. Baseline-equivalent validation
+
+Se la baseline congelata contiene failure note, PASS significa match esatto dell'insieme accettato: nessuna nuova failure, nessuna failure diversa, nessuna failure attesa scomparsa senza spiegazione.
+
+Non “aggiustare” un characterization eliminandolo quando cambia ownership: aggiornalo per seguire il nuovo owner e conservare l'invariante.
+
+## 6. Gate closure
+
+Un gate richiede sia validation sia `integration completeness`.
+
+Audit minimo:
+
+- tutti gli AER richiesti soddisfano davvero le acceptance;
+- componenti runtime-required realmente referenziati da `src/main`;
+- nessuna ownership/stato duplicato vietato;
+- nessuna API minima mancante;
+- nessuna facade/container morta usata soltanto dai test;
+- nessuna feature disabilitata per ottenere PASS;
+- characterization semanticamente valida;
+- limitazioni runtime dichiarate come `NOT AVAILABLE`, non `PASS`.
+
+Se l'audit fallisce, il gate resta `PENDING` anche con V1/V2 verdi.
+
+## 7. Semantic-domain safety
+
+Non aliasare domini solo perché hanno lo stesso tipo numerico. Esempi:
+
+```text
+realtime delta ticks != seconds
+light generation != scene generation
+material epoch != scene generation
+frame index != resource generation
+```
+
+Conversioni/alias non presenti nella reference richiedono contract esplicito o task dedicato.
+
+## 8. Stop conditions
+
+STOP immediato per:
+
+- nuova failure rispetto alla baseline accettata;
+- acceptance non dimostrabile;
+- ownership/lifetime incerta su risorsa GPU critica;
+- shader/math change in task che lo vieta;
+- nuovo `waitIdle` hot-path;
+- provider/backend multipli autorevoli quando il roadmap ne richiede uno;
+- worktree non riconducibile a un singolo AER.
+
+## 9. Gate report
+
+Ogni gate deve produrre/aggiornare un report che distingua chiaramente:
+
+```text
+PASS
+BASELINE-EQUIVALENT
+NOT AVAILABLE
+NOT TESTED
+BLOCKED
+```
+
+Il report deve includere task/commit, acceptance evidence, integration audit, validation, forbidden-change audit, baseline issues e limitazioni dell'host.
+
+## 10. Sequenza
+
+Default: un solo AER ACTIVE per worktree, sequenziale. Il gate/fase successivo non inizia finché il gate corrente non è realmente PASS e il worktree non è clean.
