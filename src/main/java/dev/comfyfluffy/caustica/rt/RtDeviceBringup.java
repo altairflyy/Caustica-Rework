@@ -6,6 +6,7 @@ import com.mojang.blaze3d.vulkan.init.VulkanFeature;
 import com.mojang.blaze3d.vulkan.init.VulkanPNextStruct;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.rt.device.GpuCapabilities;
 import dev.comfyfluffy.caustica.xess.XessRuntime;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.EXTMutableDescriptorType;
@@ -265,6 +266,27 @@ public final class RtDeviceBringup {
         }
     }
 
+    /**
+     * Read-only snapshot of the capability state produced by the legacy
+     * bring-up path. Creating this object has no side effects.
+     */
+    public static GpuCapabilities capabilities() {
+        return new GpuCapabilities(
+                rtRequested,
+                serBackend == SerBackend.EXT,
+                ommEnabled,
+                reflexEnabled,
+                presentIdEnabled,
+                wideLinesEnabled,
+                xessFeaturesEnabled,
+                maxLineWidth,
+                overlayMsaaSamples,
+                maxOpacity4StateSubdivisionLevel,
+                gpuName,
+                gpuVendorName,
+                looksLikeRtxFrameGenerationSeries()
+        );
+    }
     private RtDeviceBringup() {
     }
 
