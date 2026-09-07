@@ -82,6 +82,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
+import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -554,9 +555,7 @@ public final class RtComposite {
     // ReSTIR DI/GI history is a strict two-buffer ping-pong: a dispatch reads only `previous` and writes
     // only `current`, so spatial neighbour reuse never races another raygen invocation. The pair exists
     // only while the player setting is ON; live toggles idle the device before destruction/allocation.
-    private final RtBuffer[] restirReservoirs = new RtBuffer[2];
-    private int restirWriteIndex;
-    private boolean restirResourcesEnabled;
+    private final RestirHistory restirHistory = new RestirHistory();
     private RtImage displayImage;
     // Parallel PQ-encoded ([0,1], ST.2084) HDR display image. Written alongside displayImage when HDR is
     // enabled. When the PQ swapchain is active, the combined UI overlay is composited over this image, then
@@ -1243,62 +1242,20 @@ public final class RtComposite {
         boolean desired = CausticaConfig.Rt.Lights.RESTIR_SAMPLING.value()
                 && CausticaConfig.Rt.Lights.RIS_CANDIDATES.value() > 0
                 && renderW > 0 && renderH > 0;
-        boolean completePair = restirReservoirs[0] != null && restirReservoirs[1] != null;
-        if (desired == restirResourcesEnabled && desired == completePair) {
-            return;
-        }
-
-        ctx.waitIdle();
-        destroyRestirResources();
-        if (!desired) {
-            return;
-        }
-
-        long pixels = Math.multiplyExact((long) renderW, (long) renderH);
-        long bytes = Math.multiplyExact(pixels, RESTIR_RECORD_BYTES);
-        int usage = VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        try {
-            restirReservoirs[0] = ctx.createBuffer(bytes, usage, false,
-                    "ReSTIR reservoir history A " + renderW + "x" + renderH);
-            restirReservoirs[1] = ctx.createBuffer(bytes, usage, false,
-                    "ReSTIR reservoir history B " + renderW + "x" + renderH);
-            restirWriteIndex = 0;
-            ctx.submitSync(cmd -> {
-                VK10.vkCmdFillBuffer(cmd, restirReservoirs[0].handle, 0L, bytes, 0);
-                VK10.vkCmdFillBuffer(cmd, restirReservoirs[1].handle, 0L, bytes, 0);
-                try (MemoryStack stack = MemoryStack.stackPush()) {
-                    VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                }
-            });
-            restirResourcesEnabled = true;
-        } catch (Throwable failure) {
-            destroyRestirResources();
-            throw failure;
-        }
-    }
-
-    private void destroyRestirResources() {
-        for (int i = 0; i < restirReservoirs.length; i++) {
-            if (restirReservoirs[i] != null) {
-                restirReservoirs[i].destroy();
-                restirReservoirs[i] = null;
-            }
-        }
-        restirWriteIndex = 0;
-        restirResourcesEnabled = false;
+        restirHistory.ensure(ctx, renderW, renderH, desired);
     }
 
     private long restirPreviousAddress() {
-        return restirResourcesEnabled ? restirReservoirs[restirWriteIndex ^ 1].deviceAddress : 0L;
+        return restirHistory.previousAddress();
     }
 
     private long restirCurrentAddress() {
-        return restirResourcesEnabled ? restirReservoirs[restirWriteIndex].deviceAddress : 0L;
+        return restirHistory.currentAddress();
     }
 
     /** Explicit shader mode uniform; unlike the descriptive feature bit this is tied to real bindings. */
     private int restirMode() {
-        return restirResourcesEnabled && CausticaConfig.Rt.Lights.RESTIR_SAMPLING.value() ? 1 : 0;
+        return restirHistory.enabled() && CausticaConfig.Rt.Lights.RESTIR_SAMPLING.value() ? 1 : 0;
     }
 
     private void ensureOutput(RtContext ctx, int width, int height) {
@@ -1356,7 +1313,7 @@ public final class RtComposite {
             continuationQueue.destroy();
             continuationQueue = null;
         }
-        destroyRestirResources();
+        restirHistory.destroy();
         destroyGuideImages();
 
         displayW = width;
@@ -2119,9 +2076,7 @@ public final class RtComposite {
         encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
         // Submission order on the one graphics queue is the history dependency: next frame reads the half
         // this frame just wrote and writes the other half. Advance only after execute accepted the command.
-        if (restirResourcesEnabled) {
-            restirWriteIndex ^= 1;
-        }
+        restirHistory.advance();
         // Do not attach a merely reserved token: failed recording may never signal it. Once execute succeeds,
         // every owner in this frame's manifest is protected through the final overlay consumer.
         RtEntities.INSTANCE.markGraphicsUse(frameEntities, graphicsUse);
@@ -2783,7 +2738,7 @@ public final class RtComposite {
             continuationQueue.destroy();
             continuationQueue = null;
         }
-        destroyRestirResources();
+        restirHistory.destroy();
         destroyGuideImages();
         exposure.destroy();
         if (displayPipeline != null) {

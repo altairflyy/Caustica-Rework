@@ -5,4 +5,4 @@ immutable `FrameContext` per frame index, broadcasts an immutable request, and
 retains reasons if the consumer fails. It owns no backend resources and does
 not alter legacy reset timing or destinations.
 
-Validation: targeted `TemporalStateTest` pending.
+Validation: targeted `TemporalStateTest` PASS.
