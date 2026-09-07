@@ -18,6 +18,8 @@ final class RtRewriteCharacterizationTest {
     private static final Path REPO_ROOT = repoRoot();
     private static final Path COMPOSITE =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
+    private static final Path RESTIR_HISTORY = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/lighting/RestirHistory.java");
     private static final Path LOD_TERRAIN = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtDistantHorizonsTerrain.java");
     private static final Path LOD_COMPAT = REPO_ROOT.resolve(
@@ -27,18 +29,17 @@ final class RtRewriteCharacterizationTest {
 
     @Test
     void restirCurrentAndPreviousUseOppositePingPongHalves() throws IOException {
-        String source = Files.readString(COMPOSITE);
+        String composite = Files.readString(COMPOSITE);
+        String history = Files.readString(RESTIR_HISTORY);
 
-        assertTrue(source.contains(
-                        "restirReservoirs[restirWriteIndex ^ 1].deviceAddress"),
+        assertTrue(history.contains("reservoirs[writeIndex ^ 1].deviceAddress"),
                 "the previous reservoir must be the opposite ping-pong half");
-        assertTrue(source.contains(
-                        "restirReservoirs[restirWriteIndex].deviceAddress"),
+        assertTrue(history.contains("reservoirs[writeIndex].deviceAddress"),
                 "the current reservoir must be the write-index half");
-        assertTrue(source.contains(
+        assertTrue(composite.contains(
                         "restirPreviousAddress(), restirCurrentAddress()"),
                 "the shader push must preserve previous/current argument order");
-        assertTrue(source.contains("restirWriteIndex ^= 1;"),
+        assertTrue(history.contains("if (enabled) writeIndex ^= 1;"),
                 "the ReSTIR ping-pong index must advance only by toggling halves");
     }
 
