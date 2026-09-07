@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import dev.comfyfluffy.caustica.rt.lod.DhLodMeshSource;
 import dev.comfyfluffy.caustica.rt.lod.LodMesh;
+import dev.comfyfluffy.caustica.rt.lod.VoxyBridgeLodMeshSource;
 
 /** Lightweight, API-independent Distant Horizons hybrid-rendering gate. */
 public final class DistantHorizonsCompat {
@@ -33,6 +34,7 @@ public final class DistantHorizonsCompat {
     private static final Object WORLD_SCOPE_LOCK = new Object();
     private static volatile Object captureWorld;
     private static final DhLodMeshSource DH_SOURCE = new DhLodMeshSource();
+    private static final VoxyBridgeLodMeshSource VOXY_SOURCE = new VoxyBridgeLodMeshSource();
 
     private DistantHorizonsCompat() {
     }
@@ -104,7 +106,7 @@ public final class DistantHorizonsCompat {
 
     public static List<LodMesh> lodMeshesSnapshot() {
         if (!enabled()) return List.of();
-        List<LodMesh> voxy = VoxyCompat.active() ? VoxyCompat.meshes() : List.of();
+        List<LodMesh> voxy = VOXY_SOURCE.active() ? VOXY_SOURCE.snapshot().meshes() : List.of();
         // Never render two independently simplified copies of the same horizon. Prefer Voxy while it has
         // an active snapshot, then fall back to DH during Voxy bootstrap or when only DH is installed.
         if (!voxy.isEmpty()) return voxy;
@@ -174,13 +176,13 @@ public final class DistantHorizonsCompat {
 
     /** Drop captured buffers when disabling the integration or performing final shutdown. */
     public static void clearCapturedLods() {
-        VoxyCompat.reset();
+        VOXY_SOURCE.reset();
         DH_SOURCE.reset();
     }
 
     public static long lodRevision() {
         long dh = DH_SOURCE.revision();
-        long voxy = VoxyCompat.revision();
+        long voxy = VOXY_SOURCE.revision();
         return dh ^ Long.rotateLeft(voxy, 29);
     }
 
@@ -356,7 +358,7 @@ public final class DistantHorizonsCompat {
 
     public static int renderDistanceChunks() {
         if (!enabled()) return 0;
-        int voxyDistance = VoxyCompat.renderDistanceChunks();
+        int voxyDistance = VOXY_SOURCE.renderDistanceChunks();
         return Math.max(voxyDistance, DH_SOURCE.renderDistanceChunks());
     }
 

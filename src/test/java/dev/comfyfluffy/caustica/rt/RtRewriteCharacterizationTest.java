@@ -97,11 +97,11 @@ final class RtRewriteCharacterizationTest {
         String source = Files.readString(LOD_COMPAT);
 
         assertMatches(source,
-                "List<LodMesh> voxy\\s*=\\s*VoxyCompat\\.active\\(\\)\\s*\\?\\s*"
-                        + "VoxyCompat\\.meshes\\(\\)\\s*:\\s*List\\.of\\(\\);"
+                "List<LodMesh> voxy\\s*=\\s*VOXY_SOURCE\\.active\\(\\)\\s*\\?\\s*"
+                        + "VOXY_SOURCE\\.snapshot\\(\\)\\.meshes\\(\\)\\s*:\\s*List\\.of\\(\\);"
                         + ".*?if\\s*\\(!voxy\\.isEmpty\\(\\)\\)\\s*return voxy;"
                         + ".*?if\\s*\\(!LOADED\\)\\s*return List\\.of\\(\\);",
-                "a valid Voxy snapshot must win before the DH fallback is considered");
+                "a valid Voxy source snapshot must win before the DH fallback is considered");
     }
 
     @Test
