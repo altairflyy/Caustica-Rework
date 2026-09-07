@@ -47,7 +47,7 @@ final class RtRewriteCharacterizationTest {
     void legacyTemporalResetTriggersRemainCharacterized() throws IOException {
         String source = Files.readString(COMPOSITE);
 
-        assertTrue(source.contains("svgfHasHistory = false;"),
+        assertTrue(source.contains("svgfResources.resetHistory();"),
                 "fresh/recreated SVGF resources must invalidate SVGF history");
         assertTrue(source.contains("mvHasPrev = false; // recreated images -> first MV frame is zero"),
                 "resource recreation must invalidate motion-vector history");

@@ -133,7 +133,7 @@ final class RtDenoiserShaderRegressionTest {
         String composite = Files.readString(
                 REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
 
-        assertTrue(composite.contains("svgfCamForwardDelta = (float) -((camX - svgfPrevCamX) * fx"),
+        assertTrue(composite.contains("svgfCamForwardDelta = (float) -((camX - svgfResources.previousCameraX()) * fx"),
                 "the camera's forward travel must negate the dot with view row 2, which points backward");
         String reproject = Files.readString(SVGF_REPROJECT);
         assertTrue(reproject.contains("float expectedZPrev = z + pc.camForwardDelta;"),
@@ -162,7 +162,7 @@ final class RtDenoiserShaderRegressionTest {
                 "an FOV change must not restart accumulation; the motion vectors already carry it");
         assertFalse(composite.contains("prevProjection"),
                 "no leftover projection snapshot should remain to tempt a future reset");
-        assertTrue(composite.contains("boolean svgfReset = !svgfHasHistory;"),
+        assertTrue(composite.contains("boolean svgfReset = !svgfResources.hasHistory();"),
                 "only a genuine absence of history may restart SVGF");
     }
 

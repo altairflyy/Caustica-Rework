@@ -84,6 +84,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
+import dev.comfyfluffy.caustica.rt.reconstruction.SvgfResources;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
 import dev.comfyfluffy.caustica.rt.frame.TemporalState;
@@ -639,19 +640,7 @@ public final class RtComposite {
     // ping-pong feeding the variance estimate, and the à-trous ping-pong (rgb = colour,
     // a = variance). The reprojection also needs LAST frame's geometry to validate history against,
     // which is what the prev-guide copies hold.
-    private RtImage svgfHistoryPing;
-    private RtImage svgfHistoryPong;
-    private RtImage svgfMomentsPing;
-    private RtImage svgfMomentsPong;
-    private RtImage svgfFilterPing;
-    private RtImage svgfFilterPong;
-    private RtImage svgfPrevViewZ;
-    private RtImage svgfPrevNormal;
-    private boolean svgfWriteToPing;
-    private boolean svgfHasHistory;
-    private double svgfPrevCamX;
-    private double svgfPrevCamY;
-    private double svgfPrevCamZ;
+    private final SvgfResources svgfResources = new SvgfResources();
     private RtSvgfDenoiser svgfDenoiser;
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
@@ -1185,38 +1174,7 @@ public final class RtComposite {
             gNrdSpec.destroy();
             gNrdSpec = null;
         }
-        if (svgfHistoryPing != null) {
-            svgfHistoryPing.destroy();
-            svgfHistoryPing = null;
-        }
-        if (svgfHistoryPong != null) {
-            svgfHistoryPong.destroy();
-            svgfHistoryPong = null;
-        }
-        if (svgfMomentsPing != null) {
-            svgfMomentsPing.destroy();
-            svgfMomentsPing = null;
-        }
-        if (svgfMomentsPong != null) {
-            svgfMomentsPong.destroy();
-            svgfMomentsPong = null;
-        }
-        if (svgfFilterPing != null) {
-            svgfFilterPing.destroy();
-            svgfFilterPing = null;
-        }
-        if (svgfFilterPong != null) {
-            svgfFilterPong.destroy();
-            svgfFilterPong = null;
-        }
-        if (svgfPrevViewZ != null) {
-            svgfPrevViewZ.destroy();
-            svgfPrevViewZ = null;
-        }
-        if (svgfPrevNormal != null) {
-            svgfPrevNormal.destroy();
-            svgfPrevNormal = null;
-        }
+        svgfResources.destroy();
         if (nrdDiffOut != null) {
             nrdDiffOut.destroy();
             nrdDiffOut = null;
@@ -1385,17 +1343,7 @@ public final class RtComposite {
         // ping-pong (whose alpha carries variance), plus copies of last frame's depth/normal guides
         // so the reprojection can validate history against the geometry it came from.
         if (svgfEnabled) {
-            svgfHistoryPing = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf history ping " + renderW + "x" + renderH);
-            svgfHistoryPong = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf history pong " + renderW + "x" + renderH);
-            // rgba16f, not rg16f: the moments texture also carries the accumulated frame count
-            // (see svgf_reproject.comp — it cannot live in the history's alpha, which the à-trous
-            // feedback copy overwrites).
-            svgfMomentsPing = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf moments ping " + renderW + "x" + renderH);
-            svgfMomentsPong = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf moments pong " + renderW + "x" + renderH);
-            svgfFilterPing = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf filter ping " + renderW + "x" + renderH);
-            svgfFilterPong = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf filter pong " + renderW + "x" + renderH);
-            svgfPrevViewZ = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "svgf prev viewZ " + renderW + "x" + renderH);
-            svgfPrevNormal = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf prev normal " + renderW + "x" + renderH);
+            svgfResources.allocate(ctx, renderW, renderH);
             if (svgfDenoiser == null) {
                 svgfDenoiser = RtSvgfDenoiser.create(ctx);
                 CausticaMod.LOGGER.info("SVGF denoiser active ({} a-trous passes, {} frame window)",
@@ -1432,8 +1380,7 @@ public final class RtComposite {
         broadcastTemporalReset(() -> {
             if (svgfEnabled) {
                 // Fresh buffers hold nothing the reprojection may read.
-                svgfHasHistory = false;
-                svgfWriteToPing = true;
+                svgfResources.resetHistory();
             }
             if (nrdEnabled) {
                 // NRD's own temporal history cannot survive a resolution change either.
@@ -1817,7 +1764,7 @@ public final class RtComposite {
             //
             // Two real discontinuities still restart it, and they are handled where they arise
             // rather than by inspecting the matrix: the first frame after (re)allocation, via
-            // svgfHasHistory below, and a terrain rebase, which RtNrdDenoiser compensates against
+            // svgfResources.hasHistory() below, and a terrain rebase, which RtNrdDenoiser compensates against
             // the anchor. Resolution changes reallocate, which takes the same path.
 
             // ---- NRD / REBLUR (opt-in). Consumes the tracer's demodulated per-lobe signals plus
@@ -1880,18 +1827,19 @@ public final class RtComposite {
             // stack it replaces — the upscaler downstream is told the input is already converged.
             boolean svgfRan = false;
             if (svgfPath && !nrdDone && !nrdValidationOn
-                    && svgfDenoiser != null && svgfHistoryPing != null && gViewZ != null) {
+                    && svgfDenoiser != null && svgfResources.historyPing() != null && gViewZ != null) {
+                boolean svgfWriteToPing = svgfResources.writeToPing();
                 int svgfParity = svgfWriteToPing ? 0 : 1;
-                RtImage historyIn = svgfWriteToPing ? svgfHistoryPong : svgfHistoryPing;
-                RtImage historyOut = svgfWriteToPing ? svgfHistoryPing : svgfHistoryPong;
-                RtImage momentsIn = svgfWriteToPing ? svgfMomentsPong : svgfMomentsPing;
-                RtImage momentsOut = svgfWriteToPing ? svgfMomentsPing : svgfMomentsPong;
+                RtImage historyIn = svgfWriteToPing ? svgfResources.historyPong() : svgfResources.historyPing();
+                RtImage historyOut = svgfWriteToPing ? svgfResources.historyPing() : svgfResources.historyPong();
+                RtImage momentsIn = svgfWriteToPing ? svgfResources.momentsPong() : svgfResources.momentsPing();
+                RtImage momentsOut = svgfWriteToPing ? svgfResources.momentsPing() : svgfResources.momentsPong();
                 // Only a genuine absence of history restarts accumulation: the first frame after
                 // (re)allocation, which includes a resolution change. Camera movement does not,
                 // and neither does an FOV change -- the motion vectors are built against the
                 // previous frame's projection, so a zoom arrives as ordinary screen displacement
                 // that the reprojection follows and the geometry gate validates.
-                boolean svgfReset = !svgfHasHistory;
+                boolean svgfReset = !svgfResources.hasHistory();
                 // How far the camera travelled ALONG THE VIEW AXIS since the previous frame. The
                 // reprojection gate uses it to predict what a static surface's previous view depth
                 // should have been; without it, walking forward changes every nearby surface's
@@ -1899,7 +1847,7 @@ public final class RtComposite {
                 // frame (at 36 fps, ~0.12 blocks/frame already exceeds the tolerance inside
                 // ~2.5 blocks), which is both the noise and the blur reported while moving.
                 float svgfCamForwardDelta = 0.0f;
-                if (svgfHasHistory && !svgfReset) {
+                if (svgfResources.hasHistory() && !svgfReset) {
                     // Row 2 of the rotation-only view matrix is the view-space +Z axis, and view
                     // space looks down -Z -- the tracer relies on exactly that when it treats
                     // curClip.w (= -z_view) as a positive depth growing forward. So row 2 is the
@@ -1918,9 +1866,9 @@ public final class RtComposite {
                     double fx = frameViewRotation.m02();
                     double fy = frameViewRotation.m12();
                     double fz = frameViewRotation.m22();
-                    svgfCamForwardDelta = (float) -((camX - svgfPrevCamX) * fx
-                            + (camY - svgfPrevCamY) * fy
-                            + (camZ - svgfPrevCamZ) * fz);
+                    svgfCamForwardDelta = (float) -((camX - svgfResources.previousCameraX()) * fx
+                            + (camY - svgfResources.previousCameraY()) * fy
+                            + (camZ - svgfResources.previousCameraZ()) * fz);
                     if (!Float.isFinite(svgfCamForwardDelta)) {
                         svgfCamForwardDelta = 0.0f;
                     }
@@ -1933,9 +1881,9 @@ public final class RtComposite {
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.svgf")) {
                     svgfDenoiser.reproject(cmd, renderW, renderH, svgfParity,
                             upscaleSource.view, historyIn.view, momentsIn.view,
-                            historyOut.view, momentsOut.view, svgfFilterPing.view,
+                            historyOut.view, momentsOut.view, svgfResources.filterPing().view,
                             gMotion.view, gViewZ.view, gNormal.view,
-                            svgfPrevViewZ.view, svgfPrevNormal.view, gAlbedo.view,
+                            svgfResources.previousViewZ().view, svgfResources.previousNormal().view, gAlbedo.view,
                             svgfReset, SVGF_MAX_FRAMES, svgfCamForwardDelta);
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // reprojection visible to the wavelet
 
@@ -1943,8 +1891,8 @@ public final class RtComposite {
                     // what feeds next frame's temporal history (SVGF's own choice: the raw
                     // accumulation is noisier and converges more slowly, while feeding back the
                     // fully filtered image compounds its blur into permanent smearing).
-                    RtImage src = svgfFilterPing;
-                    RtImage dst = svgfFilterPong;
+                    RtImage src = svgfResources.filterPing();
+                    RtImage dst = svgfResources.filterPong();
                     for (int pass = 0; pass < RtSvgfDenoiser.ATROUS_PASSES; pass++) {
                         // The cascade runs in DEMODULATED lighting space so its kernels never
                         // average across albedo detail (filtering modulated radiance flattens
@@ -1976,17 +1924,15 @@ public final class RtComposite {
                     // Snapshot this frame's depth/normal guides: next frame's reprojection validates
                     // its history against the geometry that produced it, which is what lets it
                     // accept history under motion instead of clamping colour and smearing.
-                    copyImage(cmd, stack, gViewZ, svgfPrevViewZ);
-                    copyImage(cmd, stack, gNormal, svgfPrevNormal);
+                    copyImage(cmd, stack, gViewZ, svgfResources.previousViewZ());
+                    copyImage(cmd, stack, gNormal, svgfResources.previousNormal());
                     VulkanCommandEncoder.memoryBarrier(cmd, stack);
                 }
-                svgfWriteToPing = !svgfWriteToPing;
-                svgfHasHistory = true;
+                svgfResources.flipHistory();
+                svgfResources.markHistoryValid();
                 svgfRan = true;
                 // Camera snapshot for next frame's forward-travel prediction (see above).
-                svgfPrevCamX = camX;
-                svgfPrevCamY = camY;
-                svgfPrevCamZ = camZ;
+                svgfResources.snapshotPreviousCamera(camX, camY, camZ);
             }
             if (!rrDone && fsrPath && RtFsrUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "FSR upscale");
@@ -2742,7 +2688,6 @@ public final class RtComposite {
             fgUiCompositePipeline.destroy();
             fgUiCompositePipeline = null;
         }
-        svgfHasHistory = false;
         if (displayImage != null) {
             displayImage.destroy();
             displayImage = null;

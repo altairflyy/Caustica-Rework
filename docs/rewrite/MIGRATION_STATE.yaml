@@ -36,7 +36,7 @@ tasks:
   AER-015:
     state: DONE
   AER-016:
-    state: READY
+    state: DONE
 
   AER-020:
     state: PENDING
