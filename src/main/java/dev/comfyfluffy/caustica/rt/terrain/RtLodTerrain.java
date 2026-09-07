@@ -35,8 +35,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Experimental ray-traced coarse geometry sourced from DH's native render buffers. */
-public final class RtDistantHorizonsTerrain {
-    public static final RtDistantHorizonsTerrain INSTANCE = new RtDistantHorizonsTerrain();
+public final class RtLodTerrain {
+    public static final RtLodTerrain INSTANCE = new RtLodTerrain();
     /** ENTITY_BIT | PARTICLE_BIT is otherwise unused and still fits Vulkan's 24-bit custom index. */
     public static final int DH_INSTANCE_KIND = 0xC00000;
     /** Camera, shadow, GI and reflection rays all see native DH LOD triangles. */
@@ -127,7 +127,7 @@ public final class RtDistantHorizonsTerrain {
     // (which lost RT shadows/materials) without recreating the old full-proxy VRAM doubling spike.
     private BuildSession buildSession;
 
-    private RtDistantHorizonsTerrain() {
+    private RtLodTerrain() {
     }
 
     /**

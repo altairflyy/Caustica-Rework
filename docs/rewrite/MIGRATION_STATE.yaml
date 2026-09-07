@@ -49,7 +49,7 @@ tasks:
   AER-024:
     state: DONE
   AER-025:
-    state: PENDING
+    state: DONE
   AER-026:
     state: PENDING
   AER-027:

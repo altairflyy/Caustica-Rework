@@ -21,7 +21,7 @@ final class RtRewriteCharacterizationTest {
     private static final Path RESTIR_HISTORY = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/lighting/RestirHistory.java");
     private static final Path LOD_TERRAIN = REPO_ROOT.resolve(
-            "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtDistantHorizonsTerrain.java");
+            "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtLodTerrain.java");
     private static final Path LOD_SELECTOR = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/lod/LodProviderSelector.java");
     private static final Path NRD = REPO_ROOT.resolve(

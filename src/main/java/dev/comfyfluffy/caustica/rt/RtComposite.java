@@ -13,7 +13,7 @@ import dev.comfyfluffy.caustica.client.CausticaJitter;
 import dev.comfyfluffy.caustica.mixin.CommandEncoderAccessor;
 import dev.comfyfluffy.caustica.rt.gen.RestirReservoirData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushConstantsData;
-import dev.comfyfluffy.caustica.rt.terrain.RtDistantHorizonsTerrain;
+import dev.comfyfluffy.caustica.rt.terrain.RtLodTerrain;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.BreakEntry;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float2;
@@ -1502,7 +1502,7 @@ public final class RtComposite {
 
             boolean rrDone = false;
             // Optional coarse LOD proxy (Distant Horizons / Voxy). A no-op when neither mod is present.
-            RtDistantHorizonsTerrain.INSTANCE.frame(ctx, terrain.blockX, terrain.blockY, terrain.blockZ);
+            RtLodTerrain.INSTANCE.frame(ctx, terrain.blockX, terrain.blockY, terrain.blockZ);
             // Select the next BDA ring slot; the generated WorldPushData serializer fills it once all
             // frame-derived values (including entity addresses and block-breaking entries) are known.
             pushSlot = (pushSlot + 1) % PUSH_RING;
@@ -1591,7 +1591,7 @@ public final class RtComposite {
             // generations are reclaimed by graphics-timeline completion.
             // Entity BLASes are built inline below and merged into the per-frame TLAS. geomTableAddr
             // feeds the hit shader entity path (per-prim normal/tint) and motion vectors.
-            var staticInstances = RtDistantHorizonsTerrain.INSTANCE.appendInstances(
+            var staticInstances = RtLodTerrain.INSTANCE.appendInstances(
                     terrain.staticInstances(), terrain.blockX, terrain.blockY, terrain.blockZ);
             RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
@@ -1726,7 +1726,7 @@ public final class RtComposite {
             // none of them should cost an extra BDA dereference to find.
             ByteBuffer pushConstants = stack.malloc(WorldPushConstantsData.BYTE_SIZE);
             new WorldPushConstantsData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
-                    RtDistantHorizonsTerrain.INSTANCE.tableAddress(), readyMaskAddress,
+                    RtLodTerrain.INSTANCE.tableAddress(), readyMaskAddress,
                     RtMaterialRegistry.INSTANCE.tableAddress(),
                     terrain.lightBufferAddress(), terrain.lightAliasBufferAddress(),
                     terrain.lightLocalAliasBufferAddress(), terrain.lightGridCellBufferAddress(),

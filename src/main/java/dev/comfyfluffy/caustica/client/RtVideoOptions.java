@@ -13,7 +13,7 @@ import dev.comfyfluffy.caustica.client.gui.RtSharcOptionsScreen;
 import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.compat.VoxyCompat;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
-import dev.comfyfluffy.caustica.rt.terrain.RtDistantHorizonsTerrain;
+import dev.comfyfluffy.caustica.rt.terrain.RtLodTerrain;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.OptionInstance;
@@ -1410,7 +1410,7 @@ public final class RtVideoOptions {
     public static Button distantHorizonsRefreshButton() {
         Button button = Button.builder(Component.translatable("caustica.options.rt.dhRefresh"), clicked -> {
             boolean dhReloaded = DistantHorizonsCompat.reloadRenderDataCache();
-            RtDistantHorizonsTerrain.INSTANCE.requestFullRefresh();
+            RtLodTerrain.INSTANCE.requestFullRefresh();
             clicked.setMessage(Component.translatable(dhReloaded
                     ? "caustica.options.rt.dhRefresh.queued"
                     : "caustica.options.rt.dhRefresh.rtOnly"));
@@ -1429,7 +1429,7 @@ public final class RtVideoOptions {
                     VoxyCompat.active(),
                     enabled -> {
                         if (VoxyCompat.setActive(enabled)) {
-                            RtDistantHorizonsTerrain.INSTANCE.requestFullRefresh();
+                            RtLodTerrain.INSTANCE.requestFullRefresh();
                         }
                     }),
             OptionInstance.createBoolean(
@@ -1456,7 +1456,7 @@ public final class RtVideoOptions {
     public static Button voxyRefreshButton() {
         Button button = Button.builder(Component.translatable("caustica.options.voxy.refresh"), clicked -> {
             boolean reset = VoxyCompat.reset();
-            RtDistantHorizonsTerrain.INSTANCE.requestFullRefresh();
+            RtLodTerrain.INSTANCE.requestFullRefresh();
             clicked.setMessage(Component.translatable(reset
                     ? "caustica.options.voxy.refresh.queued"
                     : "caustica.options.voxy.refresh.unavailable"));

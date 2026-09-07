@@ -335,7 +335,7 @@ public final class RtTerrain {
     }
 
     public static void shutdown(RtContext ctx) {
-        RtDistantHorizonsTerrain.INSTANCE.shutdown(ctx);
+        RtLodTerrain.INSTANCE.shutdown(ctx);
         INSTANCE.clear(ctx, true);
     }
 
