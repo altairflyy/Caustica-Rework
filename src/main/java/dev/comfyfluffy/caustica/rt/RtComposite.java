@@ -83,6 +83,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
+import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -741,6 +742,10 @@ public final class RtComposite {
     private double camY;
     private double camZ;
     private boolean frameCaptured;
+    private FrameContext frameContext;
+    private double previousFrameCamX;
+    private double previousFrameCamY;
+    private double previousFrameCamZ;
     private long celestialUvAtlasHandle;
     private int celestialUvMoonPhase = -1;
     private float sunU0;
@@ -1444,11 +1449,17 @@ public final class RtComposite {
         mvCurProjView.set(frameProjection).mul(frameViewRotation);
         if (mvHasPrev) {
             mvPushMatrix.set(mvPrevProjView);
+            previousFrameCamX = mvPrevCamX;
+            previousFrameCamY = mvPrevCamY;
+            previousFrameCamZ = mvPrevCamZ;
             mvCamDeltaX = (float) (camX - mvPrevCamX);
             mvCamDeltaY = (float) (camY - mvPrevCamY);
             mvCamDeltaZ = (float) (camZ - mvPrevCamZ);
         } else {
             mvPushMatrix.set(mvCurProjView);
+            previousFrameCamX = camX;
+            previousFrameCamY = camY;
+            previousFrameCamZ = camZ;
             mvCamDeltaX = 0f;
             mvCamDeltaY = 0f;
             mvCamDeltaZ = 0f;
@@ -1521,6 +1532,13 @@ public final class RtComposite {
                 jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
                 jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
             }
+            frameContext = new FrameContext(frameCounter,
+                    Minecraft.getInstance().getDeltaTracker().getRealtimeDeltaTicks() * 0.05f,
+                    new FrameContext.Extent(displayW, displayH), new FrameContext.Extent(renderW, renderH),
+                    new FrameContext.Camera(camX, camY, camZ, mvCurProjView),
+                    new FrameContext.Camera(previousFrameCamX, previousFrameCamY, previousFrameCamZ, mvPushMatrix),
+                    new FrameContext.Jitter(jitterX, jitterY), Minecraft.getInstance().level,
+                    dimensionId(Minecraft.getInstance().level), FrameContext.LEGACY_SCENE_GENERATION);
             // FG reads the frame's jitter at present time (PREPARE wants the offset the rays used).
             fgJitterX = jitterX;
             fgJitterY = jitterY;

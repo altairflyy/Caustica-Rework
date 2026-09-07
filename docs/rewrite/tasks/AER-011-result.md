@@ -17,11 +17,16 @@ therefore uses `LEGACY_SCENE_GENERATION == 0` as an explicit unversioned value;
 it does not alias light or material generation. `RtComposite`, shader push
 layouts, resource ownership, and jitter behavior remain unchanged.
 
+Runtime recovery: `RtComposite.recordFrame` now creates one read-only snapshot
+per legacy composite frame. Realtime ticks are explicitly converted to seconds
+with the runtime tick duration (`* 0.05f`); partial tick remains interpolation
+state and is not used as frame duration.
+
 Validation:
 
 - `FrameContextTest` PASS.
 - V0 PASS.
 - V1 PASS: exact frozen baseline, 9/9 accepted shader failures; characterization 7/7 PASS.
-- V2 PASS: Gradle build successful.
+- V2 PASS: Gradle build successful (`:check` and `:build`).
 
 Behaviour change: none. Shader math change: none.
