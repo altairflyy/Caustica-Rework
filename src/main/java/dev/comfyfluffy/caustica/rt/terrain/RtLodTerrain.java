@@ -6,9 +6,10 @@ import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
-import dev.comfyfluffy.caustica.rt.lod.LodMesh;
 import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver;
 import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver.CoverageRect;
+import dev.comfyfluffy.caustica.rt.lod.LodBatchPlanner;
+import dev.comfyfluffy.caustica.rt.lod.LodMesh;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.material.RtMaterials;
@@ -54,8 +55,6 @@ public final class RtLodTerrain {
     private static final long QUALITY_SETTLE_NANOS = 15_000_000_000L;
     private static final long QUALITY_POLL_NANOS = 500_000_000L;
     private static final long RETRY_NANOS = 5_000_000_000L;
-    /** Bound transient upload/BLAS scratch residency during a DH rebuild. */
-    private static final int MAX_BUILD_QUADS = 131_072;
     /** Publish a useful near-field proxy quickly, then checkpoint larger groups while the rest builds. */
     private static final int INITIAL_PROGRESS_BATCHES = 1;
     private static final int STEADY_PROGRESS_BATCHES = 32;
@@ -355,49 +354,18 @@ public final class RtLodTerrain {
                 continue;
             }
 
-            ArrayList<DhSlice> slices = new ArrayList<>();
-            appendDhSlices(mesh, mesh.opaque(), false, slices);
-            appendDhSlices(mesh, mesh.transparent(), true, slices);
-            rebuiltBatches += appendPlannedBuilds(plan, mesh, slices);
+            LodBatchPlanner.SourcePlan sourcePlan = LodBatchPlanner.planSource(
+                    mesh, oldSource == null ? null : oldSource.version, RtLodTerrain::countDhQuads);
+            for (LodBatchPlanner.BatchPlan batch : sourcePlan.batches()) {
+                plan.add(PlannedBatch.build(batch.batchKey(), mesh, batch.slices()));
+            }
+            rebuiltBatches += sourcePlan.batches().size();
         }
         CausticaMod.LOGGER.info(
                 "DH RT refresh plan: {} active source meshes ({} reused), {} reused + {} rebuilt bounded BLAS batches; quality {} / {}, target datapoint {} blocks",
                 selectedMeshes, reusedMeshes, reusedBatches, rebuiltBatches,
                 quality.maxHorizontalResolution(), quality.horizontalQuality(), quality.maxDataPointWidth());
         return plan;
-    }
-
-    /**
-     * Combine compatible slices from one source section up to the existing quad budget. Voxy normally
-     * publishes opaque and transparent arrays separately even when both are small; building them as two
-     * BLASes nearly doubled startup work and TLAS instance count. They already share one source version
-     * and {@link #packDhBatch} supports mixed material buckets, so one bounded BLAS is equivalent.
-     */
-    private static int appendPlannedBuilds(List<PlannedBatch> plan,
-                                           LodMesh mesh,
-                                           List<DhSlice> slices) {
-        if (slices.isEmpty()) return 0;
-        ArrayList<DhSlice> group = new ArrayList<>(2);
-        int groupQuads = 0;
-        int batchIndex = 0;
-        for (DhSlice slice : slices) {
-            int sliceQuads = slice.counts.total();
-            if (!group.isEmpty() && groupQuads + sliceQuads > MAX_BUILD_QUADS) {
-                plan.add(PlannedBatch.build(batchKey(mesh.key(), batchIndex++), mesh.key(), mesh.version(),
-                        mesh.originX(), mesh.originZ(), mesh.width(), mesh.dataPointWidth(),
-                        List.copyOf(group)));
-                group.clear();
-                groupQuads = 0;
-            }
-            group.add(slice);
-            groupQuads += sliceQuads;
-        }
-        if (!group.isEmpty()) {
-            plan.add(PlannedBatch.build(batchKey(mesh.key(), batchIndex++), mesh.key(), mesh.version(),
-                    mesh.originX(), mesh.originZ(), mesh.width(), mesh.dataPointWidth(),
-                    List.copyOf(group)));
-        }
-        return batchIndex;
     }
 
     private long refreshDelayNanos(long now) {
@@ -410,39 +378,17 @@ public final class RtLodTerrain {
         return Math.max(Math.abs(cx - originX), Math.abs(cz - originZ));
     }
 
-    private static long batchKey(long sourceKey, int batchIndex) {
-        long x = sourceKey ^ (0x9E3779B97F4A7C15L * (batchIndex + 1L));
-        x ^= x >>> 30;
-        x *= 0xBF58476D1CE4E5B9L;
-        x ^= x >>> 27;
-        x *= 0x94D049BB133111EBL;
-        return x ^ (x >>> 31);
-    }
-
-    private static void appendDhSlices(LodMesh mesh, byte[] bytes,
-                                       boolean transparentPass, List<DhSlice> out) {
-        int maxLocal = mesh.width() + 1;
-        int recordsPerSlice = MAX_BUILD_QUADS;
-        int byteStride = 64;
-        for (int firstQuad = 0; firstQuad < bytes.length / byteStride; firstQuad += recordsPerSlice) {
-            int start = firstQuad * byteStride;
-            int end = (int) Math.min(bytes.length, (long) (firstQuad + recordsPerSlice) * byteStride);
-            QuadCounts counts = countDhQuads(bytes, transparentPass, maxLocal, start, end);
-            if (counts.total() != 0) out.add(new DhSlice(mesh, bytes, transparentPass, start, end, counts));
-        }
-    }
-
-    private static PackedSection packDhBatch(List<DhSlice> batch, int originX, int originZ,
+    private static PackedSection packDhBatch(List<LodBatchPlanner.SlicePlan> batch, int originX, int originZ,
                                              RtMaterialRegistry.Snapshot materials) {
         int solidQuads = 0;
         int emissiveQuads = 0;
         int glassQuads = 0;
         int waterQuads = 0;
-        for (DhSlice slice : batch) {
-            solidQuads = Math.addExact(solidQuads, slice.counts.solid);
-            emissiveQuads = Math.addExact(emissiveQuads, slice.counts.emissive);
-            glassQuads = Math.addExact(glassQuads, slice.counts.glass);
-            waterQuads = Math.addExact(waterQuads, slice.counts.water);
+        for (LodBatchPlanner.SlicePlan slice : batch) {
+            solidQuads = Math.addExact(solidQuads, slice.counts().solid());
+            emissiveQuads = Math.addExact(emissiveQuads, slice.counts().emissive());
+            glassQuads = Math.addExact(glassQuads, slice.counts().glass());
+            waterQuads = Math.addExact(waterQuads, slice.counts().water());
         }
         int opaqueQuads = Math.addExact(solidQuads, emissiveQuads);
         PackedMeshBuilder packed = new PackedMeshBuilder(opaqueQuads, glassQuads, waterQuads);
@@ -452,9 +398,9 @@ public final class RtLodTerrain {
                 materials.resolve(null, RtMaterials.Profile.SMOOTH, false, false),
                 materials.glassId(), materials.waterId(), materials.lavaId(), materials.emissiveId(),
                 materials.emissiveGlassId());
-        for (DhSlice slice : batch) {
-            decodeDhBuffer(slice.bytes, slice.transparentPass, slice.mesh, originX, originZ, packed,
-                    palette, slice.start, slice.end);
+        for (LodBatchPlanner.SlicePlan slice : batch) {
+            decodeDhBuffer(slice.bytes(), slice.transparentPass(), slice.mesh(), originX, originZ, packed,
+                    palette, slice.start(), slice.end());
         }
         packed.requireComplete();
 
@@ -472,12 +418,9 @@ public final class RtLodTerrain {
                 EMPTY_LIGHTS);
     }
 
-    private static QuadCounts countDhQuads(byte[] bytes, boolean transparentPass, int maxLocal) {
-        return countDhQuads(bytes, transparentPass, maxLocal, 0, bytes.length);
-    }
-
-    private static QuadCounts countDhQuads(byte[] bytes, boolean transparentPass, int maxLocal,
-                                           int start, int end) {
+    private static LodBatchPlanner.SliceCounts countDhQuads(LodMesh mesh, byte[] bytes,
+                                                              boolean transparentPass, int start, int end) {
+        int maxLocal = mesh.width() + 1;
         int solid = 0;
         int emissive = 0;
         int glass = 0;
@@ -499,7 +442,7 @@ public final class RtLodTerrain {
                 solid++;
             }
         }
-        return new QuadCounts(solid, emissive, glass, water);
+        return new LodBatchPlanner.SliceCounts(solid, emissive, glass, water);
     }
 
     static boolean isDhEmissiveMaterial(int material) {
@@ -1092,11 +1035,12 @@ public final class RtLodTerrain {
     }
 
     private record PlannedBatch(long batchKey, long sourceKey, long sourceVersion, int originX, int originZ,
-                                int sourceWidth, int dataPointWidth, List<DhSlice> slices, GeomEntry reused) {
-        static PlannedBatch build(long batchKey, long sourceKey, long sourceVersion, int originX, int originZ,
-                                  int sourceWidth, int dataPointWidth, List<DhSlice> slices) {
-            return new PlannedBatch(batchKey, sourceKey, sourceVersion, originX, originZ,
-                    sourceWidth, dataPointWidth, slices, null);
+                                int sourceWidth, int dataPointWidth,
+                                List<LodBatchPlanner.SlicePlan> slices, GeomEntry reused) {
+        static PlannedBatch build(long batchKey, LodMesh mesh,
+                                  List<LodBatchPlanner.SlicePlan> slices) {
+            return new PlannedBatch(batchKey, mesh.key(), mesh.version(), mesh.originX(), mesh.originZ(),
+                    mesh.width(), mesh.dataPointWidth(), slices, null);
         }
 
         static PlannedBatch reuse(GeomEntry entry) {
@@ -1194,10 +1138,6 @@ public final class RtLodTerrain {
                                      int emissiveId, int emissiveGlassId) {
     }
 
-    private record DhSlice(LodMesh mesh, byte[] bytes, boolean transparentPass,
-                           int start, int end, QuadCounts counts) {
-    }
-
     private static final class SurfaceKind {
         static final int SOLID = 0;
         static final int WATER = 1;
@@ -1206,12 +1146,6 @@ public final class RtLodTerrain {
         static final int EMISSIVE_GLASS = 4;
 
         private SurfaceKind() {
-        }
-    }
-
-    private record QuadCounts(int solid, int emissive, int glass, int water) {
-        int total() {
-            return Math.addExact(Math.addExact(solid, emissive), Math.addExact(glass, water));
         }
     }
 
