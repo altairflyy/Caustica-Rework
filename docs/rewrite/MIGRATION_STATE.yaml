@@ -5,7 +5,7 @@ reference:
   upstream_commit: 3c54fc201f93598246db62ebb1947dfb1e274e92
   working_branch: rewrite/aer
 
-active_task: AER-015
+active_task: AER-016
 
 tasks:
   AER-000:
@@ -34,6 +34,8 @@ tasks:
   AER-014:
     state: DONE
   AER-015:
+    state: DONE
+  AER-016:
     state: ACTIVE
   AER-013:
     state: PENDING
