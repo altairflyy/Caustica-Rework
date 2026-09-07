@@ -85,6 +85,7 @@ import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
+import dev.comfyfluffy.caustica.rt.frame.TemporalState;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -744,8 +745,7 @@ public final class RtComposite {
     private double camZ;
     private boolean frameCaptured;
     private FrameContext frameContext;
-    // AER-012 staging: retain the explicit production reasons until TemporalState is wired in AER-013.
-    private int pendingTemporalResetReasons;
+    private final TemporalState temporalState = new TemporalState();
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -830,21 +830,34 @@ public final class RtComposite {
      */
     public void resetFailureLatch() {
         recordTemporalReset(TemporalResetReason.MANUAL);
-        if (failed) {
-            failed = false;
-            CausticaMod.LOGGER.info("RT failure latch cleared by render-state invalidation; retrying RT");
-        }
+        broadcastTemporalReset(() -> {
+            if (failed) {
+                failed = false;
+                CausticaMod.LOGGER.info("RT failure latch cleared by render-state invalidation; retrying RT");
+            }
+        });
     }
 
-    /** Records a legacy reset cause without changing the legacy recipient or its timing. */
+    /** Collects a legacy reset cause in the single AER-013 coordinator. */
     public void recordTemporalReset(TemporalResetReason reason) {
-        pendingTemporalResetReasons = TemporalResetReason.add(pendingTemporalResetReasons, reason);
+        temporalState.collect(reason);
         CausticaMod.LOGGER.debug("RT temporal reset reason: {}", reason);
     }
 
-    /** AER-013 consumes these pending reasons when it wires the runtime coordinator. */
-    public int pendingTemporalResetReasons() {
-        return pendingTemporalResetReasons;
+    /**
+     * Delivers the collected request to the legacy recipient at the original call-site. The
+     * coordinator clears its reason bitset only after the recipient returns successfully.
+     */
+    private void broadcastTemporalReset(Runnable legacyDelivery) {
+        if (frameContext == null) {
+            // Resource invalidation can happen before the first captured frame. Preserve the
+            // legacy timing in that case and acknowledge only after the direct delivery succeeds.
+            legacyDelivery.run();
+            temporalState.acknowledgeLegacyDelivery();
+            return;
+        }
+        temporalState.snapshot(frameContext);
+        temporalState.broadcast(request -> legacyDelivery.run());
     }
 
     // Previous captured camera position, for the FSR discontinuity reset (teleport / respawn /
@@ -1133,7 +1146,7 @@ public final class RtComposite {
         reloadRebindRequested = true;
         materialBindingsReady = false;
         setCelestialUvAtlas(0L);
-        RtEntities.INSTANCE.onResourceReload();
+        broadcastTemporalReset(RtEntities.INSTANCE::onResourceReload);
         RtContext ctx = RtContext.currentOrNull();
         if (ctx != null) {
             ctx.waitIdle();
@@ -1420,9 +1433,6 @@ public final class RtComposite {
                 // was just destroyed, so the descriptor cache must be dropped rather than trusted.
                 svgfDenoiser.invalidateBindings();
             }
-            // Fresh buffers hold nothing the reprojection may read.
-            svgfHasHistory = false;
-            svgfWriteToPing = true;
         }
         // Denoiser outputs + the decoded/summed image the upscale stage consumes exist only while
         // NRD actually runs; the combine pipeline is created lazily with them.
@@ -1442,15 +1452,24 @@ public final class RtComposite {
             // and the raw trace supplies the sky, which REBLUR does not denoise.
             nrdCombinePipeline.setImages(nrdDiffOut.view, nrdSpecOut.view, nrdCombined.view,
                     output.view, gAlbedo.view, gViewZ.view, gSpecAlbedo.view, gNormal.view);
-            // NRD's own temporal history cannot survive a resolution change either.
-            RtNrdDenoiser.INSTANCE.resetHistory();
         }
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
         exposure.ensureResources(ctx);
 
-        mvHasPrev = false; // recreated images -> first MV frame is zero
-        waterWaveTimeValid = false;
+        broadcastTemporalReset(() -> {
+            if (svgfEnabled) {
+                // Fresh buffers hold nothing the reprojection may read.
+                svgfHasHistory = false;
+                svgfWriteToPing = true;
+            }
+            if (nrdEnabled) {
+                // NRD's own temporal history cannot survive a resolution change either.
+                RtNrdDenoiser.INSTANCE.resetHistory();
+            }
+            mvHasPrev = false; // recreated images -> first MV frame is zero
+            waterWaveTimeValid = false;
+        });
         if (worldPipeline != null) {
             worldPipeline.setStorageImage(output.view);
             bindGuideImages();
@@ -1557,6 +1576,7 @@ public final class RtComposite {
                     new FrameContext.Camera(previousFrameCamX, previousFrameCamY, previousFrameCamZ, mvPushMatrix),
                     new FrameContext.Jitter(jitterX, jitterY), Minecraft.getInstance().level,
                     dimensionId(Minecraft.getInstance().level), FrameContext.LEGACY_SCENE_GENERATION);
+            temporalState.snapshot(frameContext);
             // FG reads the frame's jitter at present time (PREPARE wants the offset the rays used).
             fgJitterX = jitterX;
             fgJitterY = jitterY;
@@ -2009,7 +2029,7 @@ public final class RtComposite {
                         double fdz = camZ - prevFsrCamZ;
                         if (fdx * fdx + fdy * fdy + fdz * fdz > 32.0 * 32.0) {
                             recordTemporalReset(TemporalResetReason.TELEPORT);
-                            RtFsrUpscaler.INSTANCE.requestReset();
+                            broadcastTemporalReset(RtFsrUpscaler.INSTANCE::requestReset);
                         }
                     }
                     prevFsrCamX = camX;
@@ -2041,7 +2061,7 @@ public final class RtComposite {
                         double xdz = camZ - prevXessCamZ;
                         if (xdx * xdx + xdy * xdy + xdz * xdz > 32.0 * 32.0) {
                             recordTemporalReset(TemporalResetReason.TELEPORT);
-                            RtXessUpscaler.INSTANCE.requestReset();
+                            broadcastTemporalReset(RtXessUpscaler.INSTANCE::requestReset);
                         }
                     }
                     prevXessCamX = camX;

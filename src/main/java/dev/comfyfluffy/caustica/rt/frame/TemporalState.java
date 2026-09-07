@@ -33,6 +33,11 @@ public final class TemporalState {
         return pendingReasons;
     }
 
+    /** A legacy delivery performed without a frame context was completed directly. */
+    public void acknowledgeLegacyDelivery() {
+        pendingReasons = TemporalResetReason.none();
+    }
+
     /** Broadcasts the current request and clears it only after the consumer returns. */
     public void broadcast(Consumer<ResetRequest> consumer) {
         Objects.requireNonNull(consumer, "consumer");

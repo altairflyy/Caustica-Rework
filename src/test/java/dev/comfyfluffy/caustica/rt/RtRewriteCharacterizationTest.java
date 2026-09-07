@@ -53,10 +53,16 @@ final class RtRewriteCharacterizationTest {
                 "resource recreation must invalidate motion-vector history");
         assertTrue(source.contains("RtNrdDenoiser.INSTANCE.resetHistory();"),
                 "resolution-dependent NRD history must be reset on recreation");
-        assertTrue(source.contains("RtFsrUpscaler.INSTANCE.requestReset();"),
-                "FSR must reset on the legacy camera-discontinuity path");
-        assertTrue(source.contains("RtXessUpscaler.INSTANCE.requestReset();"),
-                "XeSS must reset on the legacy camera-discontinuity path");
+        assertTrue(source.contains("broadcastTemporalReset(RtFsrUpscaler.INSTANCE::requestReset)"),
+                "FSR must reset through the coordinator on the legacy camera-discontinuity path");
+        assertTrue(source.contains("broadcastTemporalReset(RtXessUpscaler.INSTANCE::requestReset)"),
+                "XeSS must reset through the coordinator on the legacy camera-discontinuity path");
+        assertTrue(source.contains("private final TemporalState temporalState = new TemporalState();"),
+                "the runtime must have one TemporalState coordinator");
+        assertTrue(source.contains("temporalState.snapshot(frameContext);"),
+                "the coordinator must receive the runtime FrameContext");
+        assertTrue(source.contains("temporalState.broadcast(request -> legacyDelivery.run())"),
+                "legacy reset delivery must pass through TemporalState.broadcast");
     }
 
     @Test
