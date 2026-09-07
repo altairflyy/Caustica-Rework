@@ -12,7 +12,7 @@ import java.util.Locale;
 import dev.comfyfluffy.caustica.client.gui.RtSharcOptionsScreen;
 import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.compat.VoxyCompat;
-import dev.comfyfluffy.caustica.rt.RtSharc;
+import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.terrain.RtDistantHorizonsTerrain;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import net.minecraft.client.Minecraft;
@@ -1638,7 +1638,7 @@ public final class RtVideoOptions {
     /** Drops every cached radiance entry. The shader feature bit simply reads a cleared buffer next frame. */
     public static Button sharcResetButton() {
         Button button = Button.builder(Component.translatable("caustica.options.sharc.reset"), clicked -> {
-            RtSharc.INSTANCE.requestClear();
+            SharcRadianceCache.INSTANCE.requestClear();
             clicked.setMessage(Component.translatable("caustica.options.sharc.reset.queued"));
         }).width(310).build();
         button.setTooltip(Tooltip.create(

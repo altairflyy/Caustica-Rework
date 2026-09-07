@@ -34,7 +34,7 @@ tasks:
   AER-014:
     state: DONE
   AER-015:
-    state: READY
+    state: DONE
   AER-016:
     state: READY
 

@@ -83,6 +83,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
+import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
 import dev.comfyfluffy.caustica.rt.frame.TemporalState;
@@ -269,7 +270,7 @@ public final class RtComposite {
         if (CausticaConfig.Rt.Lights.RESTIR_SAMPLING.value()) {
             flags |= FEATURE_RESTIR;
         }
-        if (CausticaConfig.Rt.Sharc.ENABLED.value() && RtSharc.INSTANCE.entryCount() > 0) {
+        if (CausticaConfig.Rt.Sharc.ENABLED.value() && SharcRadianceCache.INSTANCE.entryCount() > 0) {
             flags |= FEATURE_SHARC;
         }
         if (CausticaConfig.Rt.Composite.CLOUDS.value()) {
@@ -304,11 +305,11 @@ public final class RtComposite {
     /**
      * Keep the SHaRC cache buffer matched to the current config, and honour an explicit "reset" action
      * from the options UI. Called every frame before the trace so a live toggle takes effect on the
-     * next frame; the shader feature flag is keyed on {@link RtSharc#entryCount()} being non-zero so an
+     * next frame; the shader feature flag is keyed on {@link SharcRadianceCache#entryCount()} being non-zero so an
      * enabled toggle with no buffer (or a failed allocation) degrades to the normal tracer.
      */
     private void syncSharcResources(RtContext ctx) {
-        boolean active = RtSharc.INSTANCE.enabled();
+        boolean active = sharc.enabled();
         if (active) {
             // Scene-change detection (dimension travel or world reload): same world coordinates,
             // different scene. Clear the cache rather than letting staleness evict it over
@@ -316,59 +317,47 @@ public final class RtComposite {
             ClientLevel level = Minecraft.getInstance().level;
             if (level != null) {
                 int dimension = dimensionId(level);
-                if (sharcPrevLevel != null && (sharcPrevLevel != level || sharcPrevDimension != dimension)) {
+                if (sharc.sceneChanged(level, dimension)) {
                     CausticaMod.LOGGER.info("[SHaRC] scene changed; clearing radiance cache");
-                    RtSharc.INSTANCE.requestClear();
+                    sharc.requestClear();
                 }
-                sharcPrevLevel = level;
-                sharcPrevDimension = dimension;
             }
-            RtSharc.INSTANCE.ensure(ctx);
-            if (RtSharc.INSTANCE.clearRequested()) {
+            sharc.ensure(ctx);
+            if (sharc.clearRequested()) {
                 CausticaMod.LOGGER.info("[SHaRC] cache reset requested; clearing via vkCmdFillBuffer");
                 // A reset is a rare menu action; idle the device briefly so the fill cannot race a
                 // trace that still reads the old contents.
                 ctx.waitIdle();
-                RtSharc.INSTANCE.clearNow(ctx);
+                sharc.clearNow(ctx);
             }
-            if (!sharcDebugWasActive) {
-                sharcDebugWasActive = true;
-                CausticaMod.LOGGER.info("[SHaRC] enabled: {}", sharcDebugDescription());
+            if (!sharc.debugWasActive()) {
+                sharc.setDebugActive(true);
+                CausticaMod.LOGGER.info("[SHaRC] enabled: {}", sharc.debugDescription());
             }
             // With sharc.debug on, also report the active parameters periodically so a live tuning
             // change can be tracked without having to read the toml file.
-            if (CausticaConfig.Rt.Sharc.DEBUG.value() && frameCounter - sharcDebugLastLogFrame >= 300) {
-                sharcDebugLastLogFrame = frameCounter;
+            if (CausticaConfig.Rt.Sharc.DEBUG.value() && frameCounter - sharc.lastDebugFrame() >= 300) {
+                sharc.setLastDebugFrame(frameCounter);
                 CausticaMod.LOGGER.info("[SHaRC] active (frame {}): {}", frameCounter,
-                        sharcDebugDescription());
+                        sharc.debugDescription());
             }
         } else {
-            if (sharcDebugWasActive) {
-                sharcDebugWasActive = false;
+            if (sharc.debugWasActive()) {
                 CausticaMod.LOGGER.info("[SHaRC] disabled");
             }
             // Re-arm scene tracking: the cache is released on disable, so the next enable starts
             // from an empty buffer and must not log a spurious "scene changed" clear.
-            sharcPrevLevel = null;
-            RtSharc.INSTANCE.releaseIfDisabled(ctx);
+            sharc.resetTracking();
+            sharc.releaseIfDisabled(ctx);
         }
     }
 
     private static String sharcDebugDescription() {
-        return "cell=" + CausticaConfig.Rt.Sharc.CELL_SIZE.value()
-                + " blocks, entries=" + RtSharc.INSTANCE.entryCount()
-                + ", coverage=" + CausticaConfig.Rt.Sharc.UPDATE_COVERAGE.value()
-                + ", blend=" + CausticaConfig.Rt.Sharc.TEMPORAL_BLEND.value()
-                + ", startBounce=" + CausticaConfig.Rt.Sharc.START_BOUNCE.value()
-                + ", strength=" + CausticaConfig.Rt.Sharc.STRENGTH.value()
-                + ", lifetime=" + CausticaConfig.Rt.Sharc.FRAME_LIFETIME.value()
-                + ", normal=" + CausticaConfig.Rt.Sharc.NORMAL_THRESHOLD.value()
-                + ", minSamples=" + CausticaConfig.Rt.Sharc.STABLE_FRAMES.value()
-                + ", cacheAddr=0x" + Long.toHexString(RtSharc.INSTANCE.address());
+        return SharcRadianceCache.INSTANCE.debugDescription();
     }
 
     private static long sharcCacheAddress() {
-        return RtSharc.INSTANCE.address();
+        return SharcRadianceCache.INSTANCE.cacheAddress();
     }
 
     /**
@@ -377,25 +366,17 @@ public final class RtComposite {
      * distance — a query position is always inside its own cell, so the limit could never fire).
      */
     private static Float4 sharcParams() {
-        return new Float4(
-                CausticaConfig.Rt.Sharc.CELL_SIZE.value(),
-                CausticaConfig.Rt.Sharc.STRENGTH.value(),
-                CausticaConfig.Rt.Sharc.TEMPORAL_BLEND.value(),
-                CausticaConfig.Rt.Sharc.MAX_DISTANCE.value());
+        return SharcRadianceCache.INSTANCE.params();
     }
 
     /** WorldPush.sharcParams2: x start bounce, y update coverage, z frame lifetime, w normal threshold. */
     private static Float4 sharcParams2() {
-        return new Float4(
-                CausticaConfig.Rt.Sharc.START_BOUNCE.value(),
-                CausticaConfig.Rt.Sharc.UPDATE_COVERAGE.value(),
-                CausticaConfig.Rt.Sharc.FRAME_LIFETIME.value(),
-                CausticaConfig.Rt.Sharc.NORMAL_THRESHOLD.value());
+        return SharcRadianceCache.INSTANCE.params2();
     }
 
     /** WorldPush.sharcParams3: x = minimum sample count before an entry may be queried, y/z/w reserved. */
     private static Float4 sharcParams3() {
-        return new Float4(CausticaConfig.Rt.Sharc.STABLE_FRAMES.value(), 0.0f, 0.0f, 0.0f);
+        return SharcRadianceCache.INSTANCE.params3();
     }
 
     /**
@@ -406,7 +387,7 @@ public final class RtComposite {
      * camera-relative) would smear entries across cells every frame, TAA jitter included.
      */
     private static Int4 sharcGridOrigin(RtTerrain terrain) {
-        return new Int4(terrain.blockX, terrain.blockY, terrain.blockZ, RtSharc.INSTANCE.entryCount());
+        return SharcRadianceCache.INSTANCE.gridOrigin(terrain);
     }
 
     // Finite sun/moon angular sizes let NEE shadow rays sample the light disk (soft, contact-hardening
@@ -689,16 +670,7 @@ public final class RtComposite {
     private final RtExposure exposure = new RtExposure();
     // Experimental SHaRC (Spatially Hashed Radiance Cache). Shader-only — the host only owns the
     // persistent cache buffer and publishes its device address (no native lib, no extra binding).
-    private final RtSharc sharc = RtSharc.INSTANCE;
-    // Debug-state tracking for the SHaRC console logging (enable/disable + periodic summary).
-    private boolean sharcDebugWasActive;
-    private long sharcDebugLastLogFrame;
-    // Scene identity the SHaRC cache was last warmed in. The cache is keyed by world coordinates,
-    // which repeat across dimensions and world reloads, so a scene change must drop it (NVIDIA's
-    // integration checklist: clear cache resources on scene reload) instead of leaking up to
-    // FRAME_LIFETIME frames of the old scene's light into the new one.
-    private ClientLevel sharcPrevLevel;
-    private int sharcPrevDimension;
+    private final SharcRadianceCache sharc = SharcRadianceCache.INSTANCE;
 
     // Trace + guide buffers run at render res; composite (display-mapping) runs at display res.
     private int displayW = -1;
