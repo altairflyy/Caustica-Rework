@@ -51,13 +51,18 @@ GpuCapabilitiesTest
 0 failed
 Full validation:
 131 tests
-9 frozen baseline failures
+9 failures were reported by the then-current baseline harness; five were
+later identified as CRLF-dependent characterization artifacts. The canonical
+baseline is now the exact four genuine failures.
 0 new failures
 RtRewriteCharacterizationTest: 7/7 PASS
-Validation scripts:
+Validation scripts (at task time):
 validate-fast.ps1: PASS
 validate-build.ps1: PASS
 Gradle build: PASS
+
+Baseline erratum: no production or shader behavior changed. The canonical
+four-failure policy is documented in `docs/rewrite/BASELINE.md`.
 Invariants
 - GPU-001: unchanged
 - GPU-002: unchanged

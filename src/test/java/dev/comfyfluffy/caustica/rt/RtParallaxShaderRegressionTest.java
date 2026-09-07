@@ -145,6 +145,7 @@ final class RtParallaxShaderRegressionTest {
     }
 
     private static String slice(String source, String startNeedle, String endNeedle) {
+        source = source.replace("\r\n", "\n").replace('\r', '\n');
         int start = source.indexOf(startNeedle);
         assertTrue(start >= 0, "missing snippet start: " + startNeedle);
         int end = source.indexOf(endNeedle, start);

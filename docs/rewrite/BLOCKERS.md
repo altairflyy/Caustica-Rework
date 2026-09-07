@@ -2,7 +2,7 @@
 
 ## BLOCKER-001 — GATE-0 baseline characterization
 
-**Status:** OPEN
+**Status:** CLOSED
 
 **Blocks:**
 
@@ -35,7 +35,10 @@ The validated reference test suite completed with:
 9 failed
 ```
 
-Existing failures:
+Historical observation:
+
+The reference run reported 9 failures. Five were characterization-harness
+artifacts caused by `slice()` assuming LF on a Windows CRLF checkout:
 
 ### RtParallaxShaderRegressionTest
 
@@ -52,7 +55,17 @@ Existing failures:
 - `continuationOriginsStayOffTheRestPlaneMesh`
 - `animatedWaterIntersectsTheHeightFieldAlongTheViewRay`
 
-These failures existed before architectural refactoring.
+The five EOL-dependent failures are resolved as:
+`RESOLVED — characterization harness / EOL artifact`.
+
+The canonical baseline retains only these four genuine failures:
+
+- `sideWallsReplaceTheMappedNormalOnBothHitPaths`
+- `blockSpritesTileWhileEntityAtlasesStopAtTheirIsland`
+- `continuationOriginsStayOffTheRestPlaneMesh`
+- `animatedWaterIntersectsTheHeightFieldAlongTheViewRay`
+
+The harness correction changed no renderer or shader behavior.
 
 ## AER-004 characterization test
 
@@ -86,7 +99,7 @@ Any ReSTIR sampling or reservoir-quality fix must be handled separately.
 
 ## Required resolution
 
-Before `GATE-0` can become `PASS`:
+The following GATE-0 requirements were completed:
 
 1. run the full test suite including `RtRewriteCharacterizationTest`;
 2. confirm that the new characterization tests pass;
@@ -96,7 +109,7 @@ Before `GATE-0` can become `PASS`:
    - a stale regression test;
    - an accepted baseline failure;
    - or a genuine defect requiring separate work;
-6. freeze the accepted baseline failure policy.
+6. freeze the accepted four-failure baseline policy.
 
 ## Restrictions
 
@@ -104,12 +117,13 @@ Until BLOCKER-001 is resolved:
 
 - do not begin AER-010;
 - do not change ReSTIR mathematics;
-- do not rewrite production shaders just to make the 9 existing tests pass;
+- do not rewrite production shaders just to make the 4 existing tests pass;
 - do not change the validated reference tag.
 
 ## Safe next action
 
-Run the complete Gradle test suite with the imported AER-004 characterization test.
+Run the complete Gradle test suite with the AER-004 characterization test when
+revalidating the baseline.
 
 Then compare the failure set against the validated baseline.
 ## Resolution
@@ -124,12 +138,13 @@ reference/validated-caustica-0.2.0
 Final GATE-0 validation:
 - git diff --check: PASS
 - RtRewriteCharacterizationTest: 7/7 PASS
-- full test suite: 130 tests, exact frozen 9-test baseline failure set
+- full test suite: 139 tests, exact frozen 4-test baseline failure set
 - new failures introduced by rewrite scaffolding: 0
 - shader compilation: PASS
 - Gradle build excluding already-characterized tests: PASS
 - validate-fast.ps1: PASS
 - validate-build.ps1: PASS
-The 9 shader regression failures are accepted only as the frozen pre-refactor baseline. Any different failure set is a validation failure.
+The four genuine shader regression failures are accepted only as the frozen
+pre-refactor baseline. Any different failure set is a validation failure.
 The known ReSTIR temporal boiling/flickering issue remains outside the architectural rewrite and must not be changed as part of ownership migration tasks.
 GATE-0: PASS

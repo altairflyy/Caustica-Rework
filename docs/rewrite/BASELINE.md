@@ -95,7 +95,17 @@ Result:
 9 failed
 ```
 
-The existing failures are:
+This is the historical observation. Five of the nine failures were not
+renderer failures: the characterization helper `slice()` searched for LF
+terminators while the Windows reference checkout used CRLF. After making the
+helper newline-independent, the canonical baseline is:
+
+```text
+139 tests
+4 genuine baseline failures
+```
+
+The five EOL-dependent observations were:
 
 ### RtParallaxShaderRegressionTest
 
@@ -112,9 +122,25 @@ The existing failures are:
 1. `continuationOriginsStayOffTheRestPlaneMesh`
 2. `animatedWaterIntersectsTheHeightFieldAlongTheViewRay`
 
-These nine failures were observed before architectural refactoring.
+The remaining four genuine failures are:
 
-They must be characterized before `GATE-0` is declared PASS.
+### RtParallaxShaderRegressionTest
+
+1. `sideWallsReplaceTheMappedNormalOnBothHitPaths`
+2. `blockSpritesTileWhileEntityAtlasesStopAtTheirIsland`
+
+### RtWaterWaveShaderRegressionTest
+
+1. `continuationOriginsStayOffTheRestPlaneMesh`
+2. `animatedWaterIntersectsTheHeightFieldAlongTheViewRay`
+
+The canonical baseline from the characterization-harness correction is the
+exact four-test set above. The correction changed only the test helper's EOL
+handling; no production Java, shader, or rendering behavior was modified.
+
+The historical nine failures were observed before architectural refactoring
+and have now been characterized. The canonical four-failure set above is the
+baseline used by the validation scripts.
 
 Production shaders must not be changed merely to make these tests green until it is determined whether:
 
@@ -153,16 +179,17 @@ Reference commit:
 
 ## GATE-0 status
 
-`GATE-0`: BLOCKED
+`GATE-0`: PASS
 
 Reason:
 
-AER-004 characterization validation still needs to be completed.
+AER-004 characterization validation and baseline freezing are complete.
 
-The nine existing shader regression failures must also be characterized and either:
+The four remaining shader regression failures must also be characterized and either:
 
 - formally accepted as the frozen baseline failure set;
 - corrected at the test level if the tests are stale;
 - or handled separately if they reveal genuine defects.
 
-No architectural refactoring task such as AER-010 should begin until GATE-0 is resolved.
+The architectural refactoring tasks may proceed subject to the canonical
+four-failure baseline and the invariants in `INVARIANTS.md`.

@@ -3,11 +3,6 @@ $ErrorActionPreference = "Stop"
 $ExpectedFailures = @(
     "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::sideWallsReplaceTheMappedNormalOnBothHitPaths",
     "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::blockSpritesTileWhileEntityAtlasesStopAtTheirIsland",
-    "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::crossingBudgetFromJavaStaysInsideTheShaderBounds",
-    "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::columnHeightsAreTexelExactAndStayInsideTheSprite",
-    "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::everyHeightSampleIsBoundedByTheCrossingBudget",
-    "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::reliefDepthStillCollapsesWhenPomIsDisabled",
-    "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::heightFieldIsWalkedAsAColumnGridNotAsDepthLayers",
     "dev.comfyfluffy.caustica.rt.RtWaterWaveShaderRegressionTest::continuationOriginsStayOffTheRestPlaneMesh",
     "dev.comfyfluffy.caustica.rt.RtWaterWaveShaderRegressionTest::animatedWaterIntersectsTheHeightFieldAlongTheViewRay"
 )
@@ -179,11 +174,11 @@ function Invoke-BaselineAwareTests {
         $unexpected.Count -gt 0 -or
         $missing.Count -gt 0
     ) {
-        Fail-Validation "test failure set differs from the frozen 9-test baseline"
+        Fail-Validation "test failure set differs from the frozen 4-test baseline"
     }
 
     Write-Host "[validate-build] Characterization: 7/7 PASS"
-    Write-Host "[validate-build] Baseline failures: exact 9/9 match"
+    Write-Host "[validate-build] Baseline failures: exact 4/4 match (BASELINE-EQUIVALENT)"
     Write-Host "[validate-build] Gradle test exit code $gradleExit accepted because only frozen baseline failures remain"
 }
 

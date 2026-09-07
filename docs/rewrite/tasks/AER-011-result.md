@@ -26,7 +26,9 @@ Validation:
 
 - `FrameContextTest` PASS.
 - V0 PASS.
-- V1 PASS: exact frozen baseline, 9/9 accepted shader failures; characterization 7/7 PASS.
+- V1 PASS at task time against the former 9-observation baseline; subsequent
+  EOL-independent characterization corrected the canonical baseline to 4
+  genuine failures. Characterization 7/7 PASS.
 - V2 PASS: Gradle build successful (`:check` and `:build`).
 
 Behaviour change: none. Shader math change: none.
