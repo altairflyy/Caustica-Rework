@@ -5,4 +5,4 @@ Allocation, clear, device-address selection, parity advance, and destruction
 remain semantically identical; shader sources and reservoir mathematics are
 unchanged. No new synchronization primitive was introduced.
 
-Validation: targeted `RestirReservoirMathTest` pending.
+Validation: targeted `RestirReservoirMathTest` PASS.
