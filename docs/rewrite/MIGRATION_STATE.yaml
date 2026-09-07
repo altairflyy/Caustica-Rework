@@ -26,17 +26,25 @@ tasks:
   AER-010:
     state: DONE
   AER-011:
-    state: DONE
+    state: READY
   AER-012:
-    state: DONE
+    state: BLOCKED
+    blocked_by:
+      - AER-011
   AER-013:
-    state: DONE
+    state: BLOCKED
+    blocked_by:
+      - AER-012
   AER-014:
     state: DONE
   AER-015:
-    state: DONE
+    state: BLOCKED
+    blocked_by:
+      - AER-013
   AER-016:
-    state: DONE
+    state: BLOCKED
+    blocked_by:
+      - AER-013
 
   AER-020:
     state: PENDING
@@ -146,7 +154,7 @@ tasks:
 
 gates:
   GATE-0: PASS
-  GATE-1: PASS
+  GATE-1: PENDING
   GATE-2: PENDING
   GATE-3: PENDING
   GATE-4: PENDING
