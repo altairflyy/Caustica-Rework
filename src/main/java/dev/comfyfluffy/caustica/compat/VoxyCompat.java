@@ -1,6 +1,7 @@
 package dev.comfyfluffy.caustica.compat;
 
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.rt.lod.LodMesh;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 
@@ -18,7 +19,7 @@ import java.util.List;
 public final class VoxyCompat {
     private static final boolean LOADED = FabricLoader.getInstance().isModLoaded("voxy");
     private static final Api API = LOADED ? Api.create() : null;
-    private static volatile List<DistantHorizonsCompat.LodMesh> snapshot = List.of();
+    private static volatile List<LodMesh> snapshot = List.of();
     private static volatile long revision;
     private static volatile long observedSourceRevision = Long.MIN_VALUE;
     private static volatile int renderDistanceChunks;
@@ -119,11 +120,11 @@ public final class VoxyCompat {
             renderDistanceChunks = ((Number) api.renderDistanceChunks.invoke(null)).intValue();
             if (sourceRevision == observedSourceRevision) return;
             List<?> meshes = value instanceof List<?> list ? list : List.of();
-            ArrayList<DistantHorizonsCompat.LodMesh> converted = new ArrayList<>(meshes.size());
+            ArrayList<LodMesh> converted = new ArrayList<>(meshes.size());
             for (Object mesh : meshes) {
                 if (mesh == null) continue;
                 Access access = api.access(mesh.getClass());
-                converted.add(new DistantHorizonsCompat.LodMesh(
+                converted.add(new LodMesh(
                         ((Number) access.key.invoke(mesh)).longValue(),
                         ((Number) access.version.invoke(mesh)).longValue(),
                         ((Number) access.originX.invoke(mesh)).intValue(),
@@ -151,7 +152,7 @@ public final class VoxyCompat {
         }
     }
 
-    public static List<DistantHorizonsCompat.LodMesh> meshes() {
+    public static List<LodMesh> meshes() {
         return snapshot;
     }
 

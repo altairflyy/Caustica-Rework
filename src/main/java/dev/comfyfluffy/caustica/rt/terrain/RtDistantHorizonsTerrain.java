@@ -6,6 +6,7 @@ import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
+import dev.comfyfluffy.caustica.rt.lod.LodMesh;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.material.RtMaterials;
@@ -303,7 +304,7 @@ public final class RtDistantHorizonsTerrain {
                                                 long taskEpoch, Proxy base,
                                                 DistantHorizonsCompat.LodQuality quality) {
         if (taskEpoch != epoch) return List.of();
-        ArrayList<DistantHorizonsCompat.LodMesh> snapshot =
+        ArrayList<LodMesh> snapshot =
                 new ArrayList<>(DistantHorizonsCompat.lodMeshesSnapshot());
         if (snapshot.isEmpty()) return List.of();
         snapshot = removeFullyCoveredCoarseMeshes(snapshot);
@@ -334,7 +335,7 @@ public final class RtDistantHorizonsTerrain {
         int reusedMeshes = 0;
         int reusedBatches = 0;
         int rebuiltBatches = 0;
-        for (DistantHorizonsCompat.LodMesh mesh : snapshot) {
+        for (LodMesh mesh : snapshot) {
             if (taskEpoch != epoch) return List.of();
             int cx = mesh.originX() + mesh.width() / 2;
             int cz = mesh.originZ() + mesh.width() / 2;
@@ -371,7 +372,7 @@ public final class RtDistantHorizonsTerrain {
      * and {@link #packDhBatch} supports mixed material buckets, so one bounded BLAS is equivalent.
      */
     private static int appendPlannedBuilds(List<PlannedBatch> plan,
-                                           DistantHorizonsCompat.LodMesh mesh,
+                                           LodMesh mesh,
                                            List<DhSlice> slices) {
         if (slices.isEmpty()) return 0;
         ArrayList<DhSlice> group = new ArrayList<>(2);
@@ -401,7 +402,7 @@ public final class RtDistantHorizonsTerrain {
         return now < qualitySettleUntilNanos ? QUALITY_REFRESH_NANOS : REFRESH_NANOS;
     }
 
-    private static int meshDistance(DistantHorizonsCompat.LodMesh mesh, int originX, int originZ) {
+    private static int meshDistance(LodMesh mesh, int originX, int originZ) {
         int cx = mesh.originX() + mesh.width() / 2;
         int cz = mesh.originZ() + mesh.width() / 2;
         return Math.max(Math.abs(cx - originX), Math.abs(cz - originZ));
@@ -412,18 +413,18 @@ public final class RtDistantHorizonsTerrain {
      * Keep the parent only until the finer active sections cover its complete square; otherwise both meshes
      * enter the RT proxy and the coarse surface masks the better LOD in camera, shadow, and reflection rays.
      */
-    private static ArrayList<DistantHorizonsCompat.LodMesh> removeFullyCoveredCoarseMeshes(
-            List<DistantHorizonsCompat.LodMesh> meshes) {
-        ArrayList<DistantHorizonsCompat.LodMesh> ordered = new ArrayList<>(meshes);
+    private static ArrayList<LodMesh> removeFullyCoveredCoarseMeshes(
+            List<LodMesh> meshes) {
+        ArrayList<LodMesh> ordered = new ArrayList<>(meshes);
         ordered.sort((a, b) -> {
             int byDetail = Integer.compare(a.dataPointWidth(), b.dataPointWidth());
             if (byDetail != 0) return byDetail;
             int byWidth = Integer.compare(a.width(), b.width());
             return byWidth != 0 ? byWidth : Long.compareUnsigned(a.key(), b.key());
         });
-        ArrayList<DistantHorizonsCompat.LodMesh> selected = new ArrayList<>(ordered.size());
+        ArrayList<LodMesh> selected = new ArrayList<>(ordered.size());
         ArrayList<LodRect> selectedRects = new ArrayList<>(ordered.size());
-        for (DistantHorizonsCompat.LodMesh mesh : ordered) {
+        for (LodMesh mesh : ordered) {
             LodRect rect = new LodRect(mesh.key(), mesh.originX(), mesh.originZ(), mesh.width(),
                     mesh.dataPointWidth());
             if (!fullyCoveredBy(rect, selectedRects)) {
@@ -503,7 +504,7 @@ public final class RtDistantHorizonsTerrain {
         return x ^ (x >>> 31);
     }
 
-    private static void appendDhSlices(DistantHorizonsCompat.LodMesh mesh, byte[] bytes,
+    private static void appendDhSlices(LodMesh mesh, byte[] bytes,
                                        boolean transparentPass, List<DhSlice> out) {
         int maxLocal = mesh.width() + 1;
         int recordsPerSlice = MAX_BUILD_QUADS;
@@ -610,14 +611,14 @@ public final class RtDistantHorizonsTerrain {
     }
 
     private static void decodeDhBuffer(byte[] bytes, boolean transparentPass,
-                                       DistantHorizonsCompat.LodMesh mesh,
+                                       LodMesh mesh,
                                        int originX, int originZ, PackedMeshBuilder packed,
                                        DhMaterialPalette palette) {
         decodeDhBuffer(bytes, transparentPass, mesh, originX, originZ, packed, palette, 0, bytes.length);
     }
 
     private static void decodeDhBuffer(byte[] bytes, boolean transparentPass,
-                                       DistantHorizonsCompat.LodMesh mesh,
+                                       LodMesh mesh,
                                        int originX, int originZ, PackedMeshBuilder packed,
                                        DhMaterialPalette palette, int start, int end) {
         if (start >= end) return;
@@ -1281,7 +1282,7 @@ public final class RtDistantHorizonsTerrain {
                                      int emissiveId, int emissiveGlassId) {
     }
 
-    private record DhSlice(DistantHorizonsCompat.LodMesh mesh, byte[] bytes, boolean transparentPass,
+    private record DhSlice(LodMesh mesh, byte[] bytes, boolean transparentPass,
                            int start, int end, QuadCounts counts) {
     }
 

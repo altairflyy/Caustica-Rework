@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import dev.comfyfluffy.caustica.rt.lod.LodMesh;
 
 /** Lightweight, API-independent Distant Horizons hybrid-rendering gate. */
 public final class DistantHorizonsCompat {
@@ -39,10 +40,6 @@ public final class DistantHorizonsCompat {
      * per quad; dropping an incomplete tail preserves the old per-buffer decoder semantics while avoiding
      * one byte[] and one List node for every source VBO.
      */
-    public record LodMesh(long key, long version, int originX, int originY, int originZ, int width,
-                          int dataPointWidth, byte[] opaque, byte[] transparent) {
-    }
-
     /** DH quality values relevant to RT LOD selection. */
     public record LodQuality(long signature, int maxDataPointWidth, int horizontalQualityRank,
                              String maxHorizontalResolution, String horizontalQuality) {
@@ -66,11 +63,11 @@ public final class DistantHorizonsCompat {
             // DH can re-submit one or both passes unchanged. Compare source buffers directly against the
             // retained flattened bytes before allocating another multi-megabyte array, and reuse an unchanged
             // pass when only its counterpart was rebuilt.
-            boolean sameOpaque = previous != null && quadBuffersEqual(opaque, previous.opaque);
-            boolean sameTransparent = previous != null && quadBuffersEqual(transparent, previous.transparent);
+            boolean sameOpaque = previous != null && quadBuffersEqual(opaque, previous.opaque());
+            boolean sameTransparent = previous != null && quadBuffersEqual(transparent, previous.transparent());
             if (sameOpaque && sameTransparent) return;
-            byte[] opaqueCopy = sameOpaque ? previous.opaque : copyQuadBuffers(opaque);
-            byte[] transparentCopy = sameTransparent ? previous.transparent : copyQuadBuffers(transparent);
+            byte[] opaqueCopy = sameOpaque ? previous.opaque() : copyQuadBuffers(opaque);
+            byte[] transparentCopy = sameTransparent ? previous.transparent() : copyQuadBuffers(transparent);
 
             int originX;
             int originY;
@@ -79,10 +76,10 @@ public final class DistantHorizonsCompat {
             if (previous != null) {
                 // DhSectionPos metadata is immutable for a key. Reusing it avoids four reflective calls on
                 // every VBO refresh; world changes clear this cache before the next capture.
-                originX = previous.originX;
-                originY = previous.originY;
-                originZ = previous.originZ;
-                width = previous.width;
+                originX = previous.originX();
+                originY = previous.originY();
+                originZ = previous.originZ();
+                width = previous.width();
             } else {
                 int[] corner = Api.INSTANCE.minCorner(pos, level);
                 originX = corner[0];
