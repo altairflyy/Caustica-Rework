@@ -41,7 +41,7 @@ tasks:
   AER-020:
     state: DONE
   AER-021:
-    state: PENDING
+    state: DONE
   AER-022:
     state: PENDING
   AER-023:
