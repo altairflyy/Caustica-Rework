@@ -84,6 +84,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
+import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -743,6 +744,8 @@ public final class RtComposite {
     private double camZ;
     private boolean frameCaptured;
     private FrameContext frameContext;
+    // AER-012 staging: retain the explicit production reasons until TemporalState is wired in AER-013.
+    private int pendingTemporalResetReasons;
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -826,10 +829,22 @@ public final class RtComposite {
      * failure just latches again on the next frame (bounded log spam: one error line per invalidation).
      */
     public void resetFailureLatch() {
+        recordTemporalReset(TemporalResetReason.MANUAL);
         if (failed) {
             failed = false;
             CausticaMod.LOGGER.info("RT failure latch cleared by render-state invalidation; retrying RT");
         }
+    }
+
+    /** Records a legacy reset cause without changing the legacy recipient or its timing. */
+    public void recordTemporalReset(TemporalResetReason reason) {
+        pendingTemporalResetReasons = TemporalResetReason.add(pendingTemporalResetReasons, reason);
+        CausticaMod.LOGGER.debug("RT temporal reset reason: {}", reason);
+    }
+
+    /** AER-013 consumes these pending reasons when it wires the runtime coordinator. */
+    public int pendingTemporalResetReasons() {
+        return pendingTemporalResetReasons;
     }
 
     // Previous captured camera position, for the FSR discontinuity reset (teleport / respawn /
@@ -1113,6 +1128,8 @@ public final class RtComposite {
      * atlas is ready (gated in {@link #composite}). The new material epoch clears terrain before trace.
      */
     public void onResourceReloadStart() {
+        recordTemporalReset(TemporalResetReason.RESOURCE_RELOAD);
+        recordTemporalReset(TemporalResetReason.MATERIAL_GENERATION_CHANGE);
         reloadRebindRequested = true;
         materialBindingsReady = false;
         setCelestialUvAtlas(0L);
@@ -1296,6 +1313,7 @@ public final class RtComposite {
             syncRestirResources(ctx);
             return;
         }
+        recordTemporalReset(TemporalResetReason.RESOLUTION_CHANGE);
         ctx.waitIdle(); // resize is rare; no in-flight frame may use the old image/descriptor
         // Reaching here with RR off can mean the denoising filter was just turned off. Nothing calls
         // ensureFeature again in that state, so the RR feature (and its history buffers) would stay
@@ -1990,6 +2008,7 @@ public final class RtComposite {
                         double fdy = camY - prevFsrCamY;
                         double fdz = camZ - prevFsrCamZ;
                         if (fdx * fdx + fdy * fdy + fdz * fdz > 32.0 * 32.0) {
+                            recordTemporalReset(TemporalResetReason.TELEPORT);
                             RtFsrUpscaler.INSTANCE.requestReset();
                         }
                     }
@@ -2021,6 +2040,7 @@ public final class RtComposite {
                         double xdy = camY - prevXessCamY;
                         double xdz = camZ - prevXessCamZ;
                         if (xdx * xdx + xdy * xdy + xdz * xdz > 32.0 * 32.0) {
+                            recordTemporalReset(TemporalResetReason.TELEPORT);
                             RtXessUpscaler.INSTANCE.requestReset();
                         }
                     }

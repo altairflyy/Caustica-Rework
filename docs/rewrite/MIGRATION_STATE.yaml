@@ -28,13 +28,9 @@ tasks:
   AER-011:
     state: DONE
   AER-012:
-    state: BLOCKED
-    blocked_by:
-      - AER-011
+    state: DONE
   AER-013:
-    state: BLOCKED
-    blocked_by:
-      - AER-012
+    state: READY
   AER-014:
     state: DONE
   AER-015:
