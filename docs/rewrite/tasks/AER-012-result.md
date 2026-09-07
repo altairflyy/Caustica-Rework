@@ -32,8 +32,8 @@ reset events:
   recreation.
 - `resetHistory = true` in `RtDlssRr` after creation of a fresh feature.
 
-The bitset is staged in production for consumption by the AER-013 coordinator;
-this task does not redirect ownership or alter legacy reset timing.
+The reset bitset is now owned and consumed by the AER-013 coordinator; this
+task did not redirect legacy reset timing.
 
 ## Validation
 
