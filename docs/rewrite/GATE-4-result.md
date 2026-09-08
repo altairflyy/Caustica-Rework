@@ -54,6 +54,17 @@ was modified during this gate audit.
 - LOD provider smoke: NOT AVAILABLE in this profile; neither DH nor Voxy is
   installed, so `RtLodTerrain` followed its no-provider path.
 
+## Deferred DH/Voxy issue
+
+The user reports a known unresolved bug affecting the DH/Voxy runtime path.
+Its cause and corrective scope have not yet been investigated. Diagnosis and
+repair are intentionally deferred until the end of the architectural
+refactoring so they are not mixed into GPU-ownership tasks.
+
+This deferral is recorded as a known limitation; it does not convert the missing
+LOD provider smoke into PASS and does not authorize changes to provider logic,
+meshing, coverage, selection or AS lifetime in GATE-4.
+
 The installed Modrinth App exposes no working direct-profile launch argument,
 and the available automation surface cannot control native Modrinth/Minecraft
 windows. The user launched the current candidate manually; that run supplies the
@@ -63,6 +74,7 @@ partial evidence above but cannot prove paths that were not enabled or logged.
 
 `GATE-4 integration completeness: PASS (static/runtime wiring)`.
 
-`GATE-4 overall: BLOCKED` pending a validation-layer run, an active DH/Voxy LOD
-provider smoke and demonstrated entity/refit activity. `GATE-4` remains
-`PENDING`; `AER-050` remains `PENDING` and was not started.
+`GATE-4 overall: BLOCKED` pending a validation-layer run, demonstrated
+entity/refit activity and eventual resolution/qualification of the deferred
+DH/Voxy issue. `GATE-4` remains `PENDING`; `AER-050` remains `PENDING` and was
+not started.

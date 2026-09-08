@@ -172,6 +172,12 @@ save and clean shutdown without logged error/device-lost/lifetime-underflow
 evidence. The run did not request the Vulkan validation layer, did not include DH
 or Voxy, and did not demonstrate entity/refit activity in its log.
 
+The user reports a separate unresolved bug in the DH/Voxy runtime path. Root
+cause and fix are not yet characterized. Investigation is deliberately deferred
+until the end of the architectural refactoring; no speculative provider,
+meshing, selector or lifetime change is authorized as part of GATE-4 recovery.
+The missing LOD smoke remains an explicit acceptance gap rather than a PASS.
+
 The canonical GATE-4 acceptance additionally requires Vulkan validation without
 new errors and LOD/terrain/entity runtime smoke PASS. No repository smoke runner
 exists. The installed Modrinth App does not accept the tested direct-profile
@@ -183,11 +189,14 @@ Modrinth/Minecraft windows.
 Run the `prova` profile with `caustica-0.2.4.jar` and capture evidence for:
 
 1. rerun menu/world load with `VK_LAYER_KHRONOS_validation` actually requested;
-2. exercise movement/chunk streaming with a compatible DH or Voxy provider;
-3. exercise visible dynamic entities and refit activity;
-4. return to menu and reload the world;
-5. shut down with no new Vulkan validation, device-lost, lifetime-counter
+2. exercise visible dynamic entities and refit activity;
+3. return to menu and reload the world;
+4. shut down with no new Vulkan validation, device-lost, lifetime-counter
    underflow, early-destroy or unbounded-retirement errors.
+
+After the main architectural refactoring, separately diagnose and resolve the
+known DH/Voxy bug, then run movement/chunk-streaming smoke with a compatible
+active provider before claiming the LOD portion of GATE-4.
 
 After the evidence passes, update `GATE-4-result.md`, close this blocker, set
 `GATE-4: PASS` and `AER-050: READY`, and create a separate atomic gate-closure
