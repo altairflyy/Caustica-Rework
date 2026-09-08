@@ -87,8 +87,8 @@ import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.reconstruction.SvgfResources;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
-import dev.comfyfluffy.caustica.rt.frame.LegacyCompositePass;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
+import dev.comfyfluffy.caustica.rt.frame.PostPresentPass;
 import dev.comfyfluffy.caustica.rt.frame.PrepareFramePass;
 import dev.comfyfluffy.caustica.rt.frame.ReconstructionPass;
 import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
@@ -713,15 +713,16 @@ public final class RtComposite {
     private boolean frameCaptured;
     private FrameContext frameContext;
     private final TemporalState temporalState = new TemporalState();
-    private final FramePipeline framePipeline = new FramePipeline(
-            new PrepareFramePass(this::prepareFrame),
-            new LegacyCompositePass(this::executeLegacyComposite));
+    private final PrepareFramePass prepareFramePass = new PrepareFramePass(this::prepareFrame);
     private final PathTracePass pathTracePass = new PathTracePass(this::recordPathTrace);
     private final ReconstructionPass reconstructionPass = new ReconstructionPass(this::reconstructFrame);
     private final UpscalePass upscalePass = new UpscalePass(this::upscaleFrame);
+    private final PostPresentPass postPresentPass = new PostPresentPass(this::postPresentFrame);
+    private final FramePipeline framePipeline = new FramePipeline(
+            prepareFramePass, pathTracePass, reconstructionPass, upscalePass, postPresentPass);
+    private FramePipeline.Cursor pipelineCursor;
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
-    private GpuTexture pipelineNativeColor;
     private FrameInputs pipelineInputs;
     private VkCommandBuffer pipelineCommand;
     private MemoryStack pipelineStack;
@@ -729,6 +730,7 @@ public final class RtComposite {
     private ReconstructionInput pipelineReconstructionInput;
     private ReconstructionResult pipelineReconstructionResult;
     private UpscaleInput pipelineUpscaleInput;
+    private long pipelinePostPresentTarget;
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -980,14 +982,18 @@ public final class RtComposite {
             frameContext = createFrameContext(inputs);
             pipelineContext = ctx;
             pipelineActive = active;
-            pipelineNativeColor = nativeColor;
             pipelineInputs = inputs;
+            pipelineCursor = framePipeline.begin(frameContext);
             try {
-                framePipeline.execute(frameContext);
+                pipelineCursor.executeNext();
+                recordFrame(ctx, active, nativeColor, inputs);
+                if (!pipelineCursor.complete()) {
+                    throw new IllegalStateException("frame pipeline did not execute every pass");
+                }
             } finally {
+                pipelineCursor = null;
                 pipelineContext = null;
                 pipelineActive = null;
-                pipelineNativeColor = null;
                 pipelineInputs = null;
             }
             if (!loggedActive) {
@@ -1462,14 +1468,6 @@ public final class RtComposite {
         mvHasPrev = true;
     }
 
-    private void executeLegacyComposite(FrameContext frame) {
-        if (frame != frameContext || pipelineContext == null || pipelineActive == null
-                || pipelineNativeColor == null || pipelineInputs == null) {
-            throw new IllegalStateException("legacy composite pass has no active frame invocation");
-        }
-        recordFrame(pipelineContext, pipelineActive, pipelineNativeColor, pipelineInputs);
-    }
-
     private void prepareFrame(FrameContext frame) {
         if (frame != frameContext || pipelineInputs == null) {
             throw new IllegalStateException("prepare pass has no active frame invocation");
@@ -1683,6 +1681,49 @@ public final class RtComposite {
             }
         }
         VulkanCommandEncoder.memoryBarrier(cmd, stack); // rrOutput visible to exposure histogram
+    }
+
+    private void postPresentFrame(FrameContext frame) {
+        if (frame != frameContext || pipelineContext == null || pipelineCommand == null
+                || pipelineStack == null || pipelinePostPresentTarget == 0L) {
+            throw new IllegalStateException("post/present pass has no active frame invocation");
+        }
+        RtContext ctx = pipelineContext;
+        VkCommandBuffer cmd = pipelineCommand;
+        MemoryStack stack = pipelineStack;
+        long dstImage = pipelinePostPresentTarget;
+        // Auto-exposure meters rrOutput (the post-RR, denoised/converged image), not the raw
+        // pre-RR trace: RR has no notion of exposure (DLSS-RR Integration Guide §3.7 — ignore
+        // exposure/auto-exposure/sharpness entirely for RR), so this is purely our own metering
+        // choice, independent of RR's pipeline placement. Metering the noisy pre-RR buffer made
+        // the histogram's log-luminance average biased by Monte-Carlo noise (Jensen's inequality
+        // on the concave log()), so the computed exposure drifted with SPP; rrOutput is stable
+        // regardless of SPP, keeping exposure consistent.
+        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
+             RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
+            exposure.record(ctx, cmd, stack, rrOutput);
+        }
+        VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
+
+        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
+             RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
+            displayPipeline.dispatch(cmd, displayW, displayH, CausticaConfig.Rt.Hdr.enabled(),
+                    CausticaConfig.Rt.Hdr.paperWhiteNits(), CausticaConfig.Rt.Hdr.headroom(),
+                    CausticaConfig.Rt.Tonemapping.operatorIndex(),
+                    CausticaConfig.Rt.Tonemapping.EXPOSURE_EV.value(),
+                    CausticaConfig.Rt.Tonemapping.GAMMA.value(),
+                    CausticaConfig.Rt.Tonemapping.SATURATION.value(),
+                    CausticaConfig.Rt.Tonemapping.CONTRAST.value());
+        }
+        hdrWrittenThisFrame = CausticaConfig.Rt.Hdr.enabled();
+        VulkanCommandEncoder.memoryBarrier(cmd, stack);
+
+        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "copy composite to main target");
+             RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.copyOutput")) {
+            VK10.vkCmdCopyImage(cmd, displayImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
+                    dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
+        }
+        VulkanCommandEncoder.memoryBarrier(cmd, stack);
     }
 
     private FrameInputs prepareFrameInputs() {
@@ -2005,7 +2046,7 @@ public final class RtComposite {
             pipelineStack = stack;
             pipelinePushConstants = pushConstants;
             try {
-                pathTracePass.execute(frameContext);
+                pipelineCursor.executeNext();
             } finally {
                 pipelineCommand = null;
                 pipelineStack = null;
@@ -2077,7 +2118,7 @@ public final class RtComposite {
                     denoisedSource, nrdDone, nrdValidationOn, debugView);
             pipelineReconstructionResult = null;
             try {
-                reconstructionPass.execute(frameContext);
+                pipelineCursor.executeNext();
             } finally {
                 pipelineCommand = null;
                 pipelineStack = null;
@@ -2095,45 +2136,23 @@ public final class RtComposite {
             pipelineStack = stack;
             pipelineUpscaleInput = new UpscaleInput(rrDone, upscaleSource, svgfRan, nrdDone);
             try {
-                upscalePass.execute(frameContext);
+                pipelineCursor.executeNext();
             } finally {
                 pipelineCommand = null;
                 pipelineStack = null;
                 pipelineUpscaleInput = null;
             }
 
-            // Auto-exposure meters rrOutput (the post-RR, denoised/converged image), not the raw
-            // pre-RR trace: RR has no notion of exposure (DLSS-RR Integration Guide §3.7 — ignore
-            // exposure/auto-exposure/sharpness entirely for RR), so this is purely our own metering
-            // choice, independent of RR's pipeline placement. Metering the noisy pre-RR buffer made
-            // the histogram's log-luminance average biased by Monte-Carlo noise (Jensen's inequality
-            // on the concave log()), so the computed exposure drifted with SPP; rrOutput is stable
-            // regardless of SPP, keeping exposure consistent.
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
-                exposure.record(ctx, cmd, stack, rrOutput);
+            pipelineCommand = cmd;
+            pipelineStack = stack;
+            pipelinePostPresentTarget = dstImage;
+            try {
+                pipelineCursor.executeNext();
+            } finally {
+                pipelineCommand = null;
+                pipelineStack = null;
+                pipelinePostPresentTarget = 0L;
             }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
-
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
-                displayPipeline.dispatch(cmd, displayW, displayH, CausticaConfig.Rt.Hdr.enabled(),
-                        CausticaConfig.Rt.Hdr.paperWhiteNits(), CausticaConfig.Rt.Hdr.headroom(),
-                        CausticaConfig.Rt.Tonemapping.operatorIndex(),
-                        CausticaConfig.Rt.Tonemapping.EXPOSURE_EV.value(),
-                        CausticaConfig.Rt.Tonemapping.GAMMA.value(),
-                        CausticaConfig.Rt.Tonemapping.SATURATION.value(),
-                        CausticaConfig.Rt.Tonemapping.CONTRAST.value());
-            }
-            hdrWrittenThisFrame = CausticaConfig.Rt.Hdr.enabled();
-            VulkanCommandEncoder.memoryBarrier(cmd, stack);
-
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "copy composite to main target");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.copyOutput")) {
-                VK10.vkCmdCopyImage(cmd, displayImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                        dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
-            }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack);
         }
         if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
             throw new IllegalStateException("vkEndCommandBuffer(rt composite) failed");

@@ -20,13 +20,38 @@ public final class FramePipeline {
     }
 
     public void execute(FrameContext frame) {
-        Objects.requireNonNull(frame, "frame");
-        for (FramePass pass : passes) {
-            pass.execute(frame);
+        Cursor cursor = begin(frame);
+        while (!cursor.complete()) {
+            cursor.executeNext();
         }
+    }
+
+    public Cursor begin(FrameContext frame) {
+        return new Cursor(Objects.requireNonNull(frame, "frame"));
     }
 
     public int passCount() {
         return passes.size();
+    }
+
+    /** Executes this pipeline incrementally while preserving its declared order. */
+    public final class Cursor {
+        private final FrameContext frame;
+        private int nextPass;
+
+        private Cursor(FrameContext frame) {
+            this.frame = frame;
+        }
+
+        public void executeNext() {
+            if (complete()) {
+                throw new IllegalStateException("frame pipeline is already complete");
+            }
+            passes.get(nextPass++).execute(frame);
+        }
+
+        public boolean complete() {
+            return nextPass == passes.size();
+        }
     }
 }
