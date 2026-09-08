@@ -94,6 +94,8 @@ import dev.comfyfluffy.caustica.rt.upscale.NativeUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.graph.FrameGraph;
+import dev.comfyfluffy.caustica.rt.graph.GraphExecution;
+import dev.comfyfluffy.caustica.rt.frame.FrameCursor;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
 import dev.comfyfluffy.caustica.rt.frame.PostPresentPass;
 import dev.comfyfluffy.caustica.rt.frame.PrepareFramePass;
@@ -532,7 +534,8 @@ public final class RtComposite {
     private final FramePipeline framePipeline = new FramePipeline(
             prepareFramePass, pathTracePass, reconstructionPass, upscalePass, postPresentPass);
     private final FrameGraph frameGraph = FrameGraph.shadow(framePipeline);
-    private FramePipeline.Cursor pipelineCursor;
+    private final GraphExecution graphExecution = new GraphExecution(frameGraph, framePipeline);
+    private FrameCursor pipelineCursor;
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
     private FrameInputs pipelineInputs;
@@ -786,7 +789,7 @@ public final class RtComposite {
             pipelineContext = ctx;
             pipelineActive = active;
             pipelineInputs = inputs;
-            pipelineCursor = framePipeline.begin(frameContext);
+            pipelineCursor = graphExecution.begin(frameContext);
             try {
                 pipelineCursor.executeNext();
                 recordFrame(ctx, active, nativeColor, inputs);

@@ -34,13 +34,18 @@ public final class FramePipeline {
         return passes.size();
     }
 
+    /** Immutable callback bindings shared with the graph's compiled execution order. */
+    public List<FramePass> passes() {
+        return passes;
+    }
+
     /** Stable debug description used by the shadow render graph. */
     public List<String> declaredPassNames() {
         return passes.stream().map(pass -> pass.getClass().getSimpleName()).toList();
     }
 
     /** Executes this pipeline incrementally while preserving its declared order. */
-    public final class Cursor {
+    public final class Cursor implements FrameCursor {
         private final FrameContext frame;
         private int nextPass;
 
