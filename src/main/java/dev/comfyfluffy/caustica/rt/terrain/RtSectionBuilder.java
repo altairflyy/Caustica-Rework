@@ -120,6 +120,18 @@ final class RtSectionBuilder {
         VK10.vkCmdCopyBuffer(cmd, upload.handle, destination.handle, region);
     }
 
+    /** LOD failure cleanup; called at the same completed-build or unsubmitted seam. */
+    static void destroy(PreparedSection prepared,
+                        dev.comfyfluffy.caustica.rt.gpu.AccelerationStructureManager manager) {
+        manager.releaseBuildScratch(java.util.List.of(prepared.blas));
+        manager.destroyOwnedBlas(prepared.blas.accel);
+        prepared.upload.destroy();
+        prepared.material.destroy();
+        prepared.uvs.destroy();
+        prepared.indices.destroy();
+        prepared.positions.destroy();
+    }
+
     static void destroy(PreparedSection prepared) {
         RtAccel.freeBlasScratch(java.util.List.of(prepared.blas));
         prepared.blas.accel.destroy();

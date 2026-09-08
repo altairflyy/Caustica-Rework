@@ -11,6 +11,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AccelerationStructureManagerTest {
     @Test
+    void retirementPreservesTokenAndDefersDestructionUntilQueueDelivery() {
+        var received = new java.util.concurrent.atomic.AtomicReference<
+                dev.comfyfluffy.caustica.rt.RtGpuExecutor.TrackedGraphicsUse>();
+        var pending = new java.util.concurrent.atomic.AtomicReference<Runnable>();
+        var destroyed = new java.util.concurrent.atomic.AtomicInteger();
+        var queue = new DeferredDeletionQueue(
+                (token, callback) -> { throw new AssertionError("wrong token domain"); },
+                (token, callback) -> { received.set(token); pending.set(callback); });
+        var manager = new AccelerationStructureManager(queue);
+        var token = new dev.comfyfluffy.caustica.rt.RtGpuExecutor.TrackedGraphicsUse();
+        Runnable destroy = destroyed::incrementAndGet;
+
+        manager.retire(token, destroy);
+
+        org.junit.jupiter.api.Assertions.assertSame(token, received.get());
+        org.junit.jupiter.api.Assertions.assertSame(destroy, pending.get());
+        assertEquals(0, destroyed.get());
+        pending.get().run();
+        assertEquals(1, destroyed.get());
+    }
+
+    @Test
     void exposesTheRequiredFacadeOperationsAsDirectDelegates() throws Exception {
         String source = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/gpu/AccelerationStructureManager.java"));

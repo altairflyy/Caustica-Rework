@@ -148,7 +148,7 @@ public final class RtLodTerrain {
             // Invalidate unpublished work before draining completions, so an old result cannot publish or
             // schedule another batch between the button click and the epoch change.
             epoch++;
-            abortBuildSession();
+            abortBuildSession(ctx);
             cpuPending = false;
             anchorX = anchorZ = Integer.MIN_VALUE;
             capturedLodRevision = -1L;
@@ -188,7 +188,7 @@ public final class RtLodTerrain {
                     // Do not finish a minutes-long plan made for the previous DH quality. Keep the currently
                     // published proxy, cancel only unpublished work, and re-plan from the new active LOD tree.
                     epoch++;
-                    abortBuildSession();
+                    abortBuildSession(ctx);
                     cpuPending = false;
                 }
                 lodQuality = updatedQuality;
@@ -631,7 +631,7 @@ public final class RtLodTerrain {
             return;
         }
         if (session.workingEntries.isEmpty()) {
-            abortBuildSession();
+            abortBuildSession(ctx);
             requestRetry();
             return;
         }
@@ -675,7 +675,7 @@ public final class RtLodTerrain {
                 continue;
             }
             if (done.failure != null || done.mesh == null) {
-                abortBuildSession();
+                abortBuildSession(ctx);
                 requestRetry();
                 if (!(done.failure instanceof CancellationException)) {
                     CausticaMod.LOGGER.warn("Distant Horizons CPU batch packing failed", done.failure);
@@ -708,15 +708,15 @@ public final class RtLodTerrain {
                     () -> taskEpoch != epoch,
                     cmd -> {
                         RtSectionBuilder.recordUpload(cmd, owned);
-                        RtAccel.recordBlasBuilds(ctx, cmd, List.of(owned.blas()));
+                        ctx.accelerationStructures().recordBuilds(ctx, cmd, List.of(owned.blas()));
                     },
                     () -> {
-                        RtAccel.freeBlasScratch(List.of(owned.blas()));
+                        ctx.accelerationStructures().releaseBuildScratch(List.of(owned.blas()));
                         owned.releaseUpload();
                     },
                     (build, failure) -> {
                         if (failure != null || taskEpoch != epoch) {
-                            RtSectionBuilder.destroy(owned);
+                            RtSectionBuilder.destroy(owned, ctx.accelerationStructures());
                             completed.add(new Completed(taskEpoch, revision, item, null, build,
                                     failure != null ? failure
                                             : new CancellationException("DH proxy epoch changed after BLAS build")));
@@ -733,9 +733,9 @@ public final class RtLodTerrain {
                     });
         } catch (Throwable t) {
             if (taskRegistered) finishActiveTask();
-            if (prepared != null) RtSectionBuilder.destroy(prepared);
+            if (prepared != null) RtSectionBuilder.destroy(prepared, ctx.accelerationStructures());
             pending = false;
-            abortBuildSession();
+            abortBuildSession(ctx);
             requestRetry();
             CausticaMod.LOGGER.warn("Failed to prepare Distant Horizons RT proxy batch", t);
         }
@@ -745,9 +745,9 @@ public final class RtLodTerrain {
                                   long taskEpoch, long revision, RtGpuExecutor.Build sourceBuild) {
         RtAccel.PreparedTerrainCompaction compaction;
         try {
-            compaction = RtAccel.prepareTerrainCompaction(ctx, prepared.blas());
+            compaction = ctx.accelerationStructures().compact(ctx, prepared.blas());
         } catch (Throwable t) {
-            RtSectionBuilder.destroy(prepared);
+            RtSectionBuilder.destroy(prepared, ctx.accelerationStructures());
             completed.add(new Completed(taskEpoch, revision, item, null, sourceBuild, t));
             finishActiveTask();
             return;
@@ -755,9 +755,9 @@ public final class RtLodTerrain {
         try {
             ctx.gpuExecutor().submit(
                     () -> taskEpoch != epoch,
-                    cmd -> RtAccel.recordTerrainCompaction(ctx, cmd, compaction),
+                    cmd -> ctx.accelerationStructures().recordCompaction(ctx, cmd, compaction),
                     () -> {
-                        RtAccel.finishTerrainCompaction(compaction);
+                        ctx.accelerationStructures().finishCompaction(compaction);
                         prepared.releaseBuildInputs();
                     },
                     (copyBuild, failure) -> {
@@ -765,11 +765,11 @@ public final class RtLodTerrain {
                             Throwable terminal = failure != null ? failure
                                     : new CancellationException("DH proxy epoch changed during BLAS compaction");
                             try {
-                                RtAccel.destroyTerrainCompaction(compaction);
+                                ctx.accelerationStructures().destroyCompaction(compaction);
                             } catch (Throwable destroyFailure) {
                                 terminal.addSuppressed(destroyFailure);
                             }
-                            RtSectionBuilder.destroy(prepared);
+                            RtSectionBuilder.destroy(prepared, ctx.accelerationStructures());
                             completed.add(new Completed(taskEpoch, revision, item, null, copyBuild, terminal));
                         } else {
                             completed.add(new Completed(taskEpoch, revision, item,
@@ -779,11 +779,11 @@ public final class RtLodTerrain {
                     });
         } catch (Throwable t) {
             try {
-                RtAccel.destroyTerrainCompaction(compaction);
+                ctx.accelerationStructures().destroyCompaction(compaction);
             } catch (Throwable destroyFailure) {
                 t.addSuppressed(destroyFailure);
             }
-            RtSectionBuilder.destroy(prepared);
+            RtSectionBuilder.destroy(prepared, ctx.accelerationStructures());
             completed.add(new Completed(taskEpoch, revision, item, null, sourceBuild, t));
             finishActiveTask();
         }
@@ -802,14 +802,14 @@ public final class RtLodTerrain {
             pending = false;
             PreparedSection prepared = done.prepared;
             if (done.epoch != epoch) {
-                if (prepared != null) destroyBuilt(prepared);
+                if (prepared != null) destroyBuilt(ctx, prepared);
                 continue;
             }
             BuildSession session = buildSession;
             if (done.failure != null || prepared == null || session == null
                     || done.revision != session.revision) {
-                if (prepared != null) destroyBuilt(prepared);
-                abortBuildSession();
+                if (prepared != null) destroyBuilt(ctx, prepared);
+                abortBuildSession(ctx);
                 requestRetry();
                 if (done.failure != null) {
                     CausticaMod.LOGGER.warn("Distant Horizons RT proxy batch failed", done.failure);
@@ -878,7 +878,7 @@ public final class RtLodTerrain {
             int count = entries.size();
             if (count == 0) {
                 if (finished) {
-                    abortBuildSession();
+                    abortBuildSession(ctx);
                     requestRetry();
                 }
                 return;
@@ -915,7 +915,7 @@ public final class RtLodTerrain {
             if (old != null) {
                 Set<RtSectionTable.SectionGeom> retained = next.geomIdentitySet();
                 var lastUse = ctx.gpuExecutor().latestGraphicsUse();
-                ctx.deferredDeletionQueue().retireAfterGraphics(lastUse, () -> old.destroyExcept(retained));
+                ctx.accelerationStructures().retire(lastUse, () -> old.destroyExcept(ctx, retained));
             }
 
             if (finished) {
@@ -935,18 +935,18 @@ public final class RtLodTerrain {
             }
         } catch (Throwable t) {
             if (table != null) table.destroy();
-            abortBuildSession();
+            abortBuildSession(ctx);
             requestRetry();
             CausticaMod.LOGGER.warn("Failed to publish Distant Horizons RT proxy", t);
         }
     }
 
-    private void abortBuildSession() {
+    private void abortBuildSession(RtContext ctx) {
         BuildSession session = buildSession;
         buildSession = null;
         if (session != null) {
             session.lifecycle.cancel();
-            for (RtSectionTable.SectionGeom geom : session.owned) geom.destroy();
+            for (RtSectionTable.SectionGeom geom : session.owned) destroyGeom(ctx, geom);
             session.owned.clear();
             session.workingEntries.clear();
             session.remaining.clear();
@@ -973,7 +973,7 @@ public final class RtLodTerrain {
         bootstrapComplete = false;
         manualRefreshRequested.set(false);
         forceSourceRebuild = false;
-        abortBuildSession();
+        abortBuildSession(ctx);
         world = null;
         instanceProxy = null;
         frameDhInstances = new RtAccel.Instance[0];
@@ -984,7 +984,7 @@ public final class RtLodTerrain {
         current = null;
         if (old != null) {
             var lastUse = ctx.gpuExecutor().latestGraphicsUse();
-            ctx.deferredDeletionQueue().retireAfterGraphics(lastUse, old::destroy);
+            ctx.accelerationStructures().retire(lastUse, () -> old.destroy(ctx));
         }
     }
 
@@ -1003,12 +1003,12 @@ public final class RtLodTerrain {
         ctx.waitIdle();
         Completed done;
         while ((done = completed.poll()) != null) {
-            if (done.prepared != null) destroyBuilt(done.prepared);
+            if (done.prepared != null) destroyBuilt(ctx, done.prepared);
         }
         packCompleted.clear();
         packPending = false;
-        abortBuildSession();
-        if (current != null) current.destroy();
+        abortBuildSession(ctx);
+        if (current != null) current.destroy(ctx);
         current = null;
         instanceProxy = null;
         frameDhInstances = new RtAccel.Instance[0];
@@ -1021,10 +1021,16 @@ public final class RtLodTerrain {
         DistantHorizonsCompat.clearCapturedLods();
     }
 
-    private static void destroyBuilt(PreparedSection prepared) {
-        prepared.blas().accel.destroy();
+    private static void destroyBuilt(RtContext ctx, PreparedSection prepared) {
+        ctx.accelerationStructures().destroyOwnedBlas(prepared.blas().accel);
         prepared.material().destroy();
         prepared.uvs().destroy();
+    }
+
+    private static void destroyGeom(RtContext ctx, RtSectionTable.SectionGeom geom) {
+        ctx.accelerationStructures().destroyOwnedBlas(geom.blas);
+        geom.material.destroy();
+        geom.uvs.destroy();
     }
 
     private record Completed(long epoch, long revision, PlannedBatch item, PreparedSection prepared,
@@ -1346,15 +1352,15 @@ public final class RtLodTerrain {
             return result;
         }
 
-        void destroyExcept(Set<RtSectionTable.SectionGeom> retained) {
+        void destroyExcept(RtContext ctx, Set<RtSectionTable.SectionGeom> retained) {
             table.destroy();
             for (GeomEntry entry : entries) {
-                if (!retained.contains(entry.geom)) entry.geom.destroy();
+                if (!retained.contains(entry.geom)) destroyGeom(ctx, entry.geom);
             }
         }
 
-        void destroy() {
-            destroyExcept(Set.of());
+        void destroy(RtContext ctx) {
+            destroyExcept(ctx, Set.of());
         }
     }
 }

@@ -81,6 +81,11 @@ public final class AccelerationStructureManager {
         RtAccel.releaseEntityBlas(blas);
     }
 
+    /** Release a terrain/LOD BLAS whose backing is owned by the AS, after its last use. */
+    public void destroyOwnedBlas(RtAccel accel) {
+        accel.destroy();
+    }
+
     public void destroyPersistentBlas(RtAccel accel, RtBuffer backing) {
         RtAccel.destroyEntityAccel(accel, backing);
     }
