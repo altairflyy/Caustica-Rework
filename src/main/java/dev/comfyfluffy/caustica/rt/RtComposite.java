@@ -88,6 +88,7 @@ import dev.comfyfluffy.caustica.rt.reconstruction.SvgfResources;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.frame.LegacyCompositePass;
+import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
 import dev.comfyfluffy.caustica.rt.frame.PrepareFramePass;
 import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
 import dev.comfyfluffy.caustica.rt.frame.TemporalState;
@@ -713,10 +714,14 @@ public final class RtComposite {
     private final FramePipeline framePipeline = new FramePipeline(
             new PrepareFramePass(this::prepareFrame),
             new LegacyCompositePass(this::executeLegacyComposite));
+    private final PathTracePass pathTracePass = new PathTracePass(this::recordPathTrace);
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
     private GpuTexture pipelineNativeColor;
     private FrameInputs pipelineInputs;
+    private VkCommandBuffer pipelineCommand;
+    private MemoryStack pipelineStack;
+    private ByteBuffer pipelinePushConstants;
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -1468,6 +1473,25 @@ public final class RtComposite {
         fgJitterY = frame.jitter().y();
     }
 
+    private void recordPathTrace(FrameContext frame) {
+        if (frame != frameContext || pipelineContext == null || pipelineActive == null
+                || pipelineCommand == null || pipelineStack == null || pipelinePushConstants == null) {
+            throw new IllegalStateException("path-trace pass has no active frame invocation");
+        }
+        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
+                pipelineContext, pipelineCommand, "world primary trace");
+             RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.tracePrimary")) {
+            pipelineActive.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 0);
+        }
+        VulkanCommandEncoder.memoryBarrier(pipelineCommand, pipelineStack);
+        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
+                pipelineContext, pipelineCommand, "world indirect trace");
+             RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
+            pipelineActive.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 1);
+        }
+        VulkanCommandEncoder.memoryBarrier(pipelineCommand, pipelineStack);
+    }
+
     private FrameInputs prepareFrameInputs() {
         int debugView = debugView();
         boolean rrPath = RtDlssRr.enabled() && debugView == 0;
@@ -1785,16 +1809,16 @@ public final class RtComposite {
                     // trying to inspect. The tracer sees 0 (normal shading) for those.
                     (int) frameCounter, svgfDebugView ? 0 : debugView,
                     terrain.lightGeneration(), restirMode()).write(pushConstants);
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world primary trace");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.tracePrimary")) {
-                active.trace(cmd, renderW, renderH, pushConstants, 0);
+            pipelineCommand = cmd;
+            pipelineStack = stack;
+            pipelinePushConstants = pushConstants;
+            try {
+                pathTracePass.execute(frameContext);
+            } finally {
+                pipelineCommand = null;
+                pipelineStack = null;
+                pipelinePushConstants = null;
             }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack); // continuation/guide writes visible to pass B
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world indirect trace");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
-                active.trace(cmd, renderW, renderH, pushConstants, 1);
-            }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT writes visible to the temporal/upscale reads
             // A FOV change does NOT need to restart accumulation, so nothing here does.
             //
             // The history is fetched through the motion vectors, and the tracer builds those with
