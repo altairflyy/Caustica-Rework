@@ -1,29 +1,37 @@
 package dev.comfyfluffy.caustica.rt.graph;
 
-import dev.comfyfluffy.caustica.rewrite.RewriteGates;
 import dev.comfyfluffy.caustica.rt.frame.*;
 import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.*;
 
 class GraphExecutionTest {
-    @Test void bothPathsPreserveCallbacksInterleavingAndFrameIdentity() {
-        assertEquals(run(false, -1), run(true, -1));
+    @Test void graphPathPreservesCallbacksInterleavingAndFrameIdentity() {
+        assertEquals(List.of("before0", "pass0", "after0", "before1", "pass1", "after1",
+                "before2", "pass2", "after2", "before3", "pass3", "after3",
+                "before4", "pass4", "after4"), run(-1));
     }
 
     @Test void failureAtEveryBoundaryPreservesLegacyAdvancementAndPropagation() {
         for (int failure = 0; failure < 5; failure++) {
-            assertEquals(run(false, failure), run(true, failure));
+            run(failure);
         }
     }
 
-    private List<String> run(boolean graph, int failure) {
-        String old = System.getProperty(RewriteGates.RENDER_GRAPH_V2_KEY);
-        try {
-            System.setProperty(RewriteGates.RENDER_GRAPH_V2_KEY, Boolean.toString(graph));
+    @Test void productionExecutionHasNoLegacyCursorBranch() throws Exception {
+        String source = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/graph/GraphExecution.java"));
+        assertFalse(source.contains("RewriteGates"));
+        assertFalse(source.contains("legacy.begin("));
+        assertTrue(source.contains("return new Cursor(frame);"));
+    }
+
+    private List<String> run(int failure) {
             List<String> events = new ArrayList<>();
             FrameContext frame = new FrameContext(1, 1f / 60,
                     new FrameContext.Extent(1, 1), new FrameContext.Extent(1, 1),
@@ -45,9 +53,7 @@ class GraphExecutionTest {
                     new UpscalePass(callbacks.get(3)), new PostPresentPass(callbacks.get(4)));
             GraphExecution execution = new GraphExecution(FrameGraph.shadow(pipeline), pipeline);
             FrameCursor cursor = execution.begin(frame);
-            assertEquals(!graph, cursor instanceof FramePipeline.Cursor);
-            // Selection is fixed even if the property is changed after begin.
-            System.setProperty(RewriteGates.RENDER_GRAPH_V2_KEY, Boolean.toString(!graph));
+            assertFalse(cursor instanceof FramePipeline.Cursor);
             for (int i = 0; i < 5; i++) {
                 assertFalse(cursor.complete());
                 events.add("before" + i);
@@ -62,9 +68,5 @@ class GraphExecutionTest {
             assertThrows(IllegalStateException.class, cursor::executeNext);
             assertThrows(NullPointerException.class, () -> execution.begin(null));
             return events;
-        } finally {
-            if (old == null) System.clearProperty(RewriteGates.RENDER_GRAPH_V2_KEY);
-            else System.setProperty(RewriteGates.RENDER_GRAPH_V2_KEY, old);
-        }
     }
 }

@@ -1,6 +1,5 @@
 package dev.comfyfluffy.caustica.rt.graph;
 
-import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.*;
 
@@ -9,11 +8,7 @@ public final class UpscalerBarriers {
     private UpscalerBarriers() {}
 
     public static void before(VkCommandBuffer command, MemoryStack stack,
-                              UpscalerBarrierPlan.Backend backend, String operation, boolean generated) {
-        if (!generated) {
-            VulkanCommandEncoder.memoryBarrier(command, stack);
-            return;
-        }
+                              UpscalerBarrierPlan.Backend backend, String operation) {
         if (!UpscalerBarrierPlan.before(backend, operation).required()) return;
         VkMemoryBarrier2.Buffer barrier = VkMemoryBarrier2.calloc(1, stack).sType$Default()
                 .srcStageMask(VK10.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)

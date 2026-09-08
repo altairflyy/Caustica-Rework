@@ -4,21 +4,19 @@ import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FrameCursor;
 import dev.comfyfluffy.caustica.rt.frame.FramePass;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
-import dev.comfyfluffy.caustica.rewrite.RewriteGates;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
 
-/** Executes graph-selected callbacks; all barriers remain inside the legacy callbacks. */
+/** Executes callbacks exclusively in the validated frame-graph order. */
 public final class GraphExecution {
-    private final FramePipeline legacy;
     private final List<FramePass> ordered;
 
-    public GraphExecution(FrameGraph graph, FramePipeline legacy) {
-        this.legacy = Objects.requireNonNull(legacy, "legacy");
+    public GraphExecution(FrameGraph graph, FramePipeline executable) {
+        Objects.requireNonNull(executable, "executable");
         var bindings = new HashMap<String, FramePass>();
-        for (FramePass pass : legacy.passes()) {
+        for (FramePass pass : executable.passes()) {
             String name = pass.getClass().getSimpleName();
             if (bindings.put(name, pass) != null) {
                 throw new IllegalArgumentException("duplicate pass binding: " + name);
@@ -31,10 +29,10 @@ public final class GraphExecution {
                 Objects.requireNonNull(bindings.get(pass.name()), "missing binding: " + pass.name())).toList();
     }
 
-    /** Select once at the frame boundary; changing a property cannot switch a running cursor. */
+    /** Begin one graph-authoritative frame execution. */
     public FrameCursor begin(FrameContext frame) {
         Objects.requireNonNull(frame, "frame");
-        return RewriteGates.renderGraphV2() ? new Cursor(frame) : legacy.begin(frame);
+        return new Cursor(frame);
     }
 
     private final class Cursor implements FrameCursor {

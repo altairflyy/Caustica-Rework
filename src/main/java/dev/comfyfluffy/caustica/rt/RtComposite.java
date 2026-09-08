@@ -1262,7 +1262,6 @@ public final class RtComposite {
                 || pipelineCommand == null || pipelineStack == null || pipelinePushConstants == null) {
             throw new IllegalStateException("path-trace pass has no active frame invocation");
         }
-        boolean generatedBarriers = dev.comfyfluffy.caustica.rewrite.RewriteGates.pathTraceBarriersV2();
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan barrierPlan =
                 dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan.create(
                         pipelineInputs.svgfPath() || pipelineInputs.nrdPath(), pipelineInputs.nrdPath());
@@ -1273,7 +1272,7 @@ public final class RtComposite {
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
-                dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan.INDIRECT, generatedBarriers);
+                dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan.INDIRECT);
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world indirect trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
@@ -1281,11 +1280,11 @@ public final class RtComposite {
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
-                dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan.EXPORT, generatedBarriers);
-        int barrierMode = generatedBarriers ? 1 : 0;
+                dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan.EXPORT);
+        int barrierMode = 1;
         if (loggedPathTraceBarrierMode != barrierMode) {
             CausticaMod.LOGGER.info("AER-083 path-trace barriers: path={}, scope=legacy-conservative",
-                    generatedBarriers ? "generated" : "legacy");
+                    "generated");
             loggedPathTraceBarrierMode = barrierMode;
         }
     }
@@ -1384,9 +1383,8 @@ public final class RtComposite {
                     new NativeUpscalerBackend.Request(ctx, cmd, stack, upscaleSource, rrOutput));
             barrierBackend = dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.NATIVE;
         }
-        boolean generated = dev.comfyfluffy.caustica.rewrite.RewriteGates.upscalerBarriersV2();
-        dev.comfyfluffy.caustica.rt.graph.UpscalerBarriers.before(cmd, stack, barrierBackend, "export", generated);
-        String barrierMode = (generated ? "generated" : "legacy") + ", backend=" + barrierBackend;
+        dev.comfyfluffy.caustica.rt.graph.UpscalerBarriers.before(cmd, stack, barrierBackend, "export");
+        String barrierMode = "generated, backend=" + barrierBackend;
         if (!barrierMode.equals(loggedUpscalerBarrierMode)) {
             CausticaMod.LOGGER.info("AER-083 upscaler barriers: path={}, scope=legacy-conservative", barrierMode);
             loggedUpscalerBarrierMode = barrierMode;
@@ -1402,7 +1400,6 @@ public final class RtComposite {
         VkCommandBuffer cmd = pipelineCommand;
         MemoryStack stack = pipelineStack;
         long dstImage = pipelinePostPresentTarget;
-        boolean generatedPostBarriers = dev.comfyfluffy.caustica.rewrite.RewriteGates.postBarriersV2();
         boolean postHdr = CausticaConfig.Rt.Hdr.enabled();
         PostBarrierPlan postPlan;
         // Auto-exposure meters rrOutput (the post-RR, denoised/converged image), not the raw
@@ -1414,9 +1411,9 @@ public final class RtComposite {
         // regardless of SPP, keeping exposure consistent.
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
-            postPlan = exposure.record(ctx, cmd, stack, rrOutput, generatedPostBarriers, postHdr);
+            postPlan = exposure.record(ctx, cmd, stack, rrOutput, postHdr);
         }
-        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.DISPLAY, generatedPostBarriers);
+        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.DISPLAY);
 
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
@@ -1429,18 +1426,18 @@ public final class RtComposite {
                     CausticaConfig.Rt.Tonemapping.CONTRAST.value());
         }
         hdrWrittenThisFrame = postHdr;
-        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.COPY, generatedPostBarriers);
+        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.COPY);
 
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "copy composite to main target");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.copyOutput")) {
             VK10.vkCmdCopyImage(cmd, displayImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
                     dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
         }
-        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.EXPORT, generatedPostBarriers);
-        int postMode = (generatedPostBarriers ? 4 : 0) | (postPlan.automaticExposure() ? 2 : 0) | (postHdr ? 1 : 0);
+        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.EXPORT);
+        int postMode = 4 | (postPlan.automaticExposure() ? 2 : 0) | (postHdr ? 1 : 0);
         if (loggedPostBarrierMode != postMode) {
             CausticaMod.LOGGER.info("AER-083 post barriers: path={}, exposure={}, hdr={}, scope=legacy-conservative",
-                    generatedPostBarriers ? "generated" : "legacy",
+                    "generated",
                     postPlan.automaticExposure() ? "auto" : "manual", postHdr);
             loggedPostBarrierMode = postMode;
         }
@@ -1818,19 +1815,18 @@ public final class RtComposite {
                             jitterX, jitterY, (int) frameCounter, false);
                 }
                 if (nrdDone) {
-                    boolean generatedDenoiserBarriers = dev.comfyfluffy.caustica.rewrite.RewriteGates.denoiserBarriersV2();
                     DenoiserBarrierPlan nrdBarrierPlan = DenoiserBarrierPlan.nrd();
                     DenoiserBarriers.before(cmd, stack, nrdBarrierPlan,
-                            DenoiserBarrierPlan.NRD_COMBINE, generatedDenoiserBarriers);
+                            DenoiserBarrierPlan.NRD_COMBINE);
                     try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrdCombine")) {
                         nrdCombinePipeline.dispatch(cmd, renderW, renderH, NRD_DENOISING_RANGE);
                     }
                     DenoiserBarriers.before(cmd, stack, nrdBarrierPlan,
-                            DenoiserBarrierPlan.NRD_EXPORT, generatedDenoiserBarriers);
-                    int denoiserMode = generatedDenoiserBarriers ? 1 : 0;
+                            DenoiserBarrierPlan.NRD_EXPORT);
+                    int denoiserMode = 1;
                     if (loggedDenoiserBarrierMode != denoiserMode) {
                         CausticaMod.LOGGER.info("AER-083 denoiser barriers: path={}, backend=NRD, scope=legacy-conservative",
-                                generatedDenoiserBarriers ? "generated" : "legacy");
+                                "generated");
                         loggedDenoiserBarrierMode = denoiserMode;
                     }
                     denoisedSource = nrdCombined;

@@ -9,7 +9,6 @@ import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSvgfDenoiser;
 import dev.comfyfluffy.caustica.rt.graph.DenoiserBarrierPlan;
 import dev.comfyfluffy.caustica.rt.graph.DenoiserBarriers;
-import dev.comfyfluffy.caustica.rewrite.RewriteGates;
 import org.joml.Matrix4fc;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK10;
@@ -80,12 +79,11 @@ public final class SvgfReconstructionBackend
         float cameraForwardDelta = cameraForwardDelta(input, reset);
         int extraSkySmooth = RtFramePresenter.INSTANCE.isActive() ? 1 : 0;
 
-        boolean generatedBarriers = RewriteGates.denoiserBarriersV2();
         DenoiserBarrierPlan barrierPlan = DenoiserBarrierPlan.svgf(
                 writeToPing, RtSvgfDenoiser.ATROUS_PASSES, RtSvgfDenoiser.HISTORY_FEEDBACK_PASS);
         RtImage reconstructed;
         DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
-                DenoiserBarrierPlan.REPROJECT, generatedBarriers);
+                DenoiserBarrierPlan.REPROJECT);
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 input.context(), input.command(), "SVGF denoise");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.svgf")) {
@@ -99,7 +97,7 @@ public final class SvgfReconstructionBackend
             RtImage destination = resources.filterPong();
             for (int pass = 0; pass < RtSvgfDenoiser.ATROUS_PASSES; pass++) {
                 DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
-                        DenoiserBarrierPlan.atrous(pass), generatedBarriers);
+                        DenoiserBarrierPlan.atrous(pass));
                 boolean lastPass = pass == RtSvgfDenoiser.ATROUS_PASSES - 1;
                 denoiser.atrous(input.command(), input.width(), input.height(), pass, parity,
                         source.view, destination.view, input.viewZ().view, input.normal().view,
@@ -109,7 +107,7 @@ public final class SvgfReconstructionBackend
                         isDebugView(input.debugView()) ? input.debugView() : 0);
                 if (pass == RtSvgfDenoiser.HISTORY_FEEDBACK_PASS) {
                     DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
-                            DenoiserBarrierPlan.HISTORY_FEEDBACK, generatedBarriers);
+                            DenoiserBarrierPlan.HISTORY_FEEDBACK);
                     copyImage(input.command(), input.stack(), destination, historyOut);
                 }
                 RtImage swap = source;
@@ -117,21 +115,21 @@ public final class SvgfReconstructionBackend
                 destination = swap;
             }
             DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
-                    DenoiserBarrierPlan.PREVIOUS_GUIDES, generatedBarriers);
+                    DenoiserBarrierPlan.PREVIOUS_GUIDES);
             copyImage(input.command(), input.stack(), input.viewZ(), resources.previousViewZ());
             copyImage(input.command(), input.stack(), input.normal(), resources.previousNormal());
             DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
-                    DenoiserBarrierPlan.EXPORT, generatedBarriers);
+                    DenoiserBarrierPlan.EXPORT);
 
             reconstructed = source;
         }
         resources.flipHistory();
         resources.markHistoryValid();
         resources.snapshotPreviousCamera(input.cameraX(), input.cameraY(), input.cameraZ());
-        int barrierMode = generatedBarriers ? 1 : 0;
+        int barrierMode = 1;
         if (loggedBarrierMode != barrierMode) {
             CausticaMod.LOGGER.info("AER-083 denoiser barriers: path={}, backend=SVGF, scope=legacy-conservative",
-                    generatedBarriers ? "generated" : "legacy");
+                    "generated");
             loggedBarrierMode = barrierMode;
         }
         return new ReconstructionResult(reconstructed, true);

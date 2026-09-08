@@ -33,8 +33,7 @@ public final class NativeUpscalerBackend implements UpscalerBackend<NativeUpscal
     public UpscaleResult execute(Request input) {
         Objects.requireNonNull(input, "input");
         dev.comfyfluffy.caustica.rt.graph.UpscalerBarriers.before(input.command(), input.stack(),
-                dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.NATIVE, "produce",
-                dev.comfyfluffy.caustica.rewrite.RewriteGates.upscalerBarriersV2());
+                dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.NATIVE, "produce");
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 input.context(), input.command(), "fallback upscale");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.upscale")) {

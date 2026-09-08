@@ -1,10 +1,9 @@
 package dev.comfyfluffy.caustica.rt.graph;
 
-import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.*;
 
-/** A/B emitter. Generated hazards retain the exact broad legacy memory scope. */
+/** Generated post-image hazards retaining the qualified broad memory scope. */
 public final class PostImageBarriers {
     // Verified from Minecraft 26.2 VulkanCommandEncoder.memoryBarrier bytecode.
     public static final long STAGES = VK10.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -12,11 +11,7 @@ public final class PostImageBarriers {
     private PostImageBarriers() {}
 
     public static void before(VkCommandBuffer command, MemoryStack stack,
-                              PostBarrierPlan plan, String operation, boolean generated) {
-        if (!generated) {
-            VulkanCommandEncoder.memoryBarrier(command, stack);
-            return;
-        }
+                              PostBarrierPlan plan, String operation) {
         if (!plan.before(operation).required()) return;
         KHRSynchronization2.vkCmdPipelineBarrier2KHR(command, dependency(stack));
     }

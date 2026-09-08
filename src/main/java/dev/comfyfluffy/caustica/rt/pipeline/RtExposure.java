@@ -54,13 +54,13 @@ public final class RtExposure {
     }
 
     public PostBarrierPlan record(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage traceColor,
-                                  boolean generatedBarriers, boolean hdr) {
+                                  boolean hdr) {
         if (image == null) {
             throw new IllegalStateException("RT exposure image not created");
         }
         PostBarrierPlan plan = PostBarrierPlan.of(mode() == Mode.AUTO, hdr);
         if (plan.automaticExposure()) {
-            recordAuto(ctx, cmd, stack, traceColor, plan, generatedBarriers);
+            recordAuto(ctx, cmd, stack, traceColor, plan);
             return plan;
         }
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure manual write")) {
@@ -100,7 +100,7 @@ public final class RtExposure {
     }
 
     private void recordAuto(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage traceColor,
-                            PostBarrierPlan plan, boolean generatedBarriers) {
+                            PostBarrierPlan plan) {
         if (pipeline == null || histogram == null || state == null) {
             throw new IllegalStateException("RT auto exposure resources not created");
         }
@@ -108,9 +108,9 @@ public final class RtExposure {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure histogram clear")) {
             VK10.vkCmdFillBuffer(cmd, histogram.handle, 0, histogram.size, 0);
         }
-        PostImageBarriers.before(cmd, stack, plan, PostBarrierPlan.HISTOGRAM, generatedBarriers);
+        PostImageBarriers.before(cmd, stack, plan, PostBarrierPlan.HISTOGRAM);
         pipeline.dispatchHistogram(cmd, traceColor.width, traceColor.height);
-        PostImageBarriers.before(cmd, stack, plan, PostBarrierPlan.RESOLVE, generatedBarriers);
+        PostImageBarriers.before(cmd, stack, plan, PostBarrierPlan.RESOLVE);
         pipeline.dispatchResolve(cmd, Math.max(1, traceColor.width * traceColor.height), autoConfig(), frameTimeSeconds());
     }
 
