@@ -43,7 +43,7 @@ public final class RtOverlayFramePool {
             return;
         }
         List<RtBuffer> retired = List.copyOf(acquiredThisFrame);
-        ctx.gpuExecutor().retireAfterGraphics(graphicsUse, () -> retired.forEach(RtBuffer::destroy));
+        ctx.deferredDeletionQueue().retireAfterGraphics(graphicsUse, () -> retired.forEach(RtBuffer::destroy));
         acquiredThisFrame.clear();
     }
 

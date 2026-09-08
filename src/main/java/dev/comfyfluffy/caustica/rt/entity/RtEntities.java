@@ -1331,7 +1331,7 @@ public final class RtEntities {
         RtAccel accel = e.accel;
         RtBuffer backing = e.backing;
         RtBuffer geometry = e.geometry;
-        ctx.gpuExecutor().retireAfterGraphics(e.graphicsUse, () -> {
+        ctx.deferredDeletionQueue().retireAfterGraphics(e.graphicsUse, () -> {
             RtAccel.destroyEntityAccel(accel, backing);
             geometry.destroy();
         });
@@ -1957,7 +1957,7 @@ public final class RtEntities {
         slot.refitScratch = null;
         slot.indices = null;
         slot.indexCount = 0;
-        ctx.gpuExecutor().retireAfterGraphics(slot.graphicsUse, () -> {
+        ctx.deferredDeletionQueue().retireAfterGraphics(slot.graphicsUse, () -> {
             if (accel != null) RtAccel.destroyEntityAccel(accel, backing);
             if (geometry != null) geometry.destroy();
             if (scratch != null) scratch.destroy();
@@ -1989,7 +1989,7 @@ public final class RtEntities {
         }
         if (tableRing != null) {
             for (TableSlot old : tableRing) {
-                ctx.gpuExecutor().retireAfterGraphics(old.graphicsUse, old.buffer::destroy);
+                ctx.deferredDeletionQueue().retireAfterGraphics(old.graphicsUse, old.buffer::destroy);
                 RtFrameStats.FRAME.count("entityTableRetirements", 1);
             }
             tableRing = null;

@@ -1735,12 +1735,12 @@ public final class RtTerrain {
     /** Queue old GPU resources until the last graphics submission that could reference them completes. */
     private void retire(RtContext ctx, GraphicsUse lastGraphicsUse, List<SectionGeom> removed) {
         for (SectionGeom g : removed) {
-            ctx.gpuExecutor().retireAfterGraphics(lastGraphicsUse, g::destroy);
+            ctx.deferredDeletionQueue().retireAfterGraphics(lastGraphicsUse, g::destroy);
         }
     }
 
     private void retireGeneration(RtContext ctx, GraphicsUse lastGraphicsUse, Generation generation) {
-        ctx.gpuExecutor().retireAfterGraphics(lastGraphicsUse,
+        ctx.deferredDeletionQueue().retireAfterGraphics(lastGraphicsUse,
                 () -> table.recycleGeneration(generation));
     }
 
@@ -1923,7 +1923,7 @@ public final class RtTerrain {
         lightGrid.invalidate(ctx, lastGraphicsUse);
         if (!oldGeometry.isEmpty()) {
             ArrayList<SectionGeom> retirement = new ArrayList<>(oldGeometry);
-            ctx.gpuExecutor().retireAfterGraphics(lastGraphicsUse,
+            ctx.deferredDeletionQueue().retireAfterGraphics(lastGraphicsUse,
                     () -> destroyDetachedGeometry(retirement));
         }
         if (!oldPrepared.isEmpty()) {

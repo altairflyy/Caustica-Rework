@@ -389,7 +389,7 @@ final class RtLightGridManager {
 
         private void retire(RtContext ctx, GraphicsUse lastGraphicsUse) {
             if (arena != null) {
-                ctx.gpuExecutor().retireAfterGraphics(lastGraphicsUse, arena::destroy);
+                ctx.deferredDeletionQueue().retireAfterGraphics(lastGraphicsUse, arena::destroy);
             }
         }
 

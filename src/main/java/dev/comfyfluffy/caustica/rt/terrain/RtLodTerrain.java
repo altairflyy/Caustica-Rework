@@ -915,7 +915,7 @@ public final class RtLodTerrain {
             if (old != null) {
                 Set<RtSectionTable.SectionGeom> retained = next.geomIdentitySet();
                 var lastUse = ctx.gpuExecutor().latestGraphicsUse();
-                ctx.gpuExecutor().retireAfterGraphics(lastUse, () -> old.destroyExcept(retained));
+                ctx.deferredDeletionQueue().retireAfterGraphics(lastUse, () -> old.destroyExcept(retained));
             }
 
             if (finished) {
@@ -984,7 +984,7 @@ public final class RtLodTerrain {
         current = null;
         if (old != null) {
             var lastUse = ctx.gpuExecutor().latestGraphicsUse();
-            ctx.gpuExecutor().retireAfterGraphics(lastUse, old::destroy);
+            ctx.deferredDeletionQueue().retireAfterGraphics(lastUse, old::destroy);
         }
     }
 

@@ -37,6 +37,7 @@ import org.lwjgl.vulkan.VkSubmitInfo;
 
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
+import dev.comfyfluffy.caustica.rt.gpu.DeferredDeletionQueue;
 
 import java.nio.LongBuffer;
 import java.util.function.Consumer;
@@ -61,6 +62,7 @@ public final class RtContext {
     /** Serializes device-wide host waits against submissions from the Caustica compute thread. */
     private final Object deviceQueueHostLock = new Object();
     private final RtGpuExecutor gpuExecutor;
+    private final DeferredDeletionQueue deferredDeletionQueue;
     private final int shaderGroupHandleSize;
     private final int shaderGroupBaseAlignment;
     private final int shaderGroupHandleAlignment;
@@ -84,6 +86,7 @@ public final class RtContext {
         this.accelerationStructureScratchAlignment = scratchAlign;
         this.updateAfterBindCombinedImageSamplerLimit = updateAfterBindCombinedImageSamplerLimit;
         this.gpuExecutor = new RtGpuExecutor(this);
+        this.deferredDeletionQueue = new DeferredDeletionQueue(gpuExecutor);
     }
 
     /** The RT context for the current Vulkan device, or null if RT/Vulkan isn't available. */
@@ -190,6 +193,10 @@ public final class RtContext {
 
     public RtGpuExecutor gpuExecutor() {
         return gpuExecutor;
+    }
+
+    public DeferredDeletionQueue deferredDeletionQueue() {
+        return deferredDeletionQueue;
     }
 
     VulkanQueue computeQueue() {
