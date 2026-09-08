@@ -104,4 +104,26 @@ The legacy branch emits barriers at the same command boundaries as before. The
 generated branch emits only compiled hazards and retains the same conservative
 stage/access scope. Targeted denoiser, SVGF-resource and retained POST tests PASS.
 `validate-build.ps1`: PASS; V1 230 tests with exact 4/4 canonical failures and
-characterization 7/7; V2 PASS. Runtime same-JAR A/B: PENDING.
+characterization 7/7; V2 PASS.
+
+Runtime same-JAR SVGF A/B: PASS. The accepted pair used SHA-256
+`986CC87A559409A63B68A7AFC2AF16E36E7FBCFC298D036808B63D2A6E95C464`, with
+upscalers disabled, SVGF enabled and synchronization validation active. Run A
+recorded the `legacy`/SVGF marker; run B recorded the `generated`/SVGF marker.
+Neither run reported a `SYNC-HAZARD`. Both reported only the two established DH
+vertex-input occurrences of `VUID-VkGraphicsPipelineCreateInfo-Input-08733` in
+the common finding set. Legacy A additionally reported the intermittent known
+`VUID-vkDestroyDevice-device-05137` shutdown leak; generated B did not, so B
+introduced no new validation finding. The user completed matched first-frame,
+stationary accumulation, movement/camera, menu and world-reload checks without
+reporting a visual or temporal regression. NRD runtime qualification is
+`NOT AVAILABLE`: the quarantined backend is not selectable in this build.
+
+Accepted evidence directories:
+
+- legacy A: `build/rewrite-validation/AER-083-denoiser/A-609a70c69cd74350ae768f06d8899d8e`
+- generated B: `build/rewrite-validation/AER-083-denoiser/B-98fd42ce3d23455da39a0c62543d378a`
+
+The denoiser family is qualified. AER-083 remains ACTIVE; upscaler and path-trace
+output families are intentionally untouched and remain to be qualified before
+task closure.
