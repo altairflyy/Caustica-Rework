@@ -1,5 +1,33 @@
 # Rewrite Blockers
 
+## BLOCKER-003 — GATE-8 automatic-barrier qualification
+
+**Status:** OPEN
+
+**Task:** AER-083; blocks AER-084 and GATE-8.
+
+**Observed:** AER-082 is committed and V0/V1/V2 pass. The remaining barrier work
+requires per-family Vulkan A/B. The installed test profile is still 0.2.7; its
+log enumerates the validation layer but does not qualify the graph candidate.
+No autonomous runtime scenario/P99 harness is configured. Aggregate AER-081
+declarations also require per-image/operation refinement before synthesis.
+
+**Expected:** post images first, then denoiser, upscaler and trace outputs, each
+with explicit/generated A/B and active Vulkan validation before advancing.
+GATE-8 also requires comparable P99 and complete resource declarations.
+
+**Evidence:** `docs/rewrite/tasks/AER-083-result.md` records code seams, installed
+candidate, log timestamp, available layer and required recovery sequence.
+
+**Invariant at risk:** GPU-003; do not replace synchronization based solely on
+aggregate shadow declarations or passing unit tests.
+
+**Changes reverted:** none; no generated barriers or queue changes introduced.
+
+**Next action:** establish a repeatable validation scenario with human-assisted
+runtime execution or a tested harness, then implement and qualify the first
+post-image family. AER-084 remains PENDING; GATE-8 remains PENDING.
+
 ## BLOCKER-001 — GATE-0 baseline characterization
 
 **Status:** CLOSED
