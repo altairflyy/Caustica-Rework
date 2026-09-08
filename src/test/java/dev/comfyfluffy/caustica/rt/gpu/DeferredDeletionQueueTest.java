@@ -64,8 +64,9 @@ class DeferredDeletionQueueTest {
                             "dev/comfyfluffy/caustica/rt/RtGpuExecutor.java")))
                     .map(DeferredDeletionQueueTest::read)
                     .flatMap(source -> source.lines())
-                    .filter(line -> line.contains(".retireAfterGraphics(")
-                            && !line.contains(".deferredDeletionQueue().retireAfterGraphics("))
+                    .filter(line -> line.contains("gpuExecutor().retireAfterGraphics(")
+                            || line.contains("gpuExecutor.retireAfterGraphics(")
+                            || line.contains("executor.retireAfterGraphics("))
                     .count();
             assertEquals(0L, bypasses);
         }

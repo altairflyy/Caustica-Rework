@@ -46,3 +46,11 @@ different lifetime domain and remains on `RtGpuExecutor`.
 
 `AER-040` is DONE. `RtGpuExecutor` remains the sole destruction-queue and
 timeline authority; `AER-041` is READY and was not started.
+
+## Characterization clarification
+
+The production-adoption check rejects calls whose receiver is the legacy
+`RtGpuExecutor`, rather than rejecting every higher-level facade that exposes a
+same-named operation. This preserves the original invariant while allowing an
+ownership facade to delegate through `DeferredDeletionQueue`; the exact token
+and callback delegation checks remain unchanged.
