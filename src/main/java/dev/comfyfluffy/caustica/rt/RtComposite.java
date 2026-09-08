@@ -90,6 +90,7 @@ import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.frame.LegacyCompositePass;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
 import dev.comfyfluffy.caustica.rt.frame.PrepareFramePass;
+import dev.comfyfluffy.caustica.rt.frame.ReconstructionPass;
 import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
 import dev.comfyfluffy.caustica.rt.frame.TemporalState;
 
@@ -715,6 +716,7 @@ public final class RtComposite {
             new PrepareFramePass(this::prepareFrame),
             new LegacyCompositePass(this::executeLegacyComposite));
     private final PathTracePass pathTracePass = new PathTracePass(this::recordPathTrace);
+    private final ReconstructionPass reconstructionPass = new ReconstructionPass(this::reconstructFrame);
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
     private GpuTexture pipelineNativeColor;
@@ -722,6 +724,8 @@ public final class RtComposite {
     private VkCommandBuffer pipelineCommand;
     private MemoryStack pipelineStack;
     private ByteBuffer pipelinePushConstants;
+    private ReconstructionInput pipelineReconstructionInput;
+    private ReconstructionResult pipelineReconstructionResult;
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -1492,6 +1496,96 @@ public final class RtComposite {
         VulkanCommandEncoder.memoryBarrier(pipelineCommand, pipelineStack);
     }
 
+    private void reconstructFrame(FrameContext frame) {
+        if (frame != frameContext || pipelineContext == null || pipelineInputs == null
+                || pipelineCommand == null || pipelineStack == null || pipelineReconstructionInput == null) {
+            throw new IllegalStateException("reconstruction pass has no active frame invocation");
+        }
+        RtContext ctx = pipelineContext;
+        VkCommandBuffer cmd = pipelineCommand;
+        MemoryStack stack = pipelineStack;
+        boolean rrDone = false;
+        RtImage upscaleSource = pipelineReconstructionInput.denoisedSource() != null
+                ? pipelineReconstructionInput.denoisedSource() : output;
+
+        if (pipelineInputs.rrPath()
+                && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
+            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
+                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
+                rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
+                        gSpecAlbedo, gNormal, gSpecMotion, rrOutput, renderW, renderH, displayW, displayH,
+                        -frame.jitter().x(), -frame.jitter().y(), frameViewRotation, frameProjection);
+            }
+        }
+
+        boolean svgfRan = false;
+        boolean svgfDebugView = pipelineReconstructionInput.debugView() >= SVGF_DEBUG_FIRST
+                && pipelineReconstructionInput.debugView() <= SVGF_DEBUG_LAST;
+        if (pipelineInputs.svgfPath() && !pipelineReconstructionInput.nrdDone()
+                && !pipelineReconstructionInput.nrdValidationOn()
+                && svgfDenoiser != null && svgfResources.historyPing() != null && gViewZ != null) {
+            boolean svgfWriteToPing = svgfResources.writeToPing();
+            int svgfParity = svgfWriteToPing ? 0 : 1;
+            RtImage historyIn = svgfWriteToPing ? svgfResources.historyPong() : svgfResources.historyPing();
+            RtImage historyOut = svgfWriteToPing ? svgfResources.historyPing() : svgfResources.historyPong();
+            RtImage momentsIn = svgfWriteToPing ? svgfResources.momentsPong() : svgfResources.momentsPing();
+            RtImage momentsOut = svgfWriteToPing ? svgfResources.momentsPing() : svgfResources.momentsPong();
+            boolean svgfReset = !svgfResources.hasHistory();
+            float svgfCamForwardDelta = 0.0f;
+            if (svgfResources.hasHistory() && !svgfReset) {
+                double fx = frameViewRotation.m02();
+                double fy = frameViewRotation.m12();
+                double fz = frameViewRotation.m22();
+                svgfCamForwardDelta = (float) -((camX - svgfResources.previousCameraX()) * fx
+                        + (camY - svgfResources.previousCameraY()) * fy
+                        + (camZ - svgfResources.previousCameraZ()) * fz);
+                if (!Float.isFinite(svgfCamForwardDelta)) {
+                    svgfCamForwardDelta = 0.0f;
+                }
+            }
+            int extraSkySmooth = RtFramePresenter.INSTANCE.isActive() ? 1 : 0;
+            VulkanCommandEncoder.memoryBarrier(cmd, stack);
+            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SVGF denoise");
+                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.svgf")) {
+                svgfDenoiser.reproject(cmd, renderW, renderH, svgfParity,
+                        upscaleSource.view, historyIn.view, momentsIn.view,
+                        historyOut.view, momentsOut.view, svgfResources.filterPing().view,
+                        gMotion.view, gViewZ.view, gNormal.view,
+                        svgfResources.previousViewZ().view, svgfResources.previousNormal().view, gAlbedo.view,
+                        svgfReset, SVGF_MAX_FRAMES, svgfCamForwardDelta);
+                VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                RtImage src = svgfResources.filterPing();
+                RtImage dst = svgfResources.filterPong();
+                for (int pass = 0; pass < RtSvgfDenoiser.ATROUS_PASSES; pass++) {
+                    boolean lastPass = pass == RtSvgfDenoiser.ATROUS_PASSES - 1;
+                    svgfDenoiser.atrous(cmd, renderW, renderH, pass, svgfParity,
+                            src.view, dst.view, gViewZ.view, gNormal.view, momentsOut.view,
+                            gAlbedo.view,
+                            SVGF_PHI_LUMINANCE, SVGF_PHI_NORMAL, SVGF_PHI_DEPTH,
+                            extraSkySmooth, lastPass,
+                            svgfDebugView ? pipelineReconstructionInput.debugView() : 0);
+                    VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                    if (pass == RtSvgfDenoiser.HISTORY_FEEDBACK_PASS) {
+                        copyImage(cmd, stack, dst, historyOut);
+                        VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                    }
+                    RtImage swap = src;
+                    src = dst;
+                    dst = swap;
+                }
+                upscaleSource = src;
+                copyImage(cmd, stack, gViewZ, svgfResources.previousViewZ());
+                copyImage(cmd, stack, gNormal, svgfResources.previousNormal());
+                VulkanCommandEncoder.memoryBarrier(cmd, stack);
+            }
+            svgfResources.flipHistory();
+            svgfResources.markHistoryValid();
+            svgfRan = true;
+            svgfResources.snapshotPreviousCamera(camX, camY, camZ);
+        }
+        pipelineReconstructionResult = new ReconstructionResult(rrDone, upscaleSource, svgfRan);
+    }
+
     private FrameInputs prepareFrameInputs() {
         int debugView = debugView();
         boolean rrPath = RtDlssRr.enabled() && debugView == 0;
@@ -1572,7 +1666,6 @@ public final class RtComposite {
             float jitterX = inputs.jitterX();
             float jitterY = inputs.jitterY();
 
-            boolean rrDone = false;
             // Optional coarse LOD proxy (Distant Horizons / Voxy). A no-op when neither mod is present.
             RtLodTerrain.INSTANCE.frame(ctx, terrain.blockX, terrain.blockY, terrain.blockZ);
             // Select the next BDA ring slot; the generated WorldPushData serializer fills it once all
@@ -1879,133 +1972,26 @@ public final class RtComposite {
                 denoisedSource = nrdValidation;
             }
 
-            // DLSS-RR denoise + upscale. The RT pass wrote noisy color (render res) + guides;
-            // RR reads them and writes the display-res denoised result straight into rrOutput.
-            if (rrPath && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
-                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
-                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
-                    rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
-                            gSpecAlbedo, gNormal, gSpecMotion, rrOutput, renderW, renderH, displayW, displayH,
-                            -jitterX, -jitterY, frameViewRotation, frameProjection);
-                }
+            pipelineCommand = cmd;
+            pipelineStack = stack;
+            pipelineReconstructionInput = new ReconstructionInput(
+                    denoisedSource, nrdDone, nrdValidationOn, debugView);
+            pipelineReconstructionResult = null;
+            try {
+                reconstructionPass.execute(frameContext);
+            } finally {
+                pipelineCommand = null;
+                pipelineStack = null;
+                pipelineReconstructionInput = null;
             }
-
-            // Whatever the upscale stage will read. The denoisers replace the raw trace here.
-            RtImage upscaleSource = denoisedSource != null ? denoisedSource : output;
-
-            // ---- SVGF: the renderer's own denoiser (temporal reprojection with luminance moments,
-            // then a variance-guided à-trous cascade). Runs on every non-DLSS path unless NRD took
-            // the slot. Its temporal stage integrates the jitter sequence, so — exactly like the
-            // stack it replaces — the upscaler downstream is told the input is already converged.
-            boolean svgfRan = false;
-            if (svgfPath && !nrdDone && !nrdValidationOn
-                    && svgfDenoiser != null && svgfResources.historyPing() != null && gViewZ != null) {
-                boolean svgfWriteToPing = svgfResources.writeToPing();
-                int svgfParity = svgfWriteToPing ? 0 : 1;
-                RtImage historyIn = svgfWriteToPing ? svgfResources.historyPong() : svgfResources.historyPing();
-                RtImage historyOut = svgfWriteToPing ? svgfResources.historyPing() : svgfResources.historyPong();
-                RtImage momentsIn = svgfWriteToPing ? svgfResources.momentsPong() : svgfResources.momentsPing();
-                RtImage momentsOut = svgfWriteToPing ? svgfResources.momentsPing() : svgfResources.momentsPong();
-                // Only a genuine absence of history restarts accumulation: the first frame after
-                // (re)allocation, which includes a resolution change. Camera movement does not,
-                // and neither does an FOV change -- the motion vectors are built against the
-                // previous frame's projection, so a zoom arrives as ordinary screen displacement
-                // that the reprojection follows and the geometry gate validates.
-                boolean svgfReset = !svgfResources.hasHistory();
-                // How far the camera travelled ALONG THE VIEW AXIS since the previous frame. The
-                // reprojection gate uses it to predict what a static surface's previous view depth
-                // should have been; without it, walking forward changes every nearby surface's
-                // depth by more than the 5% tolerance and the gate throws the history away every
-                // frame (at 36 fps, ~0.12 blocks/frame already exceeds the tolerance inside
-                // ~2.5 blocks), which is both the noise and the blur reported while moving.
-                float svgfCamForwardDelta = 0.0f;
-                if (svgfResources.hasHistory() && !svgfReset) {
-                    // Row 2 of the rotation-only view matrix is the view-space +Z axis, and view
-                    // space looks down -Z -- the tracer relies on exactly that when it treats
-                    // curClip.w (= -z_view) as a positive depth growing forward. So row 2 is the
-                    // BACKWARD axis and the dot product below must be negated to get the camera's
-                    // forward travel.
-                    //
-                    // Without the negation the term did not cancel the camera's motion, it DOUBLED
-                    // it: the predicted previous depth moved one step the wrong way, leaving an
-                    // error of 2x the per-frame travel. At 4.3 blocks/s and 36 fps that is 0.239
-                    // blocks against a 5% tolerance, so every surface closer than ~4.8 blocks
-                    // failed the depth gate on EVERY frame while walking, and the history was
-                    // rebuilt from a single sample each frame. Measured with debug view 10:
-                    // white (converged) standing still, black (no history) the moment the camera
-                    // moved. Negated, the prediction is exact -- the residual is 0.0000 blocks at
-                    // every distance and every off-axis angle.
-                    double fx = frameViewRotation.m02();
-                    double fy = frameViewRotation.m12();
-                    double fz = frameViewRotation.m22();
-                    svgfCamForwardDelta = (float) -((camX - svgfResources.previousCameraX()) * fx
-                            + (camY - svgfResources.previousCameraY()) * fy
-                            + (camZ - svgfResources.previousCameraZ()) * fz);
-                    if (!Float.isFinite(svgfCamForwardDelta)) {
-                        svgfCamForwardDelta = 0.0f;
-                    }
-                }
-                // FG amplifies residual per-frame sky noise into visible flicker (it interpolates
-                // between presented frames), so the sky smooths harder while it is presenting.
-                int extraSkySmooth = RtFramePresenter.INSTANCE.isActive() ? 1 : 0;
-                VulkanCommandEncoder.memoryBarrier(cmd, stack); // trace + guides visible to the denoiser
-                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SVGF denoise");
-                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.svgf")) {
-                    svgfDenoiser.reproject(cmd, renderW, renderH, svgfParity,
-                            upscaleSource.view, historyIn.view, momentsIn.view,
-                            historyOut.view, momentsOut.view, svgfResources.filterPing().view,
-                            gMotion.view, gViewZ.view, gNormal.view,
-                            svgfResources.previousViewZ().view, svgfResources.previousNormal().view, gAlbedo.view,
-                            svgfReset, SVGF_MAX_FRAMES, svgfCamForwardDelta);
-                    VulkanCommandEncoder.memoryBarrier(cmd, stack); // reprojection visible to the wavelet
-
-                    // À-trous cascade with doubling tap spacing. The first iteration's output is
-                    // what feeds next frame's temporal history (SVGF's own choice: the raw
-                    // accumulation is noisier and converges more slowly, while feeding back the
-                    // fully filtered image compounds its blur into permanent smearing).
-                    RtImage src = svgfResources.filterPing();
-                    RtImage dst = svgfResources.filterPong();
-                    for (int pass = 0; pass < RtSvgfDenoiser.ATROUS_PASSES; pass++) {
-                        // The cascade runs in DEMODULATED lighting space so its kernels never
-                        // average across albedo detail (filtering modulated radiance flattens
-                        // texture contrast — measured 3.00:1 down to 1.04:1, the "everything looks
-                        // like flat poster paint" failure). Only the LAST iteration multiplies the
-                        // albedo guide back in, which is also why the history feedback below must
-                        // be taken from an earlier, still-demodulated pass.
-                        boolean lastPass = pass == RtSvgfDenoiser.ATROUS_PASSES - 1;
-                        svgfDenoiser.atrous(cmd, renderW, renderH, pass, svgfParity,
-                                src.view, dst.view, gViewZ.view, gNormal.view, momentsOut.view,
-                                gAlbedo.view,
-                                SVGF_PHI_LUMINANCE, SVGF_PHI_NORMAL, SVGF_PHI_DEPTH,
-                                extraSkySmooth, lastPass, svgfDebugView ? debugView : 0);
-                        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                        if (pass == RtSvgfDenoiser.HISTORY_FEEDBACK_PASS) {
-                            // Copy this iteration's colour into the history the next frame reads.
-                            // Still demodulated (the feedback pass is never the last one — see the
-                            // assert in RtSvgfDenoiser), which is required: next frame's
-                            // reprojection blends it against freshly demodulated samples.
-                            copyImage(cmd, stack, dst, historyOut);
-                            VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                        }
-                        RtImage swap = src;
-                        src = dst;
-                        dst = swap;
-                    }
-                    upscaleSource = src; // the last iteration wrote here before the final swap
-
-                    // Snapshot this frame's depth/normal guides: next frame's reprojection validates
-                    // its history against the geometry that produced it, which is what lets it
-                    // accept history under motion instead of clamping colour and smearing.
-                    copyImage(cmd, stack, gViewZ, svgfResources.previousViewZ());
-                    copyImage(cmd, stack, gNormal, svgfResources.previousNormal());
-                    VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                }
-                svgfResources.flipHistory();
-                svgfResources.markHistoryValid();
-                svgfRan = true;
-                // Camera snapshot for next frame's forward-travel prediction (see above).
-                svgfResources.snapshotPreviousCamera(camX, camY, camZ);
+            ReconstructionResult reconstruction = pipelineReconstructionResult;
+            pipelineReconstructionResult = null;
+            if (reconstruction == null) {
+                throw new IllegalStateException("reconstruction pass produced no result");
             }
+            boolean rrDone = reconstruction.rrDone();
+            RtImage upscaleSource = reconstruction.upscaleSource();
+            boolean svgfRan = reconstruction.svgfRan();
             if (!rrDone && fsrPath && RtFsrUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "FSR upscale");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.fsr")) {
@@ -2171,6 +2157,11 @@ public final class RtComposite {
 
     private record FrameInputs(boolean rrPath, boolean fsrPath, boolean xessPath, boolean nrdPath,
                                boolean svgfPath, float jitterX, float jitterY) {}
+
+    private record ReconstructionInput(RtImage denoisedSource, boolean nrdDone,
+                                       boolean nrdValidationOn, int debugView) {}
+
+    private record ReconstructionResult(boolean rrDone, RtImage upscaleSource, boolean svgfRan) {}
 
     private record CelestialUv(Float4 sun, Float4 moon) {}
 

@@ -45,6 +45,17 @@ class FramePipelineTest {
         assertSame(frame, received.getFirst());
     }
 
+    @Test
+    void reconstructionPassDelegatesExactlyOnceWithTheSameFrame() {
+        FrameContext frame = frame(14L);
+        List<FrameContext> received = new ArrayList<>();
+
+        new ReconstructionPass(received::add).execute(frame);
+
+        assertEquals(1, received.size());
+        assertSame(frame, received.getFirst());
+    }
+
     private static FrameContext frame(long index) {
         return new FrameContext(index, 1.0f / 60.0f,
                 new FrameContext.Extent(1, 1), new FrameContext.Extent(1, 1),
