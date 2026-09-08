@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.rt.entity;
 
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.rt.scene.WeatherSceneContribution;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.WeatherEffectRenderer;
 import net.minecraft.client.renderer.state.level.WeatherRenderState;
@@ -172,28 +173,30 @@ public final class RtWeatherCapture {
      * has already set the any-hit alpha bucket and the camera-relative → rebased offset on
      * {@code out}).
      *
-     * <p>Returns the number of columns captured, or 0 when it is not raining, the feature is off, or the
-     * weather render state has not been populated (menus, dimension without precipitation).
+     * <p>Returns the exact shared-particle vertex segment and column count, or an empty contribution
+     * when it is not raining, the feature is off, or the weather render state is unavailable.
      *
      * @param capture the shared entity/particle mesh accumulator
      * @param out     the {@link RtParticleCapture} adapter feeding {@code capture}, offset already set
      * @param camPos  this frame's camera position (columns are emitted relative to it, as vanilla does)
      * @param budget  max columns to capture, so weather cannot exhaust the particle budget on its own
      */
-    public int capture(RtEntityCapture capture, RtParticleCapture out, Vec3 camPos, int budget) {
+    public WeatherSceneContribution sceneContribution(
+            RtEntityCapture capture, RtParticleCapture out, Vec3 camPos, int budget) {
+        int firstVertex = capture.verts.size() / 3;
         if (!enabled() || budget <= 0) {
-            return 0;
+            return WeatherSceneContribution.empty(firstVertex);
         }
         WeatherRenderState state = weatherState();
         if (state == null || state.intensity <= 0.0f || state.radius <= 0) {
-            return 0;
+            return WeatherSceneContribution.empty(firstVertex);
         }
         float intensity = visualIntensity(state.intensity);
         // Player's density slider: thins the streaks through the same coverage lane distance fading
         // uses, so a lower setting reads as lighter rain rather than darker rain (see RAIN_DENSITY).
         intensity *= Math.clamp(CausticaConfig.Rt.Entities.RAIN_DENSITY.value(), 0f, 1f);
         if (intensity <= 0.0f) {
-            return 0;
+            return WeatherSceneContribution.empty(firstVertex);
         }
         int captured = 0;
         // Tag every emitted sheet so raygen shades it UNLIT (see PRIM_WEATHER). The path tracer's
@@ -213,11 +216,17 @@ public final class RtWeatherCapture {
                 loggedFailure = true;
                 CausticaMod.LOGGER.warn("RT weather capture failed; rain/snow will not be ray traced", t);
             }
-            return captured;
+            return contribution(capture, firstVertex, captured);
         } finally {
             capture.currentPrimFlags = 0;
         }
-        return captured;
+        return contribution(capture, firstVertex, captured);
+    }
+
+    private static WeatherSceneContribution contribution(
+            RtEntityCapture capture, int firstVertex, int columns) {
+        return new WeatherSceneContribution(
+                columns, firstVertex, capture.verts.size() / 3 - firstVertex);
     }
 
     /**

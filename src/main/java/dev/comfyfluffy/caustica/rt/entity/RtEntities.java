@@ -42,6 +42,7 @@ import dev.comfyfluffy.caustica.rt.RtGpuExecutor.TrackedGraphicsUse;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
+import dev.comfyfluffy.caustica.rt.scene.WeatherSceneContribution;
 
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
@@ -1087,19 +1088,19 @@ public final class RtEntities {
             // (x, z), so handing the denoiser a velocity would reproject a surface that never actually
             // moved and smear the drops into streaks. Zero tells DLSS-RR the truth: static geometry.
             int weatherBudget = Math.max(0, particleLimit - particlesCaptured);
-            int weatherVertBefore = capture.verts.size() / 3;
-            int weatherColumns = anyWeather && !build.full()
-                    ? RtWeatherCapture.INSTANCE.capture(capture, particleCapture, camPos, weatherBudget)
-                    : 0;
-            int weatherVertAfter = capture.verts.size() / 3;
-            for (int i = weatherVertBefore; i < weatherVertAfter; i++) {
+            int weatherFirstVertex = capture.verts.size() / 3;
+            WeatherSceneContribution weather = anyWeather && !build.full()
+                    ? RtWeatherCapture.INSTANCE.sceneContribution(
+                            capture, particleCapture, camPos, weatherBudget)
+                    : WeatherSceneContribution.empty(weatherFirstVertex);
+            for (int i = weather.firstVertex(); i < weather.endVertex(); i++) {
                 particleDisp.add(0f);
                 particleDisp.add(0f);
                 particleDisp.add(0f);
                 particleDisp.add(0f);
             }
-            build.logicalCount += weatherColumns;
-            RtFrameStats.FRAME.count("weatherColumnsCaptured", weatherColumns);
+            build.logicalCount += weather.columnCount();
+            RtFrameStats.FRAME.count("weatherColumnsCaptured", weather.columnCount());
         } catch (Throwable t) {
             capture.reset();
             particleDisp.clear();

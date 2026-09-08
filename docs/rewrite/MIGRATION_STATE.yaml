@@ -122,7 +122,7 @@ tasks:
   AER-072:
     state: DONE
   AER-073:
-    state: READY
+    state: DONE
 
   AER-080:
     state: PENDING

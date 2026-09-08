@@ -38,6 +38,28 @@ final class RtWeatherCaptureTest {
                 "src/main/java/dev/comfyfluffy/caustica/rt/entity/RtWeatherCapture.java");
     }
 
+    private static Path entitiesSource() {
+        return repoRoot().resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/entity/RtEntities.java");
+    }
+
+    @Test
+    void weatherContributionFeedsTheSharedParticleBlasPath() throws IOException {
+        String capture = Files.readString(source());
+        String entities = Files.readString(entitiesSource());
+
+        assertTrue(capture.contains("WeatherSceneContribution sceneContribution("),
+                "weather capture must publish an explicit scene contribution");
+        assertTrue(entities.contains("RtWeatherCapture.INSTANCE.sceneContribution("),
+                "the production entity/AS path must consume the weather contribution");
+        assertTrue(entities.contains("weather.firstVertex()")
+                        && entities.contains("weather.endVertex()"),
+                "zero motion must cover exactly the weather contribution vertex segment");
+        assertTrue(entities.contains("appendCapture(ctx, build,")
+                        && entities.contains("PARTICLE_BIT, PARTICLE_MASK, IDENTITY"),
+                "weather must remain in the shared particle BLAS/TLAS instance");
+    }
+
     private static Path repoRoot() {
         Path dir = Path.of("").toAbsolutePath();
         while (dir != null && !Files.exists(dir.resolve("settings.gradle"))) {
