@@ -80,6 +80,11 @@ public final class RtDlssRr {
         return initialized && !failed && !isNull(feature);
     }
 
+    /** Marks the current feature history invalid without recreating the feature. */
+    public void requestReset() {
+        resetHistory = true;
+    }
+
     /**
      * Record a DLSS-RR evaluation: denoise + upscale the noisy path-traced color (at render res) using
      * the guide buffers, writing the display-res result into {@code out}. {@code jitterX/jitterY} is the

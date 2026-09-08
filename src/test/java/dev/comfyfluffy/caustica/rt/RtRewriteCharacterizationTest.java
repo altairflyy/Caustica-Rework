@@ -28,6 +28,8 @@ final class RtRewriteCharacterizationTest {
             "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdDenoiser.java");
     private static final Path SVGF_BACKEND = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/reconstruction/SvgfReconstructionBackend.java");
+    private static final Path DLSS_RR_BACKEND = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/reconstruction/DlssRrReconstructionBackend.java");
 
     @Test
     void restirCurrentAndPreviousUseOppositePingPongHalves() throws IOException {
@@ -112,9 +114,11 @@ final class RtRewriteCharacterizationTest {
     @Test
     void temporalUpscalersAreMutuallyExclusiveWithReferencePriority() throws IOException {
         String source = Files.readString(COMPOSITE);
+        String dlssRrBackend = Files.readString(DLSS_RR_BACKEND);
 
         assertTrue(source.contains(
-                        "boolean rrPath = RtDlssRr.enabled() && debugView == 0;"),
+                        "boolean rrPath = dlssRrBackend.available() && debugView == 0;")
+                        && dlssRrBackend.contains("return RtDlssRr.enabled();"),
                 "DLSS-RR remains first in the temporal upscale slot");
         assertTrue(source.contains(
                         "boolean fsrPath = !rrPath && RtFsrUpscaler.enabled() && debugView == 0;"),

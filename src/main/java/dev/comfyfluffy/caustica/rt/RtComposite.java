@@ -65,7 +65,6 @@ import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
-import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFsrFrameGen;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFsrUpscaler;
 import dev.comfyfluffy.caustica.rt.pipeline.RtXessUpscaler;
@@ -84,6 +83,7 @@ import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.reconstruction.SvgfReconstructionBackend;
+import dev.comfyfluffy.caustica.rt.reconstruction.DlssRrReconstructionBackend;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
@@ -106,7 +106,7 @@ import java.nio.LongBuffer;
  * end-of-world seam. Gated by {@code -Dcaustica.rt=true}.
  *
  * <p>The path tracer and its guide buffers run at the configured render scale of display res with a per-frame
- * sub-pixel camera jitter; DLSS-RR ({@link RtDlssRr}) reconstructs the display-res image. With RR
+ * sub-pixel camera jitter; the DLSS-RR backend reconstructs the display-res image. With RR
  * disabled the trace runs at 1:1 and a linear blit stands in for the upscale (a raw, noisy reference).
  *
  * <p>Traces the extracted {@link RtTerrain} with perspective camera rays (camera matrices captured
@@ -265,7 +265,7 @@ public final class RtComposite {
      * frame (never cached) so the Video Settings toggles take effect on the next frame, the way every
      * other runtime-tunable option in the renderer does.
      */
-    private static int featureFlags() {
+    private int featureFlags() {
         int flags = 0;
         if (CausticaConfig.Rt.Composite.SSS.value()) {
             flags |= FEATURE_SSS;
@@ -288,10 +288,10 @@ public final class RtComposite {
             }
         }
         // Reports what the pipeline is ACTUALLY doing, not just what the option asks for:
-        // RtDlssRr.enabled() already folds in the backend switch, and a debug view suppresses RR
+        // Backend availability already folds in the backend switch, and a debug view suppresses RR
         // entirely (see recordFrame's rrPath), so a shader reading this flag learns whether its output
         // will be denoised rather than whether the player would like it to be.
-        if (RtDlssRr.enabled() && debugView() == 0) {
+        if (dlssRrBackend.available() && debugView() == 0) {
             flags |= FEATURE_DENOISER;
         } else {
             if (RtNrdDenoiser.active() && debugView() == 0) {
@@ -623,6 +623,7 @@ public final class RtComposite {
     // a = variance). The reprojection also needs LAST frame's geometry to validate history against,
     // which is what the prev-guide copies hold.
     private final SvgfReconstructionBackend svgfBackend = new SvgfReconstructionBackend();
+    private final DlssRrReconstructionBackend dlssRrBackend = new DlssRrReconstructionBackend();
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
     private boolean renderSizeSvgfEnabled;
@@ -1244,8 +1245,8 @@ public final class RtComposite {
     }
 
     private void ensureOutput(RtContext ctx, int width, int height) {
-        boolean rrEnabled = RtDlssRr.enabled();
-        int rrQuality = rrEnabled ? RtDlssRr.quality() : Integer.MIN_VALUE;
+        boolean rrEnabled = dlssRrBackend.available();
+        int rrQuality = rrEnabled ? dlssRrBackend.quality() : Integer.MIN_VALUE;
         // FSR 3 only takes the upscale slot when RR is not running (the selector makes them
         // mutually exclusive, but a hand-edited config could enable both — RR wins).
         boolean fsrEnabled = !rrEnabled && RtFsrUpscaler.enabled();
@@ -1281,7 +1282,7 @@ public final class RtComposite {
         // Reaching here with RR off can mean the denoising filter was just turned off. Nothing calls
         // ensureFeature again in that state, so the RR feature (and its history buffers) would stay
         // allocated for the rest of the session; the device is idle right now, so release it here.
-        RtDlssRr.INSTANCE.releaseIfDisabled();
+        dlssRrBackend.releaseIfDisabled();
         // Same reasoning for the FSR context (its history textures) when the upscaler switches away.
         RtFsrUpscaler.INSTANCE.releaseIfDisabled();
         // And for the XeSS upscaler (pipelines + history) on the same switch-away event.
@@ -1313,7 +1314,7 @@ public final class RtComposite {
         // of truth for what its dispatch will accept.
         int[] optimal;
         if (rrEnabled) {
-            optimal = RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height);
+            optimal = dlssRrBackend.recommendedRenderExtent(width, height);
         } else if (fsrEnabled) {
             optimal = RtFsrUpscaler.INSTANCE.queryRenderSize(width, height);
         } else if (xessEnabled) {
@@ -1479,13 +1480,15 @@ public final class RtComposite {
         RtImage upscaleSource = pipelineReconstructionInput.denoisedSource() != null
                 ? pipelineReconstructionInput.denoisedSource() : output;
 
-        if (pipelineInputs.rrPath()
-                && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
-                rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
-                        gSpecAlbedo, gNormal, gSpecMotion, rrOutput, renderW, renderH, displayW, displayH,
-                        -frame.jitter().x(), -frame.jitter().y(), frameViewRotation, frameProjection);
+        if (pipelineInputs.rrPath()) {
+            dev.comfyfluffy.caustica.rt.reconstruction.ReconstructionResult result = dlssRrBackend.execute(
+                    new DlssRrReconstructionBackend.Request(ctx, cmd, output, gDepth, gMotion, gAlbedo,
+                            gSpecAlbedo, gNormal, gSpecMotion, rrOutput,
+                            renderW, renderH, displayW, displayH,
+                            -frame.jitter().x(), -frame.jitter().y(), frameViewRotation, frameProjection));
+            rrDone = result.executed();
+            if (rrDone) {
+                upscaleSource = result.output();
             }
         }
 
@@ -1646,7 +1649,7 @@ public final class RtComposite {
 
     private FrameInputs prepareFrameInputs() {
         int debugView = debugView();
-        boolean rrPath = RtDlssRr.enabled() && debugView == 0;
+        boolean rrPath = dlssRrBackend.available() && debugView == 0;
         boolean fsrPath = !rrPath && RtFsrUpscaler.enabled() && debugView == 0;
         boolean xessPath = !rrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;
         boolean nrdPath = !rrPath && RtNrdDenoiser.active() && debugView == 0;
@@ -2698,10 +2701,10 @@ public final class RtComposite {
         // longer in flight and can be freed immediately.
         tlasRing.destroy();
         sharc.destroy(RtContext.currentOrNull());
-        // Unconditional: RtDlssRr.enabled() reflects the CURRENT toggles, and the denoiser toggle can
+        // Unconditional: backend availability reflects the CURRENT toggles, and the denoiser toggle can
         // have been turned off after a feature was already created. destroy() is a no-op when nothing
         // was ever allocated, so asking it every time is what guarantees the feature is released.
-        RtDlssRr.INSTANCE.destroy();
+        dlssRrBackend.destroy();
         // Same contract for the FSR context (no-op when it was never created).
         RtFsrUpscaler.INSTANCE.destroy();
         // And the XeSS upscaler (no-op when it was never initialized).
