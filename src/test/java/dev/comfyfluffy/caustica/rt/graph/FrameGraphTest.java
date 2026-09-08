@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FrameGraphTest {
     @Test
@@ -32,5 +33,9 @@ class FrameGraphTest {
                 "UpscalePass", "PostPresentPass"), graph.topologicalOrderNames());
         assertEquals(5, graph.passes().size());
         assertEquals(4, graph.accesses().size());
+        assertTrue(graph.diagnostics().isEmpty(), graph.diagnostics().toString());
+        assertTrue(graph.passes().stream().allMatch(pass -> !pass.resources().isEmpty()));
+        assertTrue(graph.passes().stream().flatMap(pass -> pass.resources().stream())
+                .allMatch(use -> !use.stages().isEmpty()));
     }
 }

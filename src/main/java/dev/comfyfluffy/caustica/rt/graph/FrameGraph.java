@@ -16,16 +16,20 @@ public final class FrameGraph {
     private final List<GraphPass> passes;
     private final List<GraphAccess> accesses;
     private final List<GraphPass> topologicalOrder;
+    private final List<GraphValidation.Diagnostic> diagnostics;
 
     private FrameGraph(List<GraphPass> passes, List<GraphAccess> accesses) {
         this.passes = List.copyOf(passes);
         this.accesses = List.copyOf(accesses);
         this.topologicalOrder = computeTopologicalOrder();
+        this.diagnostics = GraphValidation.diagnose(this.passes, this.accesses,
+                FrameResourceDeclarations.resources(), FrameResourceDeclarations.imported());
     }
 
     public static FrameGraph shadow(FramePipeline pipeline) {
         Objects.requireNonNull(pipeline, "pipeline");
-        List<GraphPass> passes = pipeline.declaredPassNames().stream().map(GraphPass::new).toList();
+        List<GraphPass> passes = pipeline.declaredPassNames().stream()
+                .map(FrameResourceDeclarations::pass).toList();
         List<GraphAccess> accesses = new ArrayList<>();
         for (int i = 1; i < passes.size(); i++) {
             GraphPass producer = passes.get(i - 1);
@@ -37,11 +41,18 @@ public final class FrameGraph {
         if (!graph.topologicalOrderNames().equals(pipeline.declaredPassNames())) {
             throw new IllegalStateException("shadow graph order differs from the frame pipeline");
         }
+        if (!graph.diagnostics().isEmpty()) {
+            throw new IllegalStateException("invalid shadow resource declarations: " + graph.diagnostics());
+        }
         return graph;
     }
 
     public List<GraphPass> passes() {
         return passes;
+    }
+
+    public List<GraphValidation.Diagnostic> diagnostics() {
+        return diagnostics;
     }
 
     public List<GraphAccess> accesses() {
