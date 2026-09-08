@@ -118,9 +118,9 @@ tasks:
   AER-070:
     state: DONE
   AER-071:
-    state: READY
+    state: DONE
   AER-072:
-    state: PENDING
+    state: READY
   AER-073:
     state: PENDING
 

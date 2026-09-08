@@ -24,6 +24,8 @@ final class RtFogShaderRegressionTest {
     private static final Path WORLD_COMMON = REPO_ROOT.resolve("shaders/world/world_common.slang");
     private static final Path RT_COMPOSITE =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
+    private static final Path FOG_MODULE =
+            REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/environment/FogModule.java");
 
     /**
      * Fog must be a term of the path integral, not of the display seam, and it must be ordered
@@ -118,9 +120,9 @@ final class RtFogShaderRegressionTest {
         assertTrue(Files.readString(WORLD_COMMON).contains("public float4   fogParams;"),
                 "WorldPush.fogParams missing — the generated WorldPushData would not compile anyway, "
                         + "but this points at the right file on failure");
-        String java = Files.readString(RT_COMPOSITE);
+        String java = Files.readString(FOG_MODULE);
         assertTrue(java.contains("private static Float4 fogParams()"),
-                "RtComposite.fogParams() resolver missing");
+                "FogModule.fogParams() resolver missing");
         assertInOrder(java,
                 "CausticaConfig.Rt.Composite.FOG_ENABLED.value()",
                 "CausticaConfig.Rt.Composite.FOG_DENSITY.value()");
@@ -139,12 +141,15 @@ final class RtFogShaderRegressionTest {
                 "public float4   fogParams;",
                 "public float4   fogTint;");
         String composite = Files.readString(RT_COMPOSITE);
-        assertTrue(composite.contains("new EnvironmentParameters.Fog(fogParams(), fogTint(partial))"),
-                "the environment snapshot must materialize fog params and tint together");
+        String module = Files.readString(FOG_MODULE);
+        assertTrue(composite.contains("fogModule.parameters(partial)"),
+                "the environment snapshot must delegate fog materialization to FogModule");
+        assertTrue(module.contains("new EnvironmentParameters.Fog(fogParams(), fogTint(partialTick))"),
+                "FogModule must materialize fog params and tint together");
         assertInOrder(composite,
                 "environment.fog().params(),",
                 "environment.fog().tint()");
-        assertTrue(composite.contains("EnvironmentAttributes.FOG_COLOR"),
+        assertTrue(module.contains("EnvironmentAttributes.FOG_COLOR"),
                 "the tint must read vanilla's fog colour attribute — biome blend, weather and "
                         + "dimension are already composed there, and re-resolving them here is how "
                         + "world-space fog state (and its leak family) starts");

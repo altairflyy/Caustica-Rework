@@ -59,6 +59,7 @@ import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.entity.RtEntities;
 import dev.comfyfluffy.caustica.rt.environment.EnvironmentParameters;
+import dev.comfyfluffy.caustica.rt.environment.FogModule;
 import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
 import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
@@ -186,59 +187,6 @@ public final class RtComposite {
                 Math.max(16.0f, Math.round(32.0f * Math.max(1.0f, strength) * quality)));
         return new Float4(depth, crossings, 0.0f,
                 CausticaConfig.Rt.Composite.PARALLAX_DISTANCE.value());
-    }
-
-    /**
-     * Volumetric fog lanes (WorldPush.fogParams): x density fraction, y Henyey-Greenstein
-     * anisotropy, z integration distance in blocks, w height falloff scale in blocks.
-     *
-     * <p>The toggle writes a zero density lane rather than a feature bit: {@code fog.slang} gates
-     * every term on {@code fogParams.x > 0}, so "off" is bit-identical to a frame that never ran
-     * the fog path, and there is no second switch for the shader and Java to disagree about. Read
-     * fresh every frame like the other Composite lanes, so a slider drag lands next frame.
-     */
-    private static Float4 fogParams() {
-        if (!CausticaConfig.Rt.Composite.FOG_ENABLED.value()) {
-            return new Float4(0.0f, 0.0f, 0.0f, 0.0f);
-        }
-        return new Float4(
-                CausticaConfig.Rt.Composite.FOG_DENSITY.value(),
-                CausticaConfig.Rt.Composite.FOG_ANISOTROPY.value(),
-                CausticaConfig.Rt.Composite.FOG_DISTANCE.value(),
-                CausticaConfig.Rt.Composite.FOG_HEIGHT_FALLOFF.value());
-    }
-
-    /**
-     * The fog scatter's colour (WorldPush.fogTint): vanilla's own {@code FOG_COLOR} through the
-     * same camera probe {@link #cloudColorState} reads for the deck — the game resolves it per
-     * biome blend at the camera, per weather, per dimension, so the swamp greens its god rays and
-     * a downpour greys them on vanilla's curve, with no biome walk or upload of our own. Early
-     * boot or a missing attribute leaves the lane at strength 0, which is the module's neutral
-     * cool-white tint — the same picture as before this lane existed, not a black fog.
-     *
-     * <p>Fog off writes the whole lane zero (matching {@link #fogParams()}'s "off costs one
-     * comparison" contract; the shader multiplies nothing when nobody reads it anyway).
-     */
-    private static Float4 fogTint(float partial) {
-        float strength = CausticaConfig.Rt.Composite.FOG_BIOME_TINT.value();
-        if (!CausticaConfig.Rt.Composite.FOG_ENABLED.value() || strength <= 0f) {
-            return new Float4(1f, 1f, 1f, 0f);
-        }
-        float r = 1f, g = 1f, b = 1f;
-        try {
-            Minecraft mc = Minecraft.getInstance();
-            if (mc != null && mc.gameRenderer != null) {
-                int argb = mc.gameRenderer.mainCamera().attributeProbe()
-                        .getValue(EnvironmentAttributes.FOG_COLOR, partial);
-                r = srgb8ToLinear(ARGB.red(argb));
-                g = srgb8ToLinear(ARGB.green(argb));
-                b = srgb8ToLinear(ARGB.blue(argb));
-            }
-        } catch (Throwable ignored) {
-            // Probe unavailable (early boot / unsupported context): strength 0 keeps the neutral tint.
-            return new Float4(1f, 1f, 1f, 0f);
-        }
-        return new Float4(r, g, b, Math.clamp(strength, 0f, 1f));
     }
 
     // ---- Shader feature flags (WorldPush.featureFlags). Mirrors world_common.slang's FEATURE_*
@@ -574,6 +522,7 @@ public final class RtComposite {
     // Experimental SHaRC (Spatially Hashed Radiance Cache). Shader-only — the host only owns the
     // persistent cache buffer and publishes its device address (no native lib, no extra binding).
     private final SharcRadianceCache sharc = SharcRadianceCache.INSTANCE;
+    private final FogModule fogModule = FogModule.INSTANCE;
 
     // Trace + guide buffers run at render res; composite (display-mapping) runs at display res.
     private int displayW = -1;
@@ -1769,10 +1718,10 @@ public final class RtComposite {
                     sharcBindings.gridOrigin(),
                     restirBindings.tuning(),
                     // Volumetric fog (WorldPush.fogParams): density lane zero when the toggle is
-                    // off, so "off" costs the shader one comparison — see fogParams() above.
+                    // off, so "off" costs the shader one comparison — see FogModule.
                     environment.fog().params(),
                     // Biome/weather tint for the fog's scatter (WorldPush.fogTint): the game's
-                    // own FOG_COLOR attribute, blended by the slider — see fogTint() above.
+                    // own FOG_COLOR attribute, blended by the slider — see FogModule.
                     environment.fog().tint()
             ).write(push);
             int flushBytes = Math.max(WORLD_PUSH_SIZE, READY_MASK_OFFSET + readyMaskBytes);
@@ -2063,7 +2012,7 @@ public final class RtComposite {
         EnvironmentParameters.Weather weather = weatherState(level, partial);
         EnvironmentParameters.Sky sky = skyPush(dimension, weather, time);
         EnvironmentParameters.Clouds clouds = cloudState(dimension, weather, camY, time);
-        EnvironmentParameters.Fog fog = new EnvironmentParameters.Fog(fogParams(), fogTint(partial));
+        EnvironmentParameters.Fog fog = fogModule.parameters(partial);
         return new EnvironmentParameters(dimension, time, weather, sky, fog, clouds);
     }
 
