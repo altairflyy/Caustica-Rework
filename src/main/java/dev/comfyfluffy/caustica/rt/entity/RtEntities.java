@@ -361,9 +361,48 @@ public final class RtEntities {
         long retryYawFitAfter;
     }
 
-    /** This frame's terrain and dynamic instance segments, entity BLAS builds, and geometry-table address. */
-    public record FrameEntities(List<RtAccel.Instance> baseInstances, List<RtAccel.Instance> dynamicInstances,
-                                List<RtAccel.PreparedBlas> blas, long geomTableAddr, FrameUse use) {
+    /** Immutable view of this frame's entity contribution and its opaque lifetime bookkeeping. */
+    public static final class EntitySceneContribution {
+        private final List<RtAccel.Instance> baseInstances;
+        private final List<RtAccel.Instance> dynamicInstances;
+        private final List<RtAccel.PreparedBlas> blas;
+        private final long geomTableAddr;
+        private final FrameUse use;
+
+        private EntitySceneContribution(List<RtAccel.Instance> baseInstances,
+                                        List<RtAccel.Instance> dynamicInstances,
+                                        List<RtAccel.PreparedBlas> blas,
+                                        long geomTableAddr,
+                                        FrameUse use) {
+            this.baseInstances = List.copyOf(baseInstances);
+            this.dynamicInstances = List.copyOf(dynamicInstances);
+            this.blas = List.copyOf(blas);
+            this.geomTableAddr = geomTableAddr;
+            this.use = use;
+        }
+
+        EntitySceneContribution(List<RtAccel.Instance> baseInstances,
+                                List<RtAccel.Instance> dynamicInstances,
+                                List<RtAccel.PreparedBlas> blas,
+                                long geomTableAddr) {
+            this(baseInstances, dynamicInstances, blas, geomTableAddr, null);
+        }
+
+        public List<RtAccel.Instance> baseInstances() {
+            return baseInstances;
+        }
+
+        public List<RtAccel.Instance> dynamicInstances() {
+            return dynamicInstances;
+        }
+
+        public List<RtAccel.PreparedBlas> blas() {
+            return blas;
+        }
+
+        public long geomTableAddr() {
+            return geomTableAddr;
+        }
     }
 
     private record FrameUse(FrameLists lists, TableSlot table) {
@@ -616,15 +655,15 @@ public final class RtEntities {
      * when disabled or nothing captured. Dynamic entity coordinates are local and placed by TLAS instances;
      * particles remain captured rebase-relative with an identity instance.
      */
-    public FrameEntities beginFrame(RtContext ctx, List<RtAccel.Instance> base, int rbx, int rby, int rbz,
-                                    double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
+    public EntitySceneContribution beginFrame(RtContext ctx, List<RtAccel.Instance> base, int rbx, int rby, int rbz,
+                                              double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
         if (!enabled()) {
-            return new FrameEntities(base, List.of(), List.of(), 0L, null);
+            return new EntitySceneContribution(base, List.of(), List.of(), 0L, null);
         }
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         if (level == null) {
-            return new FrameEntities(base, List.of(), List.of(), 0L, null);
+            return new EntitySceneContribution(base, List.of(), List.of(), 0L, null);
         }
         float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
         setCamera(camX, camY, camZ, projection, viewRotation);
@@ -652,7 +691,7 @@ public final class RtEntities {
         RtFrameStats.FRAME.count("entityRetainedGeometryBytes", retainedGeometryBytes);
 
         if (build.instances == null) {
-            return new FrameEntities(base, List.of(), List.of(), 0L, null);
+            return new EntitySceneContribution(base, List.of(), List.of(), 0L, null);
         }
         try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.uploadFlush")) {
             build.motion.flushWrites();
@@ -661,12 +700,12 @@ public final class RtEntities {
                 RtFrameStats.FRAME.count("entityTableFlushes", 1);
             }
         }
-        return new FrameEntities(base, build.instances, build.blas, build.geomTableAddr,
+        return new EntitySceneContribution(base, build.instances, build.blas, build.geomTableAddr,
                 new FrameUse(build.lists, build.table));
     }
 
     /** Associate every resource returned for a successfully enqueued frame with its graphics completion. */
-    public void markGraphicsUse(FrameEntities frame, GraphicsUse graphicsUse) {
+    public void markGraphicsUse(EntitySceneContribution frame, GraphicsUse graphicsUse) {
         if (frame == null || frame.use == null) {
             return;
         }

@@ -1549,7 +1549,7 @@ public final class RtComposite {
         RtGpuExecutor.GraphicsUse graphicsUse = gpuExecutor.beginGraphicsUse(encoder);
         RtGpuExecutor.GraphicsUseWaiter graphicsUseWaiter = gpuExecutor.graphicsUseWaiter();
         pendingGraphicsUse = graphicsUse;
-        RtEntities.FrameEntities frameEntities = null;
+        RtEntities.EntitySceneContribution entityContribution = null;
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
         RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_COMMAND_BUFFER, cmd.address(), "composite command buffer");
         int debugView = debugView();
@@ -1673,9 +1673,9 @@ public final class RtComposite {
             TerrainSceneContribution terrainContribution = terrain.sceneContribution();
             var staticInstances = RtLodTerrain.INSTANCE.appendInstances(
                     terrainContribution.instances(), terrain.blockX, terrain.blockY, terrain.blockZ);
-            RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
+            RtEntities.EntitySceneContribution fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
-            frameEntities = fe;
+            entityContribution = fe;
             // Block-breaking overlay: resolves each destroy-stage RenderType's texture into the
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly
@@ -1934,7 +1934,7 @@ public final class RtComposite {
         restirSystem.advance();
         // Do not attach a merely reserved token: failed recording may never signal it. Once execute succeeds,
         // every owner in this frame's manifest is protected through the final overlay consumer.
-        RtEntities.INSTANCE.markGraphicsUse(frameEntities, graphicsUse);
+        RtEntities.INSTANCE.markGraphicsUse(entityContribution, graphicsUse);
     }
 
     /**
