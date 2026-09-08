@@ -167,3 +167,23 @@ Accepted native evidence directories:
 - generated B: `build/rewrite-validation/AER-083-upscaler/B-df6471d85aa2415bb9b33703dc11bdb0`
 
 Native is qualified. DLSS-RR runtime qualification remains pending.
+
+DLSS-RR same-JAR A/B: PASS. Both runs used SHA-256
+`7FBF139FA5E34E15A5E54FE9886D532958805B576DFA092748589F5C6B9BC78D`,
+created one DLSS-RR feature, did not start SVGF, and reported the requested
+`DLSS_RR` backend with respectively `legacy` and `generated` barrier paths.
+Synchronization validation produced an exact normalized match: the two known
+`SYNC-HAZARD-WRITE-AFTER-WRITE` findings on SDK-owned
+`nv.ngx.dlssd.resource`, the two established DH vertex-input VUID occurrences,
+and the intermittent shutdown leak. Generated upscaler barriers introduced no
+new finding. The user completed the matched first-frame, stationary,
+movement/camera, menu and reload route without reporting a visual regression.
+
+Accepted DLSS-RR evidence directories:
+
+- legacy A: `build/rewrite-validation/AER-083-upscaler/A-3fb34e1f64c44812a6748e02df7ecc93`
+- generated B: `build/rewrite-validation/AER-083-upscaler/B-88d9c7c65d484acda012d83bd2d1debc`
+
+The upscaler family is qualified for every available backend: NATIVE PASS,
+DLSS_RR PASS, FSR NOT AVAILABLE and XESS NOT AVAILABLE. Path-trace outputs are
+the remaining AER-083 family.
