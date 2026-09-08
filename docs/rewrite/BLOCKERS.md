@@ -166,23 +166,27 @@ byte-for-byte in the Modrinth `prova` instance as its sole active
 `caustica-0.2.4.jar`, with the previous JAR preserved outside the active mods
 directory.
 
+The current candidate completed a manually launched base smoke: integrated world
+load, RT terrain activation, about 35 seconds in-world, return to menu, all-world
+save and clean shutdown without logged error/device-lost/lifetime-underflow
+evidence. The run did not request the Vulkan validation layer, did not include DH
+or Voxy, and did not demonstrate entity/refit activity in its log.
+
 The canonical GATE-4 acceptance additionally requires Vulkan validation without
 new errors and LOD/terrain/entity runtime smoke PASS. No repository smoke runner
 exists. The installed Modrinth App does not accept the tested direct-profile
 launch argument, and the available automation surface cannot control native
-Modrinth/Minecraft windows. The existing instance log predates GATE-4 and is not
-valid evidence for the current candidate.
+Modrinth/Minecraft windows.
 
 ## Required resolution
 
 Run the `prova` profile with `caustica-0.2.4.jar` and capture evidence for:
 
-1. menu and world load with Vulkan validation enabled;
-2. at least 30 seconds stationary rendering;
-3. movement/chunk streaming exercising terrain and LOD;
-4. visible entity rendering/refit activity;
-5. return to menu and world reload;
-6. clean shutdown with no new Vulkan validation, device-lost, lifetime-counter
+1. rerun menu/world load with `VK_LAYER_KHRONOS_validation` actually requested;
+2. exercise movement/chunk streaming with a compatible DH or Voxy provider;
+3. exercise visible dynamic entities and refit activity;
+4. return to menu and reload the world;
+5. shut down with no new Vulkan validation, device-lost, lifetime-counter
    underflow, early-destroy or unbounded-retirement errors.
 
 After the evidence passes, update `GATE-4-result.md`, close this blocker, set

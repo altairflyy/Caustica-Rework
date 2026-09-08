@@ -43,18 +43,26 @@ was modified during this gate audit.
 - Candidate JAR: current build copied byte-for-byte to the Modrinth `prova`
   instance as the only active `caustica-0.2.4.jar`; the previous `0.2.2` JAR
   is preserved in the instance backup directory.
-- Vulkan validation with the current candidate: NOT TESTED.
-- LOD/terrain/entity runtime smoke with the current candidate: NOT TESTED.
+- Current-candidate base runtime smoke: PASS. The 12:32 run loaded the integrated
+  world, activated the RT terrain path, remained in-world for about 35 seconds,
+  returned to menu, saved all dimensions and shut down cleanly without logged
+  error, device-lost, lifetime-underflow or early-destroy evidence.
+- Vulkan validation-layer run: NOT TESTED. The log explicitly reports
+  `Vulkan application-requested instance layers (0)`.
+- Terrain smoke: PASS (`RT composite active (terrain)`).
+- Entity/refit smoke: NOT DEMONSTRATED by the available log.
+- LOD provider smoke: NOT AVAILABLE in this profile; neither DH nor Voxy is
+  installed, so `RtLodTerrain` followed its no-provider path.
 
 The installed Modrinth App exposes no working direct-profile launch argument,
 and the available automation surface cannot control native Modrinth/Minecraft
-windows. The previous `latest.log` predates all GATE-4 commits and therefore is
-not accepted as runtime evidence.
+windows. The user launched the current candidate manually; that run supplies the
+partial evidence above but cannot prove paths that were not enabled or logged.
 
 ## Conclusion
 
 `GATE-4 integration completeness: PASS (static/runtime wiring)`.
 
-`GATE-4 overall: BLOCKED` pending the mandatory current-build Vulkan validation
-and LOD/terrain/entity smoke. `GATE-4` remains `PENDING`; `AER-050` remains
-`PENDING` and was not started.
+`GATE-4 overall: BLOCKED` pending a validation-layer run, an active DH/Voxy LOD
+provider smoke and demonstrated entity/refit activity. `GATE-4` remains
+`PENDING`; `AER-050` remains `PENDING` and was not started.
