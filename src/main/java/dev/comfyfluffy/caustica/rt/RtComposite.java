@@ -77,7 +77,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
-import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
+import dev.comfyfluffy.caustica.rt.lighting.RestirSystem;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.reconstruction.SvgfReconstructionBackend;
 import dev.comfyfluffy.caustica.rt.reconstruction.DlssRrReconstructionBackend;
@@ -274,10 +274,10 @@ public final class RtComposite {
         if (CausticaConfig.Rt.Composite.WEATHER_LIGHTING.value()) {
             flags |= FEATURE_WEATHER_LIGHTING;
         }
-        if (CausticaConfig.Rt.Lights.RESTIR_SAMPLING.value()) {
+        if (restirSystem.featureEnabled()) {
             flags |= FEATURE_RESTIR;
         }
-        if (CausticaConfig.Rt.Sharc.ENABLED.value() && SharcRadianceCache.INSTANCE.entryCount() > 0) {
+        if (sharc.featureEnabled()) {
             flags |= FEATURE_SHARC;
         }
         if (CausticaConfig.Rt.Composite.CLOUDS.value()) {
@@ -316,85 +316,8 @@ public final class RtComposite {
      * enabled toggle with no buffer (or a failed allocation) degrades to the normal tracer.
      */
     private void syncSharcResources(RtContext ctx) {
-        boolean active = sharc.enabled();
-        if (active) {
-            // Scene-change detection (dimension travel or world reload): same world coordinates,
-            // different scene. Clear the cache rather than letting staleness evict it over
-            // FRAME_LIFETIME frames of wrong light.
-            ClientLevel level = Minecraft.getInstance().level;
-            if (level != null) {
-                int dimension = dimensionId(level);
-                if (sharc.sceneChanged(level, dimension)) {
-                    CausticaMod.LOGGER.info("[SHaRC] scene changed; clearing radiance cache");
-                    sharc.requestClear();
-                }
-            }
-            sharc.ensure(ctx);
-            if (sharc.clearRequested()) {
-                CausticaMod.LOGGER.info("[SHaRC] cache reset requested; clearing via vkCmdFillBuffer");
-                // A reset is a rare menu action; idle the device briefly so the fill cannot race a
-                // trace that still reads the old contents.
-                ctx.waitIdle();
-                sharc.clearNow(ctx);
-            }
-            if (!sharc.debugWasActive()) {
-                sharc.setDebugActive(true);
-                CausticaMod.LOGGER.info("[SHaRC] enabled: {}", sharc.debugDescription());
-            }
-            // With sharc.debug on, also report the active parameters periodically so a live tuning
-            // change can be tracked without having to read the toml file.
-            if (CausticaConfig.Rt.Sharc.DEBUG.value() && frameCounter - sharc.lastDebugFrame() >= 300) {
-                sharc.setLastDebugFrame(frameCounter);
-                CausticaMod.LOGGER.info("[SHaRC] active (frame {}): {}", frameCounter,
-                        sharc.debugDescription());
-            }
-        } else {
-            if (sharc.debugWasActive()) {
-                CausticaMod.LOGGER.info("[SHaRC] disabled");
-            }
-            // Re-arm scene tracking: the cache is released on disable, so the next enable starts
-            // from an empty buffer and must not log a spurious "scene changed" clear.
-            sharc.resetTracking();
-            sharc.releaseIfDisabled(ctx);
-        }
-    }
-
-    private static String sharcDebugDescription() {
-        return SharcRadianceCache.INSTANCE.debugDescription();
-    }
-
-    private static long sharcCacheAddress() {
-        return SharcRadianceCache.INSTANCE.cacheAddress();
-    }
-
-    /**
-     * WorldPush.sharcParams: x cell size, y strength (scale on the cached radiance that replaces a
-     * vertex's path), z inverse temporal accumulation window (blend cap), w reserved (was max query
-     * distance — a query position is always inside its own cell, so the limit could never fire).
-     */
-    private static Float4 sharcParams() {
-        return SharcRadianceCache.INSTANCE.params();
-    }
-
-    /** WorldPush.sharcParams2: x start bounce, y update coverage, z frame lifetime, w normal threshold. */
-    private static Float4 sharcParams2() {
-        return SharcRadianceCache.INSTANCE.params2();
-    }
-
-    /** WorldPush.sharcParams3: x = minimum sample count before an entry may be queried, y/z/w reserved. */
-    private static Float4 sharcParams3() {
-        return SharcRadianceCache.INSTANCE.params3();
-    }
-
-    /**
-     * WorldPush.sharcGridOrigin: xyz = terrain origin block in WORLD coordinates (the same anchor
-     * the water wave domain and NRD use), w = cache entry count. The shader adds the origin to the
-     * rebased hit position to key the cache in absolute world coordinates, which are stable across
-     * camera movement and terrain rebases — anything derived from the camera (hitPos - camOffset is
-     * camera-relative) would smear entries across cells every frame, TAA jitter included.
-     */
-    private static Int4 sharcGridOrigin(RtTerrain terrain) {
-        return SharcRadianceCache.INSTANCE.gridOrigin(terrain);
+        ClientLevel level = Minecraft.getInstance().level;
+        sharc.sync(ctx, level, level == null ? DIMENSION_OVERWORLD : dimensionId(level), frameCounter);
     }
 
     // Finite sun/moon angular sizes let NEE shadow rays sample the light disk (soft, contact-hardening
@@ -523,7 +446,7 @@ public final class RtComposite {
     // ReSTIR DI/GI history is a strict two-buffer ping-pong: a dispatch reads only `previous` and writes
     // only `current`, so spatial neighbour reuse never races another raygen invocation. The pair exists
     // only while the player setting is ON; live toggles idle the device before destruction/allocation.
-    private final RestirHistory restirHistory = new RestirHistory();
+    private final RestirSystem restirSystem = new RestirSystem();
     private RtImage displayImage;
     // Parallel PQ-encoded ([0,1], ST.2084) HDR display image. Written alongside displayImage when HDR is
     // enabled. When the PQ swapchain is active, the combined UI overlay is composited over this image, then
@@ -1217,23 +1140,7 @@ public final class RtComposite {
      * OFF releases the VRAM (rather than merely hiding it), and ON can never observe stale reservoirs.
      */
     private void syncRestirResources(RtContext ctx) {
-        boolean desired = CausticaConfig.Rt.Lights.RESTIR_SAMPLING.value()
-                && CausticaConfig.Rt.Lights.RIS_CANDIDATES.value() > 0
-                && renderW > 0 && renderH > 0;
-        restirHistory.ensure(ctx, renderW, renderH, desired);
-    }
-
-    private long restirPreviousAddress() {
-        return restirHistory.previousAddress();
-    }
-
-    private long restirCurrentAddress() {
-        return restirHistory.currentAddress();
-    }
-
-    /** Explicit shader mode uniform; unlike the descriptive feature bit this is tied to real bindings. */
-    private int restirMode() {
-        return restirHistory.enabled() && CausticaConfig.Rt.Lights.RESTIR_SAMPLING.value() ? 1 : 0;
+        restirSystem.sync(ctx, renderW, renderH);
     }
 
     private void ensureOutput(RtContext ctx, int width, int height) {
@@ -1290,7 +1197,7 @@ public final class RtComposite {
             continuationQueue.destroy();
             continuationQueue = null;
         }
-        restirHistory.destroy();
+        restirSystem.destroy();
         destroyGuideImages();
 
         displayW = width;
@@ -1783,6 +1690,8 @@ public final class RtComposite {
             // Analytic held-item light: position + intensity lane and the item's RGB tint; w == 0
             // disables the shader term (toggle off, no luminous item, or no player).
             HandLightState hand = handLightState(terrain);
+            SharcRadianceCache.Bindings sharcBindings = sharc.bindings(terrain);
+            RestirSystem.Bindings restirBindings = restirSystem.bindings();
             new WorldPushData(
                     frameInvViewProj,
                     new Float3((float) (camX - terrain.blockX), (float) (camY - terrain.blockY),
@@ -1843,19 +1752,12 @@ public final class RtComposite {
                     // Material appearance lane: x is the optional metallic polish amount. It is read
                     // every frame so dragging the slider needs neither a material rebuild nor reload.
                     new Float4(CausticaConfig.Rt.Composite.METALLIC_SHININESS.value(), 0.0f, 0.0f, 0.0f),
-                    // Experimental SHaRC lanes (see sharcParams/sharcParams2/sharcParams3/sharcGridOrigin):
-                    // the cache buffer address plus the world-space caching and tuning parameters the
-                    // shader reads.
-                    sharcCacheAddress(),
-                    sharcParams(),
-                    sharcParams2(),
-                    sharcParams3(),
-                    sharcGridOrigin(terrain),
-                    // Trailing field (WorldPush.restirTuning): the live ReSTIR anti-flicker knobs
-                    // lighting.slang resolves against its compiled RESTIR_* caps.
-                    new Int4(CausticaConfig.Rt.Lights.RESTIR_TEMPORAL_HISTORY.value(),
-                            CausticaConfig.Rt.Lights.RESTIR_SPATIAL_NEIGHBOURS.value(),
-                            CausticaConfig.Rt.Lights.RESTIR_MAX_AGE.value(), 0),
+                    sharcBindings.cacheAddress(),
+                    sharcBindings.params(),
+                    sharcBindings.params2(),
+                    sharcBindings.params3(),
+                    sharcBindings.gridOrigin(),
+                    restirBindings.tuning(),
                     // Volumetric fog (WorldPush.fogParams): density lane zero when the toggle is
                     // off, so "off" costs the shader one comparison — see fogParams() above.
                     fogParams(),
@@ -1903,12 +1805,12 @@ public final class RtComposite {
                     terrain.lightBufferAddress(), terrain.lightAliasBufferAddress(),
                     terrain.lightLocalAliasBufferAddress(), terrain.lightGridCellBufferAddress(),
                     terrain.lightGridSpanBufferAddress(), continuationQueue.deviceAddress,
-                    restirPreviousAddress(), restirCurrentAddress(),
+                    restirBindings.previousAddress(), restirBindings.currentAddress(),
                     // The SVGF debug ids are consumed by the denoiser, not the tracer: forwarding
                     // them would make the raygen paint a guide overlay over the very image we are
                     // trying to inspect. The tracer sees 0 (normal shading) for those.
                     (int) frameCounter, svgfDebugView ? 0 : debugView,
-                    terrain.lightGeneration(), restirMode()).write(pushConstants);
+                    terrain.lightGeneration(), restirBindings.mode()).write(pushConstants);
             pipelineCommand = cmd;
             pipelineStack = stack;
             pipelinePushConstants = pushConstants;
@@ -2027,7 +1929,7 @@ public final class RtComposite {
         encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
         // Submission order on the one graphics queue is the history dependency: next frame reads the half
         // this frame just wrote and writes the other half. Advance only after execute accepted the command.
-        restirHistory.advance();
+        restirSystem.advance();
         // Do not attach a merely reserved token: failed recording may never signal it. Once execute succeeds,
         // every owner in this frame's manifest is protected through the final overlay consumer.
         RtEntities.INSTANCE.markGraphicsUse(frameEntities, graphicsUse);
@@ -2696,7 +2598,7 @@ public final class RtComposite {
             continuationQueue.destroy();
             continuationQueue = null;
         }
-        restirHistory.destroy();
+        restirSystem.destroy();
         destroyGuideImages();
         exposure.destroy();
         if (displayPipeline != null) {

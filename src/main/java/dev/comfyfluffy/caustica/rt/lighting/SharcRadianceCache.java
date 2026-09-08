@@ -1,6 +1,7 @@
 package dev.comfyfluffy.caustica.rt.lighting;
 
 import dev.comfyfluffy.caustica.CausticaConfig;
+import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtSharc;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float4;
@@ -39,6 +40,40 @@ public final class SharcRadianceCache {
     public void setLastDebugFrame(long frame) { lastDebugFrame = frame; }
     public void resetTracking() { previousWorld = null; previousDimension = 0; debugActive = false; lastDebugFrame = 0; }
 
+    /** Applies the unchanged per-frame lifecycle policy at the cache boundary. */
+    public void sync(RtContext ctx, ClientLevel world, int dimension, long frameIndex) {
+        if (enabled()) {
+            if (world != null && sceneChanged(world, dimension)) {
+                CausticaMod.LOGGER.info("[SHaRC] scene changed; clearing radiance cache");
+                requestClear();
+            }
+            ensure(ctx);
+            if (clearRequested()) {
+                CausticaMod.LOGGER.info("[SHaRC] cache reset requested; clearing via vkCmdFillBuffer");
+                ctx.waitIdle();
+                clearNow(ctx);
+            }
+            if (!debugWasActive()) {
+                setDebugActive(true);
+                CausticaMod.LOGGER.info("[SHaRC] enabled: {}", debugDescription());
+            }
+            if (CausticaConfig.Rt.Sharc.DEBUG.value() && frameIndex - lastDebugFrame() >= 300) {
+                setLastDebugFrame(frameIndex);
+                CausticaMod.LOGGER.info("[SHaRC] active (frame {}): {}", frameIndex, debugDescription());
+            }
+        } else {
+            if (debugWasActive()) {
+                CausticaMod.LOGGER.info("[SHaRC] disabled");
+            }
+            resetTracking();
+            releaseIfDisabled(ctx);
+        }
+    }
+
+    public boolean featureEnabled() {
+        return CausticaConfig.Rt.Sharc.ENABLED.value() && entryCount() > 0;
+    }
+
     /** Materializes the live WorldPush.sharcParams values at the existing render seam. */
     public Float4 params() {
         return new Float4(
@@ -69,6 +104,14 @@ public final class SharcRadianceCache {
     public Int4 gridOrigin(RtTerrain terrain) {
         return new Int4(terrain.blockX, terrain.blockY, terrain.blockZ, implementation.entryCount());
     }
+
+    /** Takes one host-side snapshot of every SHaRC binding and parameter lane used by the trace. */
+    public Bindings bindings(RtTerrain terrain) {
+        return new Bindings(cacheAddress(), params(), params2(), params3(), gridOrigin(terrain));
+    }
+
+    public record Bindings(long cacheAddress, Float4 params, Float4 params2, Float4 params3,
+                           Int4 gridOrigin) {}
 
     /** Materializes the unchanged debug summary from the live SHaRC configuration and state. */
     public String debugDescription() {
