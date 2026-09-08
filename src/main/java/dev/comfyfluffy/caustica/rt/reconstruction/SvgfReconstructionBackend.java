@@ -7,7 +7,9 @@ import dev.comfyfluffy.caustica.rt.RtFramePresenter;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSvgfDenoiser;
-import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
+import dev.comfyfluffy.caustica.rt.graph.DenoiserBarrierPlan;
+import dev.comfyfluffy.caustica.rt.graph.DenoiserBarriers;
+import dev.comfyfluffy.caustica.rewrite.RewriteGates;
 import org.joml.Matrix4fc;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK10;
@@ -28,6 +30,7 @@ public final class SvgfReconstructionBackend
 
     private final SvgfResources resources = new SvgfResources();
     private RtSvgfDenoiser denoiser;
+    private int loggedBarrierMode = -1;
 
     public static boolean isDebugView(int debugView) {
         return debugView >= DEBUG_FIRST && debugView <= DEBUG_LAST;
@@ -77,8 +80,12 @@ public final class SvgfReconstructionBackend
         float cameraForwardDelta = cameraForwardDelta(input, reset);
         int extraSkySmooth = RtFramePresenter.INSTANCE.isActive() ? 1 : 0;
 
+        boolean generatedBarriers = RewriteGates.denoiserBarriersV2();
+        DenoiserBarrierPlan barrierPlan = DenoiserBarrierPlan.svgf(
+                writeToPing, RtSvgfDenoiser.ATROUS_PASSES, RtSvgfDenoiser.HISTORY_FEEDBACK_PASS);
         RtImage reconstructed;
-        VulkanCommandEncoder.memoryBarrier(input.command(), input.stack());
+        DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
+                DenoiserBarrierPlan.REPROJECT, generatedBarriers);
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 input.context(), input.command(), "SVGF denoise");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.svgf")) {
@@ -88,10 +95,11 @@ public final class SvgfReconstructionBackend
                     input.motion().view, input.viewZ().view, input.normal().view,
                     resources.previousViewZ().view, resources.previousNormal().view, input.albedo().view,
                     reset, MAX_FRAMES, cameraForwardDelta);
-            VulkanCommandEncoder.memoryBarrier(input.command(), input.stack());
             RtImage source = resources.filterPing();
             RtImage destination = resources.filterPong();
             for (int pass = 0; pass < RtSvgfDenoiser.ATROUS_PASSES; pass++) {
+                DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
+                        DenoiserBarrierPlan.atrous(pass), generatedBarriers);
                 boolean lastPass = pass == RtSvgfDenoiser.ATROUS_PASSES - 1;
                 denoiser.atrous(input.command(), input.width(), input.height(), pass, parity,
                         source.view, destination.view, input.viewZ().view, input.normal().view,
@@ -99,24 +107,33 @@ public final class SvgfReconstructionBackend
                         PHI_LUMINANCE, PHI_NORMAL, PHI_DEPTH,
                         extraSkySmooth, lastPass,
                         isDebugView(input.debugView()) ? input.debugView() : 0);
-                VulkanCommandEncoder.memoryBarrier(input.command(), input.stack());
                 if (pass == RtSvgfDenoiser.HISTORY_FEEDBACK_PASS) {
+                    DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
+                            DenoiserBarrierPlan.HISTORY_FEEDBACK, generatedBarriers);
                     copyImage(input.command(), input.stack(), destination, historyOut);
-                    VulkanCommandEncoder.memoryBarrier(input.command(), input.stack());
                 }
                 RtImage swap = source;
                 source = destination;
                 destination = swap;
             }
+            DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
+                    DenoiserBarrierPlan.PREVIOUS_GUIDES, generatedBarriers);
             copyImage(input.command(), input.stack(), input.viewZ(), resources.previousViewZ());
             copyImage(input.command(), input.stack(), input.normal(), resources.previousNormal());
-            VulkanCommandEncoder.memoryBarrier(input.command(), input.stack());
+            DenoiserBarriers.before(input.command(), input.stack(), barrierPlan,
+                    DenoiserBarrierPlan.EXPORT, generatedBarriers);
 
             reconstructed = source;
         }
         resources.flipHistory();
         resources.markHistoryValid();
         resources.snapshotPreviousCamera(input.cameraX(), input.cameraY(), input.cameraZ());
+        int barrierMode = generatedBarriers ? 1 : 0;
+        if (loggedBarrierMode != barrierMode) {
+            CausticaMod.LOGGER.info("AER-083 denoiser barriers: path={}, backend=SVGF, scope=legacy-conservative",
+                    generatedBarriers ? "generated" : "legacy");
+            loggedBarrierMode = barrierMode;
+        }
         return new ReconstructionResult(reconstructed, true);
     }
 

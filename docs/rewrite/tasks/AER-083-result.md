@@ -83,3 +83,25 @@ Static validation for this candidate: targeted barrier/graph tests PASS;
 characterization 7/7; V2 PASS. The preflight also proved the settings file enables
 Core Checks and Synchronization. AER-083 remains ACTIVE while the denoiser,
 upscaler and path-trace output families are implemented and qualified.
+
+## Denoiser-family candidate
+
+The denoiser candidate uses the separate `engine.denoiserBarriersV2` flag,
+effective only with `engine.renderGraphV2=true` and OFF by default. POST selection
+is independent and the denoiser A/B harness explicitly keeps POST generated
+barriers disabled.
+
+SVGF declarations identify current source/motion/viewZ/normal/albedo, previous
+history/moments/viewZ/normal, current history/moments, both filter images and the
+final reconstructed output. Ping/pong names follow the existing `writeToPing`
+parity. Previous resources are imported cross-frame read-only inputs; their
+opposite halves and previous guides are current-frame outputs. Operations cover
+reproject, every a-trous pass, history feedback copy, previous-guide copies and
+export. NRD declarations cover opaque external outputs, combine and downstream
+export. No SDK-internal barrier is claimed.
+
+The legacy branch emits barriers at the same command boundaries as before. The
+generated branch emits only compiled hazards and retains the same conservative
+stage/access scope. Targeted denoiser, SVGF-resource and retained POST tests PASS.
+`validate-build.ps1`: PASS; V1 230 tests with exact 4/4 canonical failures and
+characterization 7/7; V2 PASS. Runtime same-JAR A/B: PENDING.

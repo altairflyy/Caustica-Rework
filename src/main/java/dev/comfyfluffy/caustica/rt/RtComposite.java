@@ -97,6 +97,8 @@ import dev.comfyfluffy.caustica.rt.graph.FrameGraph;
 import dev.comfyfluffy.caustica.rt.graph.GraphExecution;
 import dev.comfyfluffy.caustica.rt.graph.PostBarrierPlan;
 import dev.comfyfluffy.caustica.rt.graph.PostImageBarriers;
+import dev.comfyfluffy.caustica.rt.graph.DenoiserBarrierPlan;
+import dev.comfyfluffy.caustica.rt.graph.DenoiserBarriers;
 import dev.comfyfluffy.caustica.rt.frame.FrameCursor;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
 import dev.comfyfluffy.caustica.rt.frame.PostPresentPass;
@@ -539,6 +541,7 @@ public final class RtComposite {
     private final GraphExecution graphExecution = new GraphExecution(frameGraph, framePipeline);
     private FrameCursor pipelineCursor;
     private int loggedPostBarrierMode = -1;
+    private int loggedDenoiserBarrierMode = -1;
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
     private FrameInputs pipelineInputs;
@@ -1796,11 +1799,21 @@ public final class RtComposite {
                             jitterX, jitterY, (int) frameCounter, false);
                 }
                 if (nrdDone) {
-                    VulkanCommandEncoder.memoryBarrier(cmd, stack); // NRD outputs visible to the combine
+                    boolean generatedDenoiserBarriers = dev.comfyfluffy.caustica.rewrite.RewriteGates.denoiserBarriersV2();
+                    DenoiserBarrierPlan nrdBarrierPlan = DenoiserBarrierPlan.nrd();
+                    DenoiserBarriers.before(cmd, stack, nrdBarrierPlan,
+                            DenoiserBarrierPlan.NRD_COMBINE, generatedDenoiserBarriers);
                     try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrdCombine")) {
                         nrdCombinePipeline.dispatch(cmd, renderW, renderH, NRD_DENOISING_RANGE);
                     }
-                    VulkanCommandEncoder.memoryBarrier(cmd, stack); // combine output visible downstream
+                    DenoiserBarriers.before(cmd, stack, nrdBarrierPlan,
+                            DenoiserBarrierPlan.NRD_EXPORT, generatedDenoiserBarriers);
+                    int denoiserMode = generatedDenoiserBarriers ? 1 : 0;
+                    if (loggedDenoiserBarrierMode != denoiserMode) {
+                        CausticaMod.LOGGER.info("AER-083 denoiser barriers: path={}, backend=NRD, scope=legacy-conservative",
+                                generatedDenoiserBarriers ? "generated" : "legacy");
+                        loggedDenoiserBarrierMode = denoiserMode;
+                    }
                     denoisedSource = nrdCombined;
                 }
             }
