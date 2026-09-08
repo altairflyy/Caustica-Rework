@@ -10,6 +10,7 @@ import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver;
 import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver.CoverageRect;
 import dev.comfyfluffy.caustica.rt.lod.LodBatchPlanner;
 import dev.comfyfluffy.caustica.rt.lod.LodMesh;
+import dev.comfyfluffy.caustica.rt.scene.LodSceneContribution;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.material.RtMaterials;
@@ -19,7 +20,6 @@ import net.minecraft.client.Minecraft;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.VK10;
 
-import java.util.AbstractList;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -29,7 +29,6 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.RandomAccess;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -96,9 +95,8 @@ public final class RtLodTerrain {
         return thread;
     });
 
-    // Reused frame-local composite view. Each DH BLAS keeps its own stable world-space origin, so
-    // unchanged LOD sections can survive camera-anchor changes and be reused by later proxy revisions.
-    private final AppendedInstanceList frameInstances = new AppendedInstanceList();
+    // Each DH BLAS keeps its own stable world-space origin, so unchanged LOD sections can survive
+    // camera-anchor changes and be reused by later proxy revisions.
     private Proxy instanceProxy;
     private RtAccel.Instance[] frameDhInstances = new RtAccel.Instance[0];
 
@@ -235,10 +233,9 @@ public final class RtLodTerrain {
         }
     }
 
-    public List<RtAccel.Instance> appendInstances(List<RtAccel.Instance> terrain,
-                                                   int rebaseX, int rebaseY, int rebaseZ) {
+    public LodSceneContribution sceneContribution(int rebaseX, int rebaseY, int rebaseZ) {
         Proxy proxy = current;
-        if (proxy == null) return terrain;
+        if (proxy == null) return new LodSceneContribution(List.of(), 0L);
 
         if (instanceProxy != proxy) {
             instanceProxy = proxy;
@@ -260,13 +257,7 @@ public final class RtLodTerrain {
                 transform[11] = geom.sz - rebaseZ;
             }
         }
-        frameInstances.reset(terrain, frameDhInstances);
-        return frameInstances;
-    }
-
-    public long tableAddress() {
-        Proxy proxy = current;
-        return proxy == null ? 0L : proxy.table.deviceAddress;
+        return new LodSceneContribution(List.of(frameDhInstances), proxy.table.deviceAddress);
     }
 
     public long emissiveRevision() {
@@ -1283,32 +1274,6 @@ public final class RtLodTerrain {
             out[offset + 9] = Float.intBitsToFloat(dhMaterial); // TerrainPrim.flags: original DH mini-material
             out[offset + 10] = aux0Value;
             out[offset + 11] = aux1Value;
-        }
-    }
-
-    /** Random-access list view of terrain + bounded DH instances without copying the terrain list. */
-    private static final class AppendedInstanceList extends AbstractList<RtAccel.Instance>
-            implements RandomAccess {
-        private List<RtAccel.Instance> base = List.of();
-        private RtAccel.Instance[] tails = new RtAccel.Instance[0];
-
-        void reset(List<RtAccel.Instance> base, RtAccel.Instance[] tails) {
-            this.base = base;
-            this.tails = tails;
-        }
-
-        @Override
-        public RtAccel.Instance get(int index) {
-            int baseSize = base.size();
-            if (index < baseSize) return base.get(index);
-            int tailIndex = index - baseSize;
-            if (tailIndex >= 0 && tailIndex < tails.length) return tails[tailIndex];
-            throw new IndexOutOfBoundsException(index);
-        }
-
-        @Override
-        public int size() {
-            return base.size() + tails.length;
         }
     }
 
