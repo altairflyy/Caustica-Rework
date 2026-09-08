@@ -187,3 +187,28 @@ Accepted DLSS-RR evidence directories:
 The upscaler family is qualified for every available backend: NATIVE PASS,
 DLSS_RR PASS, FSR NOT AVAILABLE and XESS NOT AVAILABLE. Path-trace outputs are
 the remaining AER-083 family.
+
+## Path-trace-output candidate
+
+The final family replaces only the two existing barriers in `recordPathTrace`,
+behind the independent and default-OFF `engine.pathTraceBarriersV2` gate. The
+first boundary orders primary writes to the packed continuation queue/current
+guides before indirect consumes them. The second orders indirect radiance,
+optional NRD signals and temporal-buffer updates before reconstruction/upscale
+and next-frame reuse. Both branches retain the exact legacy all-commands,
+memory-read/write scope and command positions.
+
+Declarations distinguish color, normal, albedo, depth, motion, specular albedo,
+specular motion, optional viewZ and optional NRD diffuse/specular images. Buffer
+declarations distinguish continuation queue, imported read-only ReSTIR previous,
+written ReSTIR current, and imported/read-write SHaRC cross-frame state. Resources
+made visible at the first barrier and remaining read-only do not manufacture a
+second export hazard; the emitted global export barrier still covers every
+indirect write as in the legacy path.
+
+Targeted PathTraceBarrierPlan, ReSTIR history/math, characterization and retained
+POST/denoiser/upscaler tests PASS. `validate-build.ps1`: PASS; V1 240 tests with
+exact 4/4 canonical failures and characterization 7/7; V2 PASS. V0, script syntax
+and forbidden-change review PASS: no shader/math, push ABI, jitter/reset, AS,
+upscaler algorithm or new waitIdle change. Same-JAR runtime A/B with DLSS-RR and
+synchronization validation: PENDING. AER-083 remains ACTIVE; AER-084 is PENDING.

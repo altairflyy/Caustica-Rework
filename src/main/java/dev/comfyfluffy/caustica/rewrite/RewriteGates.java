@@ -19,6 +19,7 @@ public final class RewriteGates {
     public static final String POST_BARRIERS_V2_KEY = "engine.postBarriersV2";
     public static final String DENOISER_BARRIERS_V2_KEY = "engine.denoiserBarriersV2";
     public static final String UPSCALER_BARRIERS_V2_KEY = "engine.upscalerBarriersV2";
+    public static final String PATH_TRACE_BARRIERS_V2_KEY = "engine.pathTraceBarriersV2";
 
     private RewriteGates() {
     }
@@ -61,6 +62,10 @@ public final class RewriteGates {
 
     public static boolean upscalerBarriersV2() {
         return renderGraphV2() && enabled(UPSCALER_BARRIERS_V2_KEY);
+    }
+
+    public static boolean pathTraceBarriersV2() {
+        return renderGraphV2() && enabled(PATH_TRACE_BARRIERS_V2_KEY);
     }
 
     private static boolean enabled(String key) {

@@ -543,6 +543,7 @@ public final class RtComposite {
     private int loggedPostBarrierMode = -1;
     private int loggedDenoiserBarrierMode = -1;
     private String loggedUpscalerBarrierMode;
+    private int loggedPathTraceBarrierMode = -1;
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
     private FrameInputs pipelineInputs;
@@ -1269,18 +1270,32 @@ public final class RtComposite {
                 || pipelineCommand == null || pipelineStack == null || pipelinePushConstants == null) {
             throw new IllegalStateException("path-trace pass has no active frame invocation");
         }
+        boolean generatedBarriers = dev.comfyfluffy.caustica.rewrite.RewriteGates.pathTraceBarriersV2();
+        dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan barrierPlan =
+                dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan.create(
+                        pipelineInputs.svgfPath() || pipelineInputs.nrdPath(), pipelineInputs.nrdPath());
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world primary trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.tracePrimary")) {
             pipelineActive.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 0);
         }
-        VulkanCommandEncoder.memoryBarrier(pipelineCommand, pipelineStack);
+        dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
+                pipelineCommand, pipelineStack, barrierPlan,
+                dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan.INDIRECT, generatedBarriers);
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world indirect trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
             pipelineActive.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 1);
         }
-        VulkanCommandEncoder.memoryBarrier(pipelineCommand, pipelineStack);
+        dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
+                pipelineCommand, pipelineStack, barrierPlan,
+                dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan.EXPORT, generatedBarriers);
+        int barrierMode = generatedBarriers ? 1 : 0;
+        if (loggedPathTraceBarrierMode != barrierMode) {
+            CausticaMod.LOGGER.info("AER-083 path-trace barriers: path={}, scope=legacy-conservative",
+                    generatedBarriers ? "generated" : "legacy");
+            loggedPathTraceBarrierMode = barrierMode;
+        }
     }
 
     private void reconstructFrame(FrameContext frame) {
