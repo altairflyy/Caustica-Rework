@@ -3,6 +3,7 @@ package dev.comfyfluffy.caustica.rt;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import com.mojang.blaze3d.vulkan.VulkanQueue;
+import dev.comfyfluffy.caustica.rt.graph.QueueDependencyScheduler;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK10;
@@ -24,7 +25,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -51,13 +51,9 @@ public final class RtGpuExecutor {
     private final long buildTimeline;
     private final long graphicsTimeline;
     private final LinkedBlockingQueue<Job> jobs = new LinkedBlockingQueue<>();
-    private final AtomicLong nextBuildValue = new AtomicLong();
-    private final AtomicLong pendingPublishWaitValue = new AtomicLong();
-    private final AtomicLong nextGraphicsValue = new AtomicLong();
-    private final AtomicLong latestGraphicsUseValue = new AtomicLong();
+    private final QueueDependencyScheduler queueDependencies = new QueueDependencyScheduler();
     private final ArrayList<DestroyJob> destroyJobs = new ArrayList<>();
     private final Object submissionLock = new Object();
-    private long submittedBuildValue;
     private final Thread thread;
     private long commandPool;
     private volatile boolean closed;
@@ -93,7 +89,7 @@ public final class RtGpuExecutor {
         if (closed) {
             throw new IllegalStateException("RT GPU executor is closed");
         }
-        long value = nextBuildValue.incrementAndGet();
+        long value = queueDependencies.reserveTransferBuild();
         Build build = new Build(value);
         jobs.add(new Job(cancelled, record, afterSuccess, finished, build));
         return build;
@@ -102,14 +98,14 @@ public final class RtGpuExecutor {
     /** Mark a build visible to publication; the next graphics frame use waits on it. */
     public void markPublished(Build build) {
         assertRenderThread();
-        pendingPublishWaitValue.accumulateAndGet(build.value, Math::max);
+        queueDependencies.publishTransferBuild(build.value);
     }
 
     /** Attach published-build waits and reserve the completion token shared by this frame's RT resources. */
     public GraphicsUse beginGraphicsUse(VulkanCommandEncoder encoder) {
         assertRenderThread();
         checkExecutorFailure();
-        long waitValue = pendingPublishWaitValue.get();
+        long waitValue = queueDependencies.publishedTransferBuildWaitValue();
         if (waitValue != 0L) {
             // vkQueuePresentKHR requires every transitive signal dependency of its binary wait to have
             // already been submitted. A Build is assigned its timeline value when queued on this Java
@@ -117,14 +113,14 @@ public final class RtGpuExecutor {
             awaitBuildSubmission(waitValue);
             encoder.waitSemaphore(buildTimeline, waitValue, TERRAIN_READ_STAGES);
         }
-        return new GraphicsUse(nextGraphicsValue.incrementAndGet());
+        return new GraphicsUse(queueDependencies.reserveGraphicsFrameCompletion());
     }
 
     /** Signal the frame token after its final terrain, TLAS, entity, and overlay consumer. */
     public void endGraphicsUse(VulkanCommandEncoder encoder, GraphicsUse graphicsUse) {
         assertRenderThread();
         encoder.signalSemaphore(graphicsTimeline, graphicsUse.value, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR);
-        latestGraphicsUseValue.accumulateAndGet(graphicsUse.value, Math::max);
+        queueDependencies.completeGraphicsFrame(graphicsUse.value);
         if (hasPendingDestroys()) {
             jobs.offer(WAKE);
         }
@@ -140,7 +136,7 @@ public final class RtGpuExecutor {
     /** Latest recorded frame token that can reference currently published RT state. */
     public GraphicsUse latestGraphicsUse() {
         assertRenderThread();
-        return new GraphicsUse(latestGraphicsUseValue.get());
+        return new GraphicsUse(queueDependencies.latestGraphicsCompletionValue());
     }
 
     /** Rethrow a latched executor failure on the calling thread. */
@@ -437,7 +433,7 @@ public final class RtGpuExecutor {
             }
             submitted = true;
             synchronized (submissionLock) {
-                submittedBuildValue = Math.max(submittedBuildValue, signalValue);
+                queueDependencies.markTransferBuildSubmitted(signalValue);
                 submissionLock.notifyAll();
             }
             VulkanDiagnostics.setInFlight("async-compute",
@@ -505,7 +501,7 @@ public final class RtGpuExecutor {
 
     private void awaitBuildSubmission(long value) {
         synchronized (submissionLock) {
-            while (submittedBuildValue < value && executorFailure == null) {
+            while (queueDependencies.submittedTransferBuildValue() < value && executorFailure == null) {
                 try {
                     submissionLock.wait();
                 } catch (InterruptedException e) {
@@ -567,7 +563,7 @@ public final class RtGpuExecutor {
                 return false;
             }
             checkExecutorFailure();
-            waitTimeline(graphicsTimeline, requiredValue);
+            waitTimeline(graphicsTimeline, queueDependencies.requireGraphicsCompletionValue(requiredValue));
             completedValue = requiredValue;
             return true;
         }

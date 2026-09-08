@@ -133,7 +133,7 @@ tasks:
   AER-083:
     state: DONE
   AER-084:
-    state: READY
+    state: DONE
 
   AER-090:
     state: PENDING
