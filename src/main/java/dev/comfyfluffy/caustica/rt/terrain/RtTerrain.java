@@ -15,6 +15,7 @@ import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
 import dev.comfyfluffy.caustica.rt.RtGpuExecutor.GraphicsUse;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
+import dev.comfyfluffy.caustica.rt.scene.TerrainSceneContribution;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
@@ -233,8 +234,8 @@ public final class RtTerrain {
      * assigns and which the hit shaders use to index the section table. The list is stable between
      * residency rebuilds, so the per-frame TLAS rebuild just re-references the same BLAS each frame.
      */
-    public List<RtAccel.Instance> staticInstances() {
-        return table.instances;
+    public TerrainSceneContribution sceneContribution() {
+        return new TerrainSceneContribution(table.instances);
     }
 
     /** Section table device address: {@code {u64 primAddr, u64 uvAddr, u32 triBase[4]}} per section, indexed by gl_InstanceCustomIndexEXT. */

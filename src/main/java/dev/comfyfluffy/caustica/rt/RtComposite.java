@@ -77,6 +77,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
+import dev.comfyfluffy.caustica.rt.scene.TerrainSceneContribution;
 import dev.comfyfluffy.caustica.rt.lighting.RestirSystem;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.reconstruction.SvgfReconstructionBackend;
@@ -1669,8 +1670,9 @@ public final class RtComposite {
             // generations are reclaimed by graphics-timeline completion.
             // Entity BLASes are built inline below and merged into the per-frame TLAS. geomTableAddr
             // feeds the hit shader entity path (per-prim normal/tint) and motion vectors.
+            TerrainSceneContribution terrainContribution = terrain.sceneContribution();
             var staticInstances = RtLodTerrain.INSTANCE.appendInstances(
-                    terrain.staticInstances(), terrain.blockX, terrain.blockY, terrain.blockZ);
+                    terrainContribution.instances(), terrain.blockX, terrain.blockY, terrain.blockZ);
             RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
             frameEntities = fe;
