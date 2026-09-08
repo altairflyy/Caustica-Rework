@@ -73,9 +73,9 @@ tasks:
   AER-040:
     state: DONE
   AER-041:
-    state: READY
+    state: DONE
   AER-042:
-    state: PENDING
+    state: READY
   AER-043:
     state: PENDING
   AER-044:
