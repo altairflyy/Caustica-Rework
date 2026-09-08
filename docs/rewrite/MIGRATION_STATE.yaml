@@ -136,7 +136,7 @@ tasks:
     state: DONE
 
   AER-090:
-    state: PENDING
+    state: READY
   AER-091:
     state: PENDING
   AER-092:
@@ -153,7 +153,7 @@ gates:
   GATE-5: PASS
   GATE-6: PASS
   GATE-7: PASS
-  GATE-8: PENDING
+  GATE-8: PASS
   FINAL: PENDING
 
 last_verified_reference: reference/validated-caustica-0.2.0
