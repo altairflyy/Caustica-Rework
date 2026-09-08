@@ -150,3 +150,20 @@ FSR/XeSS native binaries are unavailable in this build; their runtime status is
 NOT AVAILABLE. NATIVE and DLSS_RR require separate matched A/B pairs, with
 backend selection fixed by JVM properties and synchronization validation active.
 See AER-083-upscaler-AB.md. AER-083 stays ACTIVE; AER-084 remains PENDING.
+
+Native upscaler same-JAR A/B: PASS. Both runs used SHA-256
+`7FBF139FA5E34E15A5E54FE9886D532958805B576DFA092748589F5C6B9BC78D`,
+reported the requested `NATIVE` backend and exercised respectively the `legacy`
+and `generated` paths with synchronization validation active. Neither run
+reported a `SYNC-HAZARD`; their normalized validation findings match exactly:
+two established DH `VUID-VkGraphicsPipelineCreateInfo-Input-08733` occurrences
+and the known intermittent `VUID-vkDestroyDevice-device-05137` shutdown leak.
+The user completed the matched first-frame, stationary accumulation,
+movement/camera, menu and reload route without reporting a visual regression.
+
+Accepted native evidence directories:
+
+- legacy A: `build/rewrite-validation/AER-083-upscaler/A-c7fff887474642ecab930dc138b6d4ff`
+- generated B: `build/rewrite-validation/AER-083-upscaler/B-df6471d85aa2415bb9b33703dc11bdb0`
+
+Native is qualified. DLSS-RR runtime qualification remains pending.
