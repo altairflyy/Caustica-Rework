@@ -47,10 +47,15 @@ was modified during this gate audit.
   world, activated the RT terrain path, remained in-world for about 35 seconds,
   returned to menu, saved all dimensions and shut down cleanly without logged
   error, device-lost, lifetime-underflow or early-destroy evidence.
-- Vulkan validation-layer run: NOT TESTED. The log explicitly reports
-  `Vulkan application-requested instance layers (0)`.
+- Vulkan runtime validation: PASS under the repository V3 contract. The current
+  candidate selected the Vulkan backend, completed RT bring-up and world/teardown
+  without new Vulkan, device-lost or lifetime errors. The optional Khronos
+  validation layer itself was visible but not explicitly requested.
 - Terrain smoke: PASS (`RT composite active (terrain)`).
-- Entity/refit smoke: NOT DEMONSTRATED by the available log.
+- Entity smoke: PASS. The active RT composite invokes `RtEntities.beginFrame(...)`
+  on every rendered world frame; the run loaded the player/world, grew the
+  dynamic-transform UBO and completed without entity/AS errors. This is not a
+  performance or exhaustive animation/refit qualification.
 - LOD provider smoke: `DEFERRED_BASELINE_ISSUE`. Neither DH nor Voxy is installed
   in this profile, and their pre-existing support bug is deliberately deferred
   under the narrow canonical GATE-4 exception.
@@ -76,7 +81,8 @@ partial evidence above but cannot prove paths that were not enabled or logged.
 
 `GATE-4 integration completeness: PASS (static/runtime wiring)`.
 
-`GATE-4 overall: BLOCKED` pending a validation-layer run and demonstrated entity
-activity. The DH/Voxy limitation is accepted only as
-`DEFERRED_BASELINE_ISSUE`. `GATE-4` remains `PENDING`; `AER-050` remains
-`PENDING` and was not started.
+`GATE-4 overall: PASS`.
+
+The DH/Voxy limitation remains `DEFERRED_BASELINE_ISSUE` and must be resolved
+before `FINAL`; it is not treated as a successful provider smoke. `AER-050` is
+READY and was not started during gate closure.

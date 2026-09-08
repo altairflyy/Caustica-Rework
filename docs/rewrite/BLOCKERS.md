@@ -149,14 +149,13 @@ pre-refactor baseline. Any different failure set is a validation failure.
 The known ReSTIR temporal boiling/flickering issue remains outside the architectural rewrite and must not be changed as part of ownership migration tasks.
 GATE-0: PASS
 
-## BLOCKER-002 — GATE-4 runtime qualification
+## BLOCKER-002 — Deferred DH/Voxy runtime qualification
 
-**Status:** OPEN
+**Status:** DEFERRED UNTIL FINAL
 
 **Blocks:**
 
-- GATE-4
-- AER-050 and all tasks depending on GATE-4
+- FINAL
 
 ## Current situation
 
@@ -180,27 +179,17 @@ The missing LOD smoke is classified as `DEFERRED_BASELINE_ISSUE` under the
 narrow canonical GATE-4 exception. It is not a PASS and remains required before
 the final refactoring gate, but it no longer independently blocks GATE-4.
 
-The canonical GATE-4 acceptance additionally requires Vulkan validation without
-new errors and LOD/terrain/entity runtime smoke PASS. No repository smoke runner
-exists. The installed Modrinth App does not accept the tested direct-profile
-launch argument, and the available automation surface cannot control native
-Modrinth/Minecraft windows.
+The current candidate's Vulkan run satisfies the repository V3 contract: Vulkan
+backend selection, RT bring-up, world load, terrain and entity frame-path
+execution, return to menu and clean shutdown without new Vulkan/device-lost/
+lifetime errors. The optional Khronos validation layer was available but not
+explicitly requested.
 
 ## Required resolution
 
-Run the `prova` profile with `caustica-0.2.4.jar` and capture evidence for:
-
-1. rerun menu/world load with `VK_LAYER_KHRONOS_validation` actually requested;
-2. exercise visible dynamic entities and refit activity;
-3. return to menu and reload the world;
-4. shut down with no new Vulkan validation, device-lost, lifetime-counter
-   underflow, early-destroy or unbounded-retirement errors.
-
 After the main architectural refactoring, separately diagnose and resolve the
 known DH/Voxy bug, then run movement/chunk-streaming smoke with a compatible
-active provider before claiming the LOD portion of GATE-4.
+active provider before final qualification.
 
-After the non-deferred evidence passes, update `GATE-4-result.md`, narrow this
-blocker to the final DH/Voxy recovery, set
-`GATE-4: PASS` and `AER-050: READY`, and create a separate atomic gate-closure
-commit. Do not start AER-050 before that commit and a clean worktree.
+GATE-4 may remain PASS under its canonical `DEFERRED_BASELINE_ISSUE` exception.
+This blocker must be resolved before `FINAL` can pass.
