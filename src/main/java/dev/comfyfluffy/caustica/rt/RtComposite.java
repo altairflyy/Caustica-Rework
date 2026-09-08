@@ -66,7 +66,6 @@ import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFsrFrameGen;
-import dev.comfyfluffy.caustica.rt.pipeline.RtFsrUpscaler;
 import dev.comfyfluffy.caustica.rt.pipeline.RtXessUpscaler;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgSkyMaskPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiCompositePipeline;
@@ -84,6 +83,7 @@ import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.reconstruction.SvgfReconstructionBackend;
 import dev.comfyfluffy.caustica.rt.reconstruction.DlssRrReconstructionBackend;
+import dev.comfyfluffy.caustica.rt.upscale.FsrUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
@@ -624,6 +624,7 @@ public final class RtComposite {
     // which is what the prev-guide copies hold.
     private final SvgfReconstructionBackend svgfBackend = new SvgfReconstructionBackend();
     private final DlssRrReconstructionBackend dlssRrBackend = new DlssRrReconstructionBackend();
+    private final FsrUpscalerBackend fsrBackend = new FsrUpscalerBackend();
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
     private boolean renderSizeSvgfEnabled;
@@ -820,13 +821,6 @@ public final class RtComposite {
         temporalState.snapshot(frameContext);
         temporalState.broadcast(request -> legacyDelivery.run());
     }
-
-    // Previous captured camera position, for the FSR discontinuity reset (teleport / respawn /
-    // world change jumps FSR's reprojection history cannot survive).
-    private double prevFsrCamX;
-    private double prevFsrCamY;
-    private double prevFsrCamZ;
-    private boolean fsrCamValid;
 
     // Same discontinuity bookkeeping for XeSS (its temporal history is equally jump-fragile).
     private double prevXessCamX;
@@ -1249,8 +1243,8 @@ public final class RtComposite {
         int rrQuality = rrEnabled ? dlssRrBackend.quality() : Integer.MIN_VALUE;
         // FSR 3 only takes the upscale slot when RR is not running (the selector makes them
         // mutually exclusive, but a hand-edited config could enable both — RR wins).
-        boolean fsrEnabled = !rrEnabled && RtFsrUpscaler.enabled();
-        int fsrQuality = fsrEnabled ? RtFsrUpscaler.quality() : Integer.MIN_VALUE;
+        boolean fsrEnabled = !rrEnabled && fsrBackend.available();
+        int fsrQuality = fsrEnabled ? fsrBackend.quality() : Integer.MIN_VALUE;
         // XeSS shares the slot under the same rules; if a hand-edit stacks them, RR > FSR > XeSS.
         boolean xessEnabled = !rrEnabled && !fsrEnabled && RtXessUpscaler.enabled();
         int xessQuality = xessEnabled ? RtXessUpscaler.quality() : Integer.MIN_VALUE;
@@ -1284,7 +1278,7 @@ public final class RtComposite {
         // allocated for the rest of the session; the device is idle right now, so release it here.
         dlssRrBackend.releaseIfDisabled();
         // Same reasoning for the FSR context (its history textures) when the upscaler switches away.
-        RtFsrUpscaler.INSTANCE.releaseIfDisabled();
+        fsrBackend.releaseIfDisabled();
         // And for the XeSS upscaler (pipelines + history) on the same switch-away event.
         RtXessUpscaler.INSTANCE.releaseIfDisabled();
         if (displayImage != null) {
@@ -1312,18 +1306,20 @@ public final class RtComposite {
         // mode actually expects rather than assuming a fixed ratio: different quality modes (and
         // driver/SDK versions) use different ratios, and each upscaler's own query is the source
         // of truth for what its dispatch will accept.
-        int[] optimal;
+        FrameContext.Extent optimal;
         if (rrEnabled) {
-            optimal = dlssRrBackend.recommendedRenderExtent(width, height);
+            int[] rrExtent = dlssRrBackend.recommendedRenderExtent(width, height);
+            optimal = rrExtent == null ? null : new FrameContext.Extent(rrExtent[0], rrExtent[1]);
         } else if (fsrEnabled) {
-            optimal = RtFsrUpscaler.INSTANCE.queryRenderSize(width, height);
+            optimal = fsrBackend.recommendedRenderExtent(width, height);
         } else if (xessEnabled) {
-            optimal = RtXessUpscaler.INSTANCE.queryRenderSize(width, height);
+            int[] xessExtent = RtXessUpscaler.INSTANCE.queryRenderSize(width, height);
+            optimal = xessExtent == null ? null : new FrameContext.Extent(xessExtent[0], xessExtent[1]);
         } else {
             optimal = null;
         }
-        renderW = optimal != null ? optimal[0] : width;
-        renderH = optimal != null ? optimal[1] : height;
+        renderW = optimal != null ? optimal.width() : width;
+        renderH = optimal != null ? optimal.height() : height;
         renderSizeRrEnabled = rrEnabled;
         renderSizeRrQuality = rrQuality;
         renderSizeFsrEnabled = fsrEnabled;
@@ -1524,36 +1520,16 @@ public final class RtComposite {
         boolean xessPath = pipelineInputs.xessPath();
         float jitterX = frame.jitter().x();
         float jitterY = frame.jitter().y();
-        if (!rrDone && fsrPath && RtFsrUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "FSR upscale");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.fsr")) {
-                // Camera discontinuity (teleport / respawn / world change): FSR is a temporal
-                // upscaler like the others — a jump bigger than the NRD rebase threshold leaves
-                // its reprojection history pointing at a world that no longer matches, reading
-                // as smear until it decays. Drop the history on the jump frame.
-                if (fsrCamValid) {
-                    double fdx = camX - prevFsrCamX;
-                    double fdy = camY - prevFsrCamY;
-                    double fdz = camZ - prevFsrCamZ;
-                    if (fdx * fdx + fdy * fdy + fdz * fdz > 32.0 * 32.0) {
-                        recordTemporalReset(TemporalResetReason.TELEPORT);
-                        broadcastTemporalReset(RtFsrUpscaler.INSTANCE::requestReset);
-                    }
-                }
-                prevFsrCamX = camX;
-                prevFsrCamY = camY;
-                prevFsrCamZ = camZ;
-                fsrCamValid = true;
-                // Vertical FOV from the (unjittered) level projection, for FSR's depth heuristic.
-                // abs(): Minecraft's Vulkan projection carries the NDC y-flip (negative m11),
-                // which would hand FSR a negative FOV.
-                float fovY = (float) (2.0 * Math.atan(1.0 / Math.abs(frameProjection.m11())));
-                // reactive parameter: unused since the reactive-mask experiment was reverted
-                // (the shim ignores it); null keeps the call honest.
-                rrDone = RtFsrUpscaler.INSTANCE.evaluate(cmd.address(), upscaleSource, gDepth, gMotion,
-                        null, rrOutput,
-                        renderW, renderH, displayW, displayH, -jitterX, -jitterY, fovY);
-            }
+        if (!rrDone && fsrPath) {
+            float fovY = (float) (2.0 * Math.atan(1.0 / Math.abs(frameProjection.m11())));
+            dev.comfyfluffy.caustica.rt.upscale.UpscaleResult result = fsrBackend.execute(
+                    new FsrUpscalerBackend.Request(ctx, cmd, upscaleSource, gDepth, gMotion, rrOutput,
+                            renderW, renderH, displayW, displayH, -jitterX, -jitterY, fovY,
+                            camX, camY, camZ, () -> {
+                                recordTemporalReset(TemporalResetReason.TELEPORT);
+                                broadcastTemporalReset(fsrBackend::requestReset);
+                            }));
+            rrDone = result.executed();
         }
 
         // Intel XeSS occupies the slot when neither RR nor FSR is running: same inputs as FSR
@@ -1650,7 +1626,7 @@ public final class RtComposite {
     private FrameInputs prepareFrameInputs() {
         int debugView = debugView();
         boolean rrPath = dlssRrBackend.available() && debugView == 0;
-        boolean fsrPath = !rrPath && RtFsrUpscaler.enabled() && debugView == 0;
+        boolean fsrPath = !rrPath && fsrBackend.available() && debugView == 0;
         boolean xessPath = !rrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;
         boolean nrdPath = !rrPath && RtNrdDenoiser.active() && debugView == 0;
         boolean svgfDebugView = SvgfReconstructionBackend.isDebugView(debugView);
@@ -2706,7 +2682,7 @@ public final class RtComposite {
         // was ever allocated, so asking it every time is what guarantees the feature is released.
         dlssRrBackend.destroy();
         // Same contract for the FSR context (no-op when it was never created).
-        RtFsrUpscaler.INSTANCE.destroy();
+        fsrBackend.destroy();
         // And the XeSS upscaler (no-op when it was never initialized).
         RtXessUpscaler.INSTANCE.destroy();
         // Tear down the NRD integration (wraps the Vulkan device via NRI) only after its images are

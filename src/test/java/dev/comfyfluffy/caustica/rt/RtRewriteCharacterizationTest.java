@@ -30,6 +30,8 @@ final class RtRewriteCharacterizationTest {
             "src/main/java/dev/comfyfluffy/caustica/rt/reconstruction/SvgfReconstructionBackend.java");
     private static final Path DLSS_RR_BACKEND = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/reconstruction/DlssRrReconstructionBackend.java");
+    private static final Path FSR_BACKEND = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/upscale/FsrUpscalerBackend.java");
 
     @Test
     void restirCurrentAndPreviousUseOppositePingPongHalves() throws IOException {
@@ -51,6 +53,7 @@ final class RtRewriteCharacterizationTest {
     void legacyTemporalResetTriggersRemainCharacterized() throws IOException {
         String source = Files.readString(COMPOSITE);
         String svgfBackend = Files.readString(SVGF_BACKEND);
+        String fsrBackend = Files.readString(FSR_BACKEND);
 
         assertTrue(source.contains("svgfBackend.requestReset();")
                         && svgfBackend.contains("resources.resetHistory();"),
@@ -59,7 +62,8 @@ final class RtRewriteCharacterizationTest {
                 "resource recreation must invalidate motion-vector history");
         assertTrue(source.contains("RtNrdDenoiser.INSTANCE.resetHistory();"),
                 "resolution-dependent NRD history must be reset on recreation");
-        assertTrue(source.contains("broadcastTemporalReset(RtFsrUpscaler.INSTANCE::requestReset)"),
+        assertTrue(source.contains("broadcastTemporalReset(fsrBackend::requestReset)")
+                        && fsrBackend.contains("delegate.requestReset();"),
                 "FSR must reset through the coordinator on the legacy camera-discontinuity path");
         assertTrue(source.contains("broadcastTemporalReset(RtXessUpscaler.INSTANCE::requestReset)"),
                 "XeSS must reset through the coordinator on the legacy camera-discontinuity path");
@@ -115,13 +119,15 @@ final class RtRewriteCharacterizationTest {
     void temporalUpscalersAreMutuallyExclusiveWithReferencePriority() throws IOException {
         String source = Files.readString(COMPOSITE);
         String dlssRrBackend = Files.readString(DLSS_RR_BACKEND);
+        String fsrBackend = Files.readString(FSR_BACKEND);
 
         assertTrue(source.contains(
                         "boolean rrPath = dlssRrBackend.available() && debugView == 0;")
                         && dlssRrBackend.contains("return RtDlssRr.enabled();"),
                 "DLSS-RR remains first in the temporal upscale slot");
         assertTrue(source.contains(
-                        "boolean fsrPath = !rrPath && RtFsrUpscaler.enabled() && debugView == 0;"),
+                        "boolean fsrPath = !rrPath && fsrBackend.available() && debugView == 0;")
+                        && fsrBackend.contains("return RtFsrUpscaler.enabled();"),
                 "FSR may run only when DLSS-RR is not selected");
         assertTrue(source.contains(
                         "boolean xessPath = !rrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;"),
