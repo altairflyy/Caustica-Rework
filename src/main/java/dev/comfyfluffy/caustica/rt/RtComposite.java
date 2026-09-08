@@ -70,7 +70,6 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtFgSkyMaskPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNativeFrameGen;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNativeFrameGenPipeline;
-import dev.comfyfluffy.caustica.rt.pipeline.RtNrdDenoiser;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNrdCombinePipeline;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
@@ -82,6 +81,7 @@ import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.reconstruction.SvgfReconstructionBackend;
 import dev.comfyfluffy.caustica.rt.reconstruction.DlssRrReconstructionBackend;
+import dev.comfyfluffy.caustica.rt.reconstruction.experimental.nrd.ExperimentalNrdBackend;
 import dev.comfyfluffy.caustica.rt.upscale.FsrUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.upscale.XessUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.upscale.NativeUpscalerBackend;
@@ -295,7 +295,7 @@ public final class RtComposite {
         if (dlssRrBackend.available() && debugView() == 0) {
             flags |= FEATURE_DENOISER;
         } else {
-            if (RtNrdDenoiser.active() && debugView() == 0) {
+            if (nrdBackend.selected() && debugView() == 0) {
                 // Per-lobe signal capture only runs when NRD is the active denoiser: RR denoises
                 // internally and SVGF works on the combined radiance, so capturing the split would
                 // burn an extra shadow ray plus bandwidth for buffers nothing reads.
@@ -625,6 +625,7 @@ public final class RtComposite {
     // which is what the prev-guide copies hold.
     private final SvgfReconstructionBackend svgfBackend = new SvgfReconstructionBackend();
     private final DlssRrReconstructionBackend dlssRrBackend = new DlssRrReconstructionBackend();
+    private final ExperimentalNrdBackend nrdBackend = new ExperimentalNrdBackend();
     private final FsrUpscalerBackend fsrBackend = new FsrUpscalerBackend();
     private final XessUpscalerBackend xessBackend = new XessUpscalerBackend();
     private final NativeUpscalerBackend nativeUpscalerBackend = new NativeUpscalerBackend();
@@ -1251,11 +1252,9 @@ public final class RtComposite {
         //   > SVGF (the renderer's own; the default for every non-DLSS path).
         // Two temporal denoisers in series would fight over the same history and reintroduce exactly
         // the ghosting this rework removes, so they are strictly exclusive.
-        // RtNrdDenoiser.active() rather than enabled(): if the NRD integration has latched off after
-        // a failure, the slot goes back to SVGF, so SVGF's targets have to exist. Keying the
-        // allocation on the option alone left BOTH denoisers inert on a failure, which is why
-        // toggling NRD appeared to do nothing at all.
-        boolean nrdEnabled = !rrEnabled && RtNrdDenoiser.active();
+        // The quarantined NRD experiment is not selectable. Keeping this decision behind its
+        // boundary prevents configuration or native-library availability from claiming the slot.
+        boolean nrdEnabled = !rrEnabled && nrdBackend.selected();
         boolean svgfEnabled = !rrEnabled && !nrdEnabled && CausticaConfig.Rt.Denoise.ENABLED.value();
         if (output != null && continuationQueue != null
                 && displayImage != null && hdrDisplayImage != null && rrOutput != null && exposure.ready()
@@ -1387,7 +1386,7 @@ public final class RtComposite {
             }
             if (nrdEnabled) {
                 // NRD's own temporal history cannot survive a resolution change either.
-                RtNrdDenoiser.INSTANCE.resetHistory();
+                nrdBackend.resetHistory();
             }
             mvHasPrev = false; // recreated images -> first MV frame is zero
             waterWaveTimeValid = false;
@@ -1598,7 +1597,7 @@ public final class RtComposite {
         boolean rrPath = dlssRrBackend.available() && debugView == 0;
         boolean fsrPath = !rrPath && fsrBackend.available() && debugView == 0;
         boolean xessPath = !rrPath && !fsrPath && xessBackend.available() && debugView == 0;
-        boolean nrdPath = !rrPath && RtNrdDenoiser.active() && debugView == 0;
+        boolean nrdPath = !rrPath && nrdBackend.selected() && debugView == 0;
         boolean svgfDebugView = SvgfReconstructionBackend.isDebugView(debugView);
         boolean svgfPath = !rrPath && CausticaConfig.Rt.Denoise.ENABLED.value()
                 && (debugView == 0 || svgfDebugView);
@@ -1663,7 +1662,7 @@ public final class RtComposite {
             // SVGF is the fallback as well as the primary: if NRD is selected but its denoise call
             // fails this frame, the gate below (svgfPath && !nrdDone) lets SVGF take the slot
             // instead of presenting the raw trace. Its resources are allocated whenever
-            // RtNrdDenoiser.active() is false, which includes the latched-off case.
+            // the quarantined NRD experiment is not selected.
             // Debug views 10-12 inspect the SVGF denoiser's own internal state (history length,
             // variance, luminance sigma), so unlike the guide views they must keep it RUNNING.
             // They exist because four rounds of fixes reasoned from the source produced no visible
@@ -1937,7 +1936,7 @@ public final class RtComposite {
             //
             // Two real discontinuities still restart it, and they are handled where they arise
             // rather than by inspecting the matrix: the first frame after (re)allocation, via
-            // the SVGF backend's history state, and a terrain rebase, which RtNrdDenoiser compensates against
+            // the SVGF backend's history state, and a terrain rebase, which the retained NRD experiment compensates against
             // the anchor. Resolution changes reallocate, which takes the same path.
 
             // ---- NRD / REBLUR (opt-in). Consumes the tracer's demodulated per-lobe signals plus
@@ -1951,11 +1950,11 @@ public final class RtComposite {
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrd")) {
                     // The camera goes in as ABSOLUTE world coordinates plus the terrain anchor the
                     // signals live in. That pair is what lets the denoiser compensate a rebase
-                    // instead of seeing it as a teleport (see RtNrdDenoiser): the old code passed
+                    // instead of seeing it as a teleport: the old code passed
                     // only anchor-relative coordinates, so every rebase silently invalidated
                     // REBLUR's history mid-motion. No FOV-driven restart is passed: the motion
                     // vectors already carry a zoom as screen displacement (see the SVGF path).
-                    nrdDone = RtNrdDenoiser.INSTANCE.denoise(cmd.address(), renderW, renderH,
+                    nrdDone = nrdBackend.denoise(cmd.address(), renderW, renderH,
                             gMotion, gNormal, gViewZ, gNrdDiff, gNrdSpec, nrdDiffOut, nrdSpecOut,
                             nrdValidation,
                             frameProjection, frameViewRotation,
@@ -2658,7 +2657,7 @@ public final class RtComposite {
         nativeUpscalerBackend.destroy();
         // Tear down the NRD integration (wraps the Vulkan device via NRI) only after its images are
         // released below; destroyGuideImages runs after this in the teardown sequence.
-        RtNrdDenoiser.INSTANCE.destroy();
+        nrdBackend.destroy();
         if (nrdCombinePipeline != null) {
             nrdCombinePipeline.destroy();
             nrdCombinePipeline = null;

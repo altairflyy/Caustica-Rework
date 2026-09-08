@@ -26,6 +26,8 @@ final class RtRewriteCharacterizationTest {
             "src/main/java/dev/comfyfluffy/caustica/rt/lod/LodProviderSelector.java");
     private static final Path NRD = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdDenoiser.java");
+    private static final Path NRD_QUARANTINE = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/reconstruction/experimental/nrd/ExperimentalNrdBackend.java");
     private static final Path SVGF_BACKEND = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/reconstruction/SvgfReconstructionBackend.java");
     private static final Path DLSS_RR_BACKEND = REPO_ROOT.resolve(
@@ -57,13 +59,15 @@ final class RtRewriteCharacterizationTest {
         String svgfBackend = Files.readString(SVGF_BACKEND);
         String fsrBackend = Files.readString(FSR_BACKEND);
         String xessBackend = Files.readString(XESS_BACKEND);
+        String nrdQuarantine = Files.readString(NRD_QUARANTINE);
 
         assertTrue(source.contains("svgfBackend.requestReset();")
                         && svgfBackend.contains("resources.resetHistory();"),
                 "fresh/recreated SVGF resources must invalidate backend-owned SVGF history");
         assertTrue(source.contains("mvHasPrev = false; // recreated images -> first MV frame is zero"),
                 "resource recreation must invalidate motion-vector history");
-        assertTrue(source.contains("RtNrdDenoiser.INSTANCE.resetHistory();"),
+        assertTrue(source.contains("nrdBackend.resetHistory();")
+                        && nrdQuarantine.contains("delegate.resetHistory();"),
                 "resolution-dependent NRD history must be reset on recreation");
         assertTrue(source.contains("broadcastTemporalReset(fsrBackend::requestReset)")
                         && fsrBackend.contains("delegate.requestReset();"),
@@ -143,10 +147,17 @@ final class RtRewriteCharacterizationTest {
     @Test
     void nrdRemainsRetiredInTheReferenceBaseline() throws IOException {
         String source = Files.readString(NRD);
+        String quarantine = Files.readString(NRD_QUARANTINE);
+        String composite = Files.readString(COMPOSITE);
 
         assertMatches(source,
                 "public\\s+static\\s+boolean\\s+enabled\\(\\)\\s*\\{\\s*return\\s+false\\s*;\\s*\\}",
                 "NRD/REBLUR must remain disabled during the rewrite baseline");
+        assertMatches(quarantine,
+                "public\\s+boolean\\s+selected\\(\\)\\s*\\{\\s*return\\s+false\\s*;\\s*\\}",
+                "the experimental NRD boundary must not be selectable");
+        assertTrue(composite.contains("nrdBackend.selected()") && !composite.contains("RtNrdDenoiser"),
+                "production selection and retained calls must go through the NRD quarantine boundary");
     }
 
     private static void assertMatches(String source, String regex, String message) {
