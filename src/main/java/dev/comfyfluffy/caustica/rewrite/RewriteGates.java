@@ -16,6 +16,7 @@ public final class RewriteGates {
     public static final String GPU_OWNERSHIP_V2_KEY = "engine.gpuOwnershipV2";
     public static final String SCENE_V2_KEY = "engine.sceneV2";
     public static final String RENDER_GRAPH_V2_KEY = "engine.renderGraphV2";
+    public static final String POST_BARRIERS_V2_KEY = "engine.postBarriersV2";
 
     private RewriteGates() {
     }
@@ -46,6 +47,10 @@ public final class RewriteGates {
 
     public static boolean renderGraphV2() {
         return enabled(RENDER_GRAPH_V2_KEY);
+    }
+
+    public static boolean postBarriersV2() {
+        return renderGraphV2() && enabled(POST_BARRIERS_V2_KEY);
     }
 
     private static boolean enabled(String key) {

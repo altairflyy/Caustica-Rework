@@ -95,6 +95,8 @@ import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.graph.FrameGraph;
 import dev.comfyfluffy.caustica.rt.graph.GraphExecution;
+import dev.comfyfluffy.caustica.rt.graph.PostBarrierPlan;
+import dev.comfyfluffy.caustica.rt.graph.PostImageBarriers;
 import dev.comfyfluffy.caustica.rt.frame.FrameCursor;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
 import dev.comfyfluffy.caustica.rt.frame.PostPresentPass;
@@ -536,6 +538,7 @@ public final class RtComposite {
     private final FrameGraph frameGraph = FrameGraph.shadow(framePipeline);
     private final GraphExecution graphExecution = new GraphExecution(frameGraph, framePipeline);
     private FrameCursor pipelineCursor;
+    private int loggedPostBarrierMode = -1;
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
     private FrameInputs pipelineInputs;
@@ -1376,6 +1379,9 @@ public final class RtComposite {
         VkCommandBuffer cmd = pipelineCommand;
         MemoryStack stack = pipelineStack;
         long dstImage = pipelinePostPresentTarget;
+        boolean generatedPostBarriers = dev.comfyfluffy.caustica.rewrite.RewriteGates.postBarriersV2();
+        boolean postHdr = CausticaConfig.Rt.Hdr.enabled();
+        PostBarrierPlan postPlan;
         // Auto-exposure meters rrOutput (the post-RR, denoised/converged image), not the raw
         // pre-RR trace: RR has no notion of exposure (DLSS-RR Integration Guide §3.7 — ignore
         // exposure/auto-exposure/sharpness entirely for RR), so this is purely our own metering
@@ -1385,13 +1391,13 @@ public final class RtComposite {
         // regardless of SPP, keeping exposure consistent.
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
-            exposure.record(ctx, cmd, stack, rrOutput);
+            postPlan = exposure.record(ctx, cmd, stack, rrOutput, generatedPostBarriers, postHdr);
         }
-        VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
+        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.DISPLAY, generatedPostBarriers);
 
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
-            displayPipeline.dispatch(cmd, displayW, displayH, CausticaConfig.Rt.Hdr.enabled(),
+            displayPipeline.dispatch(cmd, displayW, displayH, postHdr,
                     CausticaConfig.Rt.Hdr.paperWhiteNits(), CausticaConfig.Rt.Hdr.headroom(),
                     CausticaConfig.Rt.Tonemapping.operatorIndex(),
                     CausticaConfig.Rt.Tonemapping.EXPOSURE_EV.value(),
@@ -1399,15 +1405,22 @@ public final class RtComposite {
                     CausticaConfig.Rt.Tonemapping.SATURATION.value(),
                     CausticaConfig.Rt.Tonemapping.CONTRAST.value());
         }
-        hdrWrittenThisFrame = CausticaConfig.Rt.Hdr.enabled();
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
+        hdrWrittenThisFrame = postHdr;
+        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.COPY, generatedPostBarriers);
 
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "copy composite to main target");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.copyOutput")) {
             VK10.vkCmdCopyImage(cmd, displayImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
                     dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
         }
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
+        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.EXPORT, generatedPostBarriers);
+        int postMode = (generatedPostBarriers ? 4 : 0) | (postPlan.automaticExposure() ? 2 : 0) | (postHdr ? 1 : 0);
+        if (loggedPostBarrierMode != postMode) {
+            CausticaMod.LOGGER.info("AER-083 post barriers: path={}, exposure={}, hdr={}, scope=legacy-conservative",
+                    generatedPostBarriers ? "generated" : "legacy",
+                    postPlan.automaticExposure() ? "auto" : "manual", postHdr);
+            loggedPostBarrierMode = postMode;
+        }
     }
 
     private FrameInputs prepareFrameInputs() {

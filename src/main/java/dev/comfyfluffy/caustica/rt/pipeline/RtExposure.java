@@ -1,12 +1,13 @@
 package dev.comfyfluffy.caustica.rt.pipeline;
 
-import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
+import dev.comfyfluffy.caustica.rt.graph.PostBarrierPlan;
+import dev.comfyfluffy.caustica.rt.graph.PostImageBarriers;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.VK10;
@@ -52,13 +53,15 @@ public final class RtExposure {
         logOnce();
     }
 
-    public void record(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage traceColor) {
+    public PostBarrierPlan record(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage traceColor,
+                                  boolean generatedBarriers, boolean hdr) {
         if (image == null) {
             throw new IllegalStateException("RT exposure image not created");
         }
-        if (mode() == Mode.AUTO) {
-            recordAuto(ctx, cmd, stack, traceColor);
-            return;
+        PostBarrierPlan plan = PostBarrierPlan.of(mode() == Mode.AUTO, hdr);
+        if (plan.automaticExposure()) {
+            recordAuto(ctx, cmd, stack, traceColor, plan, generatedBarriers);
+            return plan;
         }
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure manual write")) {
             VkClearColorValue color = VkClearColorValue.calloc(stack);
@@ -68,6 +71,7 @@ public final class RtExposure {
                     .baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1);
             VK10.vkCmdClearColorImage(cmd, image.image, VK10.VK_IMAGE_LAYOUT_GENERAL, color, range);
         }
+        return plan;
     }
 
     public void destroy() {
@@ -95,7 +99,8 @@ public final class RtExposure {
         return CausticaConfig.Rt.Exposure.clampScale((float) Math.pow(2.0, manualEv()));
     }
 
-    private void recordAuto(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage traceColor) {
+    private void recordAuto(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage traceColor,
+                            PostBarrierPlan plan, boolean generatedBarriers) {
         if (pipeline == null || histogram == null || state == null) {
             throw new IllegalStateException("RT auto exposure resources not created");
         }
@@ -103,9 +108,9 @@ public final class RtExposure {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure histogram clear")) {
             VK10.vkCmdFillBuffer(cmd, histogram.handle, 0, histogram.size, 0);
         }
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
+        PostImageBarriers.before(cmd, stack, plan, PostBarrierPlan.HISTOGRAM, generatedBarriers);
         pipeline.dispatchHistogram(cmd, traceColor.width, traceColor.height);
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
+        PostImageBarriers.before(cmd, stack, plan, PostBarrierPlan.RESOLVE, generatedBarriers);
         pipeline.dispatchResolve(cmd, Math.max(1, traceColor.width * traceColor.height), autoConfig(), frameTimeSeconds());
     }
 
