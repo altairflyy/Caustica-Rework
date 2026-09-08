@@ -11,12 +11,16 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 
 class FramePipelineTest {
     @Test
-    void executesTheLegacyPassInDeclaredOrderWithTheSameFrame() {
+    void executesPrepareThenLegacyWithTheSameFrame() {
         FrameContext frame = frame(12L);
         List<String> order = new ArrayList<>();
         List<FrameContext> received = new ArrayList<>();
 
         FramePipeline pipeline = new FramePipeline(
+                new PrepareFramePass(context -> {
+                    order.add("prepare");
+                    received.add(context);
+                }),
                 new LegacyCompositePass(context -> {
                     order.add("legacy");
                     received.add(context);
@@ -24,9 +28,10 @@ class FramePipelineTest {
 
         pipeline.execute(frame);
 
-        assertEquals(1, pipeline.passCount());
-        assertEquals(List.of("legacy"), order);
+        assertEquals(2, pipeline.passCount());
+        assertEquals(List.of("prepare", "legacy"), order);
         assertSame(frame, received.getFirst());
+        assertSame(frame, received.getLast());
     }
 
     private static FrameContext frame(long index) {

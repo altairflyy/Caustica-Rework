@@ -88,6 +88,7 @@ import dev.comfyfluffy.caustica.rt.reconstruction.SvgfResources;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.frame.LegacyCompositePass;
+import dev.comfyfluffy.caustica.rt.frame.PrepareFramePass;
 import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
 import dev.comfyfluffy.caustica.rt.frame.TemporalState;
 
@@ -709,7 +710,9 @@ public final class RtComposite {
     private boolean frameCaptured;
     private FrameContext frameContext;
     private final TemporalState temporalState = new TemporalState();
-    private final FramePipeline framePipeline = new FramePipeline(new LegacyCompositePass(this::executeLegacyComposite));
+    private final FramePipeline framePipeline = new FramePipeline(
+            new PrepareFramePass(this::prepareFrame),
+            new LegacyCompositePass(this::executeLegacyComposite));
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
     private GpuTexture pipelineNativeColor;
@@ -963,11 +966,6 @@ public final class RtComposite {
             updateMotion();
             FrameInputs inputs = prepareFrameInputs();
             frameContext = createFrameContext(inputs);
-            temporalState.snapshot(frameContext);
-            // FG reads the frame's jitter at present time (PREPARE wants the offset the rays used).
-            fgJitterX = inputs.jitterX();
-            fgJitterY = inputs.jitterY();
-
             pipelineContext = ctx;
             pipelineActive = active;
             pipelineNativeColor = nativeColor;
@@ -1458,6 +1456,16 @@ public final class RtComposite {
             throw new IllegalStateException("legacy composite pass has no active frame invocation");
         }
         recordFrame(pipelineContext, pipelineActive, pipelineNativeColor, pipelineInputs);
+    }
+
+    private void prepareFrame(FrameContext frame) {
+        if (frame != frameContext || pipelineInputs == null) {
+            throw new IllegalStateException("prepare pass has no active frame invocation");
+        }
+        temporalState.snapshot(frame);
+        // FG reads the frame's jitter at present time (PREPARE wants the offset the rays used).
+        fgJitterX = frame.jitter().x();
+        fgJitterY = frame.jitter().y();
     }
 
     private FrameInputs prepareFrameInputs() {
