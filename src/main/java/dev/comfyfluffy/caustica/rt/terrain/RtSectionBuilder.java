@@ -69,13 +69,15 @@ final class RtSectionBuilder {
             MemoryUtil.memFloatBuffer(cursor, packed.material().length).put(packed.material());
             upload.flush();
 
-            blas = RtAccel.prepareTerrainBlas(ctx, positions, vertCount, indices,
+            blas = ctx.accelerationStructures().prepareStaticBlas(ctx, positions, vertCount, indices,
                     packed.bucketTris(), ommInput, compactBlas, label + " BLAS");
             return new PreparedSection(key, positions, indices, uvs, material, upload, blas,
+                    ctx.accelerationStructures(),
                     packed.triBase(), sox, soy, soz, packed.lights());
         } catch (Throwable t) {
             if (blas != null) {
                 destroy(new PreparedSection(key, positions, indices, uvs, material, upload, blas,
+                        ctx.accelerationStructures(),
                         packed.triBase(), sox, soy, soz, packed.lights()));
             } else {
                 if (upload != null) upload.destroy();
@@ -120,7 +122,7 @@ final class RtSectionBuilder {
         VK10.vkCmdCopyBuffer(cmd, upload.handle, destination.handle, region);
     }
 
-    /** LOD failure cleanup; called at the same completed-build or unsubmitted seam. */
+    /** Failure cleanup; called at the same completed-build or unsubmitted seam. */
     static void destroy(PreparedSection prepared,
                         dev.comfyfluffy.caustica.rt.gpu.AccelerationStructureManager manager) {
         manager.releaseBuildScratch(java.util.List.of(prepared.blas));
@@ -133,19 +135,15 @@ final class RtSectionBuilder {
     }
 
     static void destroy(PreparedSection prepared) {
-        RtAccel.freeBlasScratch(java.util.List.of(prepared.blas));
-        prepared.blas.accel.destroy();
-        prepared.upload.destroy();
-        prepared.material.destroy();
-        prepared.uvs.destroy();
-        prepared.indices.destroy();
-        prepared.positions.destroy();
+        destroy(prepared, prepared.accelerationStructures);
     }
 
     /** Worker-owned native section state paired with its prepared BLAS. {@code lights} = packed
      *  section-local RIS light records (CPU-side, flattened into the global buffer at publish). */
     record PreparedSection(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs,
-                           RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas, int[] triBase,
+                           RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas,
+                           dev.comfyfluffy.caustica.rt.gpu.AccelerationStructureManager accelerationStructures,
+                           int[] triBase,
                            int sx, int sy, int sz, float[] lights) {
         void releaseUpload() {
             upload.destroy();
@@ -158,6 +156,7 @@ final class RtSectionBuilder {
 
         PreparedSection withBlas(RtAccel.PreparedBlas replacement) {
             return new PreparedSection(key, positions, indices, uvs, material, upload, replacement,
+                    accelerationStructures,
                     triBase, sx, sy, sz, lights);
         }
     }

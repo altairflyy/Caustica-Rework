@@ -221,10 +221,5 @@ final class RtSectionTable {
             this.lights = lights;
         }
 
-        void destroy() {
-            blas.destroy();
-            material.destroy();
-            uvs.destroy();
-        }
     }
 }

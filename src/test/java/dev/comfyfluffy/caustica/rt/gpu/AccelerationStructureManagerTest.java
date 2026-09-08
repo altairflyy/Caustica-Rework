@@ -70,4 +70,26 @@ class AccelerationStructureManagerTest {
         assertEquals(-1, composite.indexOf("RtAccel.prepareTlas("));
         assertEquals(-1, composite.indexOf("RtAccel.recordTlasBuild("));
     }
+
+    @Test
+    void terrainBuildAndLifetimeUseTheManagerBoundary() throws Exception {
+        String terrain = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtTerrain.java"));
+        String builder = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtSectionBuilder.java"));
+        String table = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtSectionTable.java"));
+
+        assertTrue(builder.contains("ctx.accelerationStructures().prepareStaticBlas("));
+        assertTrue(builder.contains("destroy(prepared, prepared.accelerationStructures)"));
+        assertTrue(terrain.contains("ctx.accelerationStructures().recordBuilds("));
+        assertTrue(terrain.contains("ctx.accelerationStructures().compact("));
+        assertTrue(terrain.contains("ctx.accelerationStructures().retire("));
+        assertFalse(terrain.contains("RtAccel.recordBlasBuilds("));
+        assertFalse(terrain.contains("RtAccel.prepareTerrainCompaction("));
+        assertFalse(terrain.contains("RtAccel.destroyTerrainCompaction("));
+        assertFalse(builder.contains("RtAccel.prepareTerrainBlas("));
+        assertFalse(builder.contains("prepared.blas.accel.destroy()"));
+        assertFalse(table.contains("blas.destroy()"));
+    }
 }

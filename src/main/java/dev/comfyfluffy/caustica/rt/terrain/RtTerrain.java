@@ -1212,7 +1212,7 @@ public final class RtTerrain {
                         try {
                             submitTerrainBuild(dispatch.ctx(), task, prepared);
                         } catch (Throwable t) {
-                            RtSectionBuilder.destroy(prepared);
+                            RtSectionBuilder.destroy(prepared, dispatch.ctx().accelerationStructures());
                             throw t;
                         }
                     }
@@ -1239,10 +1239,10 @@ public final class RtTerrain {
                 () -> !isTaskCurrent(task),
                 cmd -> {
                     RtSectionBuilder.recordUpload(cmd, prepared);
-                    RtAccel.recordBlasBuilds(ctx, cmd, List.of(prepared.blas()));
+                    ctx.accelerationStructures().recordBuilds(ctx, cmd, List.of(prepared.blas()));
                 },
                 () -> {
-                    RtAccel.freeBlasScratch(List.of(prepared.blas()));
+                    ctx.accelerationStructures().releaseBuildScratch(List.of(prepared.blas()));
                     prepared.releaseUpload();
                 },
                 (build, failure) -> {
@@ -1267,7 +1267,7 @@ public final class RtTerrain {
                                          RtGpuExecutor.Build build) {
         RtAccel.PreparedTerrainCompaction compaction;
         try {
-            compaction = RtAccel.prepareTerrainCompaction(ctx, prepared.blas());
+            compaction = ctx.accelerationStructures().compact(ctx, prepared.blas());
         } catch (Throwable t) {
             completeTask(task, prepared, build, t);
             return;
@@ -1275,16 +1275,16 @@ public final class RtTerrain {
         try {
             ctx.gpuExecutor().submit(
                     () -> !isTaskCurrent(task),
-                    cmd -> RtAccel.recordTerrainCompaction(ctx, cmd, compaction),
+                    cmd -> ctx.accelerationStructures().recordCompaction(ctx, cmd, compaction),
                     () -> {
-                        RtAccel.finishTerrainCompaction(compaction);
+                        ctx.accelerationStructures().finishCompaction(compaction);
                         prepared.releaseBuildInputs();
                     },
                     (copyBuild, failure) -> {
                         if (failure != null) {
                             Throwable terminal = failure;
                             try {
-                                RtAccel.destroyTerrainCompaction(compaction);
+                                ctx.accelerationStructures().destroyCompaction(compaction);
                             } catch (Throwable destroyFailure) {
                                 terminal.addSuppressed(destroyFailure);
                             }
@@ -1295,7 +1295,7 @@ public final class RtTerrain {
                     });
         } catch (Throwable t) {
             try {
-                RtAccel.destroyTerrainCompaction(compaction);
+                ctx.accelerationStructures().destroyCompaction(compaction);
             } catch (Throwable destroyFailure) {
                 t.addSuppressed(destroyFailure);
             }
@@ -1402,7 +1402,7 @@ public final class RtTerrain {
                     ctx.gpuExecutor().markPublished(result.build());
                     RtFrameStats.FRAME.count("terrainBuildsCompleted", 1);
                 } catch (Throwable t) {
-                    RtSectionBuilder.destroy(built);
+                    RtSectionBuilder.destroy(built, ctx.accelerationStructures());
                     if (dirtyGroup != NO_DIRTY_GROUP) {
                         cancelDirtyGroup(dirtyGroup);
                     }
@@ -1508,7 +1508,8 @@ public final class RtTerrain {
         if (ctx == null) {
             RtSectionBuilder.destroy(ps);
         } else {
-            ctx.gpuExecutor().retireUnpublished(() -> RtSectionBuilder.destroy(ps));
+            ctx.gpuExecutor().retireUnpublished(
+                    () -> RtSectionBuilder.destroy(ps, ctx.accelerationStructures()));
         }
     }
 
@@ -1608,7 +1609,7 @@ public final class RtTerrain {
             if (!desired.contains(ps.key())) {
                 // Left the window while its batched BLAS build was in flight (window sync keeps running
                 // during builds). Never published — retire the fresh, unreferenced geometry.
-                ctx.gpuExecutor().retireUnpublished(g::destroy);
+                ctx.gpuExecutor().retireUnpublished(() -> destroySectionGeometry(ctx, g));
                 continue;
             }
             SectionGeom prev = resident.get(ps.key());
@@ -1735,7 +1736,8 @@ public final class RtTerrain {
     /** Queue old GPU resources until the last graphics submission that could reference them completes. */
     private void retire(RtContext ctx, GraphicsUse lastGraphicsUse, List<SectionGeom> removed) {
         for (SectionGeom g : removed) {
-            ctx.deferredDeletionQueue().retireAfterGraphics(lastGraphicsUse, g::destroy);
+            ctx.accelerationStructures().retire(lastGraphicsUse,
+                    () -> destroySectionGeometry(ctx, g));
         }
     }
 
@@ -1832,7 +1834,7 @@ public final class RtTerrain {
         table.instanceList.clear();
         lightSections.clear();
         for (SectionGeom g : resident.values()) {
-            g.destroy();
+            destroySectionGeometry(ctx, g);
         }
         resident.clear();
         empty.clear();
@@ -1841,11 +1843,11 @@ public final class RtTerrain {
         // The accumulators can hold evicted-but-not-yet-retired geometry (window sync fills `removed`
         // between streaming passes) and built-but-not-yet-published sections; the GPU is idle here, free them.
         for (SectionGeom g : removed) {
-            g.destroy();
+            destroySectionGeometry(ctx, g);
         }
         removed.clear();
         for (PreparedSection ps : prepared) {
-            RtSectionBuilder.destroy(ps);
+            RtSectionBuilder.destroy(ps, ctx.accelerationStructures());
         }
         prepared.clear();
         ready = false;
@@ -1923,22 +1925,22 @@ public final class RtTerrain {
         lightGrid.invalidate(ctx, lastGraphicsUse);
         if (!oldGeometry.isEmpty()) {
             ArrayList<SectionGeom> retirement = new ArrayList<>(oldGeometry);
-            ctx.deferredDeletionQueue().retireAfterGraphics(lastGraphicsUse,
-                    () -> destroyDetachedGeometry(retirement));
+            ctx.accelerationStructures().retire(lastGraphicsUse,
+                    () -> destroyDetachedGeometry(ctx, retirement));
         }
         if (!oldPrepared.isEmpty()) {
-            ctx.gpuExecutor().retireUnpublished(() -> destroyDetachedPrepared(oldPrepared));
+            ctx.gpuExecutor().retireUnpublished(() -> destroyDetachedPrepared(ctx, oldPrepared));
         }
 
         // Keep the RT seam alive as an empty world while the new desired window begins filling.
         ensureEmptyTableReady(ctx);
     }
 
-    private static void destroyDetachedGeometry(List<SectionGeom> geometry) {
+    private static void destroyDetachedGeometry(RtContext ctx, List<SectionGeom> geometry) {
         Throwable failure = null;
         for (SectionGeom geom : geometry) {
             try {
-                geom.destroy();
+                destroySectionGeometry(ctx, geom);
             } catch (Throwable t) {
                 if (failure == null) failure = t;
                 else failure.addSuppressed(t);
@@ -1949,11 +1951,11 @@ public final class RtTerrain {
         }
     }
 
-    private static void destroyDetachedPrepared(List<PreparedSection> sections) {
+    private static void destroyDetachedPrepared(RtContext ctx, List<PreparedSection> sections) {
         Throwable failure = null;
         for (PreparedSection section : sections) {
             try {
-                RtSectionBuilder.destroy(section);
+                RtSectionBuilder.destroy(section, ctx.accelerationStructures());
             } catch (Throwable t) {
                 if (failure == null) failure = t;
                 else failure.addSuppressed(t);
@@ -1962,6 +1964,12 @@ public final class RtTerrain {
         if (failure != null) {
             throw new RuntimeException("Failed to retire detached RT terrain builds", failure);
         }
+    }
+
+    private static void destroySectionGeometry(RtContext ctx, SectionGeom geometry) {
+        ctx.accelerationStructures().destroyOwnedBlas(geometry.blas);
+        geometry.material.destroy();
+        geometry.uvs.destroy();
     }
 
     private static long columnKey(int scx, int scz) {
