@@ -93,6 +93,7 @@ import dev.comfyfluffy.caustica.rt.frame.PrepareFramePass;
 import dev.comfyfluffy.caustica.rt.frame.ReconstructionPass;
 import dev.comfyfluffy.caustica.rt.frame.TemporalResetReason;
 import dev.comfyfluffy.caustica.rt.frame.TemporalState;
+import dev.comfyfluffy.caustica.rt.frame.UpscalePass;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -717,6 +718,7 @@ public final class RtComposite {
             new LegacyCompositePass(this::executeLegacyComposite));
     private final PathTracePass pathTracePass = new PathTracePass(this::recordPathTrace);
     private final ReconstructionPass reconstructionPass = new ReconstructionPass(this::reconstructFrame);
+    private final UpscalePass upscalePass = new UpscalePass(this::upscaleFrame);
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
     private GpuTexture pipelineNativeColor;
@@ -726,6 +728,7 @@ public final class RtComposite {
     private ByteBuffer pipelinePushConstants;
     private ReconstructionInput pipelineReconstructionInput;
     private ReconstructionResult pipelineReconstructionResult;
+    private UpscaleInput pipelineUpscaleInput;
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -1586,6 +1589,102 @@ public final class RtComposite {
         pipelineReconstructionResult = new ReconstructionResult(rrDone, upscaleSource, svgfRan);
     }
 
+    private void upscaleFrame(FrameContext frame) {
+        if (frame != frameContext || pipelineContext == null || pipelineInputs == null
+                || pipelineCommand == null || pipelineStack == null || pipelineUpscaleInput == null) {
+            throw new IllegalStateException("upscale pass has no active frame invocation");
+        }
+        RtContext ctx = pipelineContext;
+        VkCommandBuffer cmd = pipelineCommand;
+        MemoryStack stack = pipelineStack;
+        boolean rrDone = pipelineUpscaleInput.rrDone();
+        RtImage upscaleSource = pipelineUpscaleInput.upscaleSource();
+        boolean svgfRan = pipelineUpscaleInput.svgfRan();
+        boolean nrdDone = pipelineUpscaleInput.nrdDone();
+        boolean fsrPath = pipelineInputs.fsrPath();
+        boolean xessPath = pipelineInputs.xessPath();
+        float jitterX = frame.jitter().x();
+        float jitterY = frame.jitter().y();
+        if (!rrDone && fsrPath && RtFsrUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
+            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "FSR upscale");
+                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.fsr")) {
+                // Camera discontinuity (teleport / respawn / world change): FSR is a temporal
+                // upscaler like the others — a jump bigger than the NRD rebase threshold leaves
+                // its reprojection history pointing at a world that no longer matches, reading
+                // as smear until it decays. Drop the history on the jump frame.
+                if (fsrCamValid) {
+                    double fdx = camX - prevFsrCamX;
+                    double fdy = camY - prevFsrCamY;
+                    double fdz = camZ - prevFsrCamZ;
+                    if (fdx * fdx + fdy * fdy + fdz * fdz > 32.0 * 32.0) {
+                        recordTemporalReset(TemporalResetReason.TELEPORT);
+                        broadcastTemporalReset(RtFsrUpscaler.INSTANCE::requestReset);
+                    }
+                }
+                prevFsrCamX = camX;
+                prevFsrCamY = camY;
+                prevFsrCamZ = camZ;
+                fsrCamValid = true;
+                // Vertical FOV from the (unjittered) level projection, for FSR's depth heuristic.
+                // abs(): Minecraft's Vulkan projection carries the NDC y-flip (negative m11),
+                // which would hand FSR a negative FOV.
+                float fovY = (float) (2.0 * Math.atan(1.0 / Math.abs(frameProjection.m11())));
+                // reactive parameter: unused since the reactive-mask experiment was reverted
+                // (the shim ignores it); null keeps the call honest.
+                rrDone = RtFsrUpscaler.INSTANCE.evaluate(cmd.address(), upscaleSource, gDepth, gMotion,
+                        null, rrOutput,
+                        renderW, renderH, displayW, displayH, -jitterX, -jitterY, fovY);
+            }
+        }
+
+        // Intel XeSS occupies the slot when neither RR nor FSR is running: same inputs as FSR
+        // (denoised-or-raw color + depth + motion vectors), output straight into rrOutput. The
+        // ML reconstruction replaces FSR's analytic pass — same upscale slot, same consumers.
+        if (!rrDone && xessPath && RtXessUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
+            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "XeSS upscale");
+                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.xess")) {
+                // Camera discontinuity reset, same rule as the FSR path above.
+                if (xessCamValid) {
+                    double xdx = camX - prevXessCamX;
+                    double xdy = camY - prevXessCamY;
+                    double xdz = camZ - prevXessCamZ;
+                    if (xdx * xdx + xdy * xdy + xdz * xdz > 32.0 * 32.0) {
+                        recordTemporalReset(TemporalResetReason.TELEPORT);
+                        broadcastTemporalReset(RtXessUpscaler.INSTANCE::requestReset);
+                    }
+                }
+                prevXessCamX = camX;
+                prevXessCamY = camY;
+                prevXessCamZ = camZ;
+                xessCamValid = true;
+                // XeSS takes the applied image-space jitter as-is (no negation — see
+                // RtXessUpscaler.evaluate), unlike FSR/DLSS which take the negated offsets.
+                // EXCEPT when a temporal denoiser just ran: its output is already the integral
+                // of the whole jitter sequence, so telling XeSS a per-frame jitter that is no
+                // longer in the content makes its reprojection chase a phantom offset (the
+                // noisy/shimmery output). Converged input -> zero jitter.
+                boolean jitterAlreadyIntegrated = svgfRan || nrdDone;
+                float xessJitterX = jitterAlreadyIntegrated ? 0.0f : jitterX;
+                float xessJitterY = jitterAlreadyIntegrated ? 0.0f : jitterY;
+                rrDone = RtXessUpscaler.INSTANCE.evaluate(cmd.address(), upscaleSource, gDepth, gMotion,
+                        rrOutput,
+                        renderW, renderH, displayW, displayH, xessJitterX, xessJitterY);
+            }
+        }
+
+        // When no upscaler produced the display-res image (disabled, debug view, or a runtime
+        // failure), bring the render-res trace up to display res with a linear blit so the display mapper
+        // always has a display-res RT image. With no upscaler render == display, so this is a 1:1 copy.
+        if (!rrDone) {
+            VulkanCommandEncoder.memoryBarrier(cmd, stack);
+            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "fallback upscale");
+                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.upscale")) {
+                blitUpscale(cmd, stack, upscaleSource, rrOutput);
+            }
+        }
+        VulkanCommandEncoder.memoryBarrier(cmd, stack); // rrOutput visible to exposure histogram
+    }
+
     private FrameInputs prepareFrameInputs() {
         int debugView = debugView();
         boolean rrPath = RtDlssRr.enabled() && debugView == 0;
@@ -1992,84 +2091,16 @@ public final class RtComposite {
             boolean rrDone = reconstruction.rrDone();
             RtImage upscaleSource = reconstruction.upscaleSource();
             boolean svgfRan = reconstruction.svgfRan();
-            if (!rrDone && fsrPath && RtFsrUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
-                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "FSR upscale");
-                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.fsr")) {
-                    // Camera discontinuity (teleport / respawn / world change): FSR is a temporal
-                    // upscaler like the others — a jump bigger than the NRD rebase threshold leaves
-                    // its reprojection history pointing at a world that no longer matches, reading
-                    // as smear until it decays. Drop the history on the jump frame.
-                    if (fsrCamValid) {
-                        double fdx = camX - prevFsrCamX;
-                        double fdy = camY - prevFsrCamY;
-                        double fdz = camZ - prevFsrCamZ;
-                        if (fdx * fdx + fdy * fdy + fdz * fdz > 32.0 * 32.0) {
-                            recordTemporalReset(TemporalResetReason.TELEPORT);
-                            broadcastTemporalReset(RtFsrUpscaler.INSTANCE::requestReset);
-                        }
-                    }
-                    prevFsrCamX = camX;
-                    prevFsrCamY = camY;
-                    prevFsrCamZ = camZ;
-                    fsrCamValid = true;
-                    // Vertical FOV from the (unjittered) level projection, for FSR's depth heuristic.
-                    // abs(): Minecraft's Vulkan projection carries the NDC y-flip (negative m11),
-                    // which would hand FSR a negative FOV.
-                    float fovY = (float) (2.0 * Math.atan(1.0 / Math.abs(frameProjection.m11())));
-                    // reactive parameter: unused since the reactive-mask experiment was reverted
-                    // (the shim ignores it); null keeps the call honest.
-                    rrDone = RtFsrUpscaler.INSTANCE.evaluate(cmd.address(), upscaleSource, gDepth, gMotion,
-                            null, rrOutput,
-                            renderW, renderH, displayW, displayH, -jitterX, -jitterY, fovY);
-                }
+            pipelineCommand = cmd;
+            pipelineStack = stack;
+            pipelineUpscaleInput = new UpscaleInput(rrDone, upscaleSource, svgfRan, nrdDone);
+            try {
+                upscalePass.execute(frameContext);
+            } finally {
+                pipelineCommand = null;
+                pipelineStack = null;
+                pipelineUpscaleInput = null;
             }
-
-            // Intel XeSS occupies the slot when neither RR nor FSR is running: same inputs as FSR
-            // (denoised-or-raw color + depth + motion vectors), output straight into rrOutput. The
-            // ML reconstruction replaces FSR's analytic pass — same upscale slot, same consumers.
-            if (!rrDone && xessPath && RtXessUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
-                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "XeSS upscale");
-                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.xess")) {
-                    // Camera discontinuity reset, same rule as the FSR path above.
-                    if (xessCamValid) {
-                        double xdx = camX - prevXessCamX;
-                        double xdy = camY - prevXessCamY;
-                        double xdz = camZ - prevXessCamZ;
-                        if (xdx * xdx + xdy * xdy + xdz * xdz > 32.0 * 32.0) {
-                            recordTemporalReset(TemporalResetReason.TELEPORT);
-                            broadcastTemporalReset(RtXessUpscaler.INSTANCE::requestReset);
-                        }
-                    }
-                    prevXessCamX = camX;
-                    prevXessCamY = camY;
-                    prevXessCamZ = camZ;
-                    xessCamValid = true;
-                    // XeSS takes the applied image-space jitter as-is (no negation — see
-                    // RtXessUpscaler.evaluate), unlike FSR/DLSS which take the negated offsets.
-                    // EXCEPT when a temporal denoiser just ran: its output is already the integral
-                    // of the whole jitter sequence, so telling XeSS a per-frame jitter that is no
-                    // longer in the content makes its reprojection chase a phantom offset (the
-                    // noisy/shimmery output). Converged input -> zero jitter.
-                    boolean jitterAlreadyIntegrated = svgfRan || nrdDone;
-                    float xessJitterX = jitterAlreadyIntegrated ? 0.0f : jitterX;
-                    float xessJitterY = jitterAlreadyIntegrated ? 0.0f : jitterY;
-                    rrDone = RtXessUpscaler.INSTANCE.evaluate(cmd.address(), upscaleSource, gDepth, gMotion,
-                            rrOutput,
-                            renderW, renderH, displayW, displayH, xessJitterX, xessJitterY);
-                }
-            }
-
-            // When no upscaler produced the display-res image (disabled, debug view, or a runtime
-            // failure), bring the render-res trace up to display res with a linear blit so the display mapper
-            // always has a display-res RT image. With no upscaler render == display, so this is a 1:1 copy.
-            if (!rrDone) {
-                VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "fallback upscale");
-                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.upscale")) {
-                    blitUpscale(cmd, stack, upscaleSource, rrOutput);
-                }
-            }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack); // rrOutput visible to exposure histogram
 
             // Auto-exposure meters rrOutput (the post-RR, denoised/converged image), not the raw
             // pre-RR trace: RR has no notion of exposure (DLSS-RR Integration Guide §3.7 — ignore
@@ -2162,6 +2193,8 @@ public final class RtComposite {
                                        boolean nrdValidationOn, int debugView) {}
 
     private record ReconstructionResult(boolean rrDone, RtImage upscaleSource, boolean svgfRan) {}
+
+    private record UpscaleInput(boolean rrDone, RtImage upscaleSource, boolean svgfRan, boolean nrdDone) {}
 
     private record CelestialUv(Float4 sun, Float4 moon) {}
 
