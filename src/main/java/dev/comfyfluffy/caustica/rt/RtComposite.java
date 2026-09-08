@@ -93,6 +93,7 @@ import dev.comfyfluffy.caustica.rt.upscale.XessUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.upscale.NativeUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
+import dev.comfyfluffy.caustica.rt.graph.FrameGraph;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
 import dev.comfyfluffy.caustica.rt.frame.PostPresentPass;
 import dev.comfyfluffy.caustica.rt.frame.PrepareFramePass;
@@ -530,6 +531,7 @@ public final class RtComposite {
     private final PostPresentPass postPresentPass = new PostPresentPass(this::postPresentFrame);
     private final FramePipeline framePipeline = new FramePipeline(
             prepareFramePass, pathTracePass, reconstructionPass, upscalePass, postPresentPass);
+    private final FrameGraph frameGraph = FrameGraph.shadow(framePipeline);
     private FramePipeline.Cursor pipelineCursor;
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;

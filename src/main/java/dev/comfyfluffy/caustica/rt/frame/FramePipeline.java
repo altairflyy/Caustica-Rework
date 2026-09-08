@@ -34,6 +34,11 @@ public final class FramePipeline {
         return passes.size();
     }
 
+    /** Stable debug description used by the shadow render graph. */
+    public List<String> declaredPassNames() {
+        return passes.stream().map(pass -> pass.getClass().getSimpleName()).toList();
+    }
+
     /** Executes this pipeline incrementally while preserving its declared order. */
     public final class Cursor {
         private final FrameContext frame;
