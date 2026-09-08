@@ -1844,6 +1844,26 @@ LOD/terrain/entity smoke PASS
 integration completeness PASS
 ```
 
+### Eccezione baseline DH/Voxy
+
+Il solo smoke del provider LOD DH/Voxy può essere registrato come
+`DEFERRED_BASELINE_ISSUE` quando sono soddisfatte tutte queste condizioni:
+
+- il percorso DH/Voxy risulta già non correttamente supportato dalla repository
+  originale e non è una regressione attribuibile ad AER-040..046;
+- il problema, ancora da diagnosticare, è registrato esplicitamente in
+  `BLOCKERS.md` con recovery rinviata alla fine del refactoring;
+- contract, selector, ownership e lifetime restano coperti dai test e dalle
+  characterization del percorso migrato;
+- nessun provider, meshing, coverage, selector o lifetime fix viene introdotto
+  incidentalmente per chiudere GATE-4.
+
+`DEFERRED_BASELINE_ISSUE` soddisfa soltanto la voce LOD provider smoke di questo
+gate. Non vale come `PASS`, non chiude il problema e non deroga terrain/entity
+smoke, Vulkan validation, GPU-001..004 o integration completeness. La
+qualificazione DH/Voxy deve essere ripresa prima della chiusura finale del
+refactoring.
+
 ### Integration completeness
 
 Verificare:

@@ -51,8 +51,9 @@ was modified during this gate audit.
   `Vulkan application-requested instance layers (0)`.
 - Terrain smoke: PASS (`RT composite active (terrain)`).
 - Entity/refit smoke: NOT DEMONSTRATED by the available log.
-- LOD provider smoke: NOT AVAILABLE in this profile; neither DH nor Voxy is
-  installed, so `RtLodTerrain` followed its no-provider path.
+- LOD provider smoke: `DEFERRED_BASELINE_ISSUE`. Neither DH nor Voxy is installed
+  in this profile, and their pre-existing support bug is deliberately deferred
+  under the narrow canonical GATE-4 exception.
 
 ## Deferred DH/Voxy issue
 
@@ -61,9 +62,10 @@ Its cause and corrective scope have not yet been investigated. Diagnosis and
 repair are intentionally deferred until the end of the architectural
 refactoring so they are not mixed into GPU-ownership tasks.
 
-This deferral is recorded as a known limitation; it does not convert the missing
-LOD provider smoke into PASS and does not authorize changes to provider logic,
-meshing, coverage, selection or AS lifetime in GATE-4.
+This deferral is recorded as a known limitation and satisfies only the provider
+LOD smoke requirement under the canonical exception. It does not convert the
+smoke into PASS and does not authorize changes to provider logic, meshing,
+coverage, selection or AS lifetime in GATE-4.
 
 The installed Modrinth App exposes no working direct-profile launch argument,
 and the available automation surface cannot control native Modrinth/Minecraft
@@ -74,7 +76,7 @@ partial evidence above but cannot prove paths that were not enabled or logged.
 
 `GATE-4 integration completeness: PASS (static/runtime wiring)`.
 
-`GATE-4 overall: BLOCKED` pending a validation-layer run, demonstrated
-entity/refit activity and eventual resolution/qualification of the deferred
-DH/Voxy issue. `GATE-4` remains `PENDING`; `AER-050` remains `PENDING` and was
-not started.
+`GATE-4 overall: BLOCKED` pending a validation-layer run and demonstrated entity
+activity. The DH/Voxy limitation is accepted only as
+`DEFERRED_BASELINE_ISSUE`. `GATE-4` remains `PENDING`; `AER-050` remains
+`PENDING` and was not started.

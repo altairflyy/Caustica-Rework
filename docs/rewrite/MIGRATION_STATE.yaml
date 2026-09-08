@@ -163,6 +163,7 @@ notes:
   - DLSS-RR runtime initialization passes with the NGX shim rebuilt from source.
   - The external ngx.path override is not required.
   - ReSTIR temporal boiling/flickering is a known pre-refactor baseline issue.
+  - DH/Voxy runtime support has a known pre-existing unresolved bug; GATE-4 may classify only its provider smoke as DEFERRED_BASELINE_ISSUE, with diagnosis and qualification required before FINAL.
   - The baseline Gradle run reported 123 tests: 114 PASS and 9 existing shader regression failures.
   - AER-004 characterization tests PASS: 7/7. The exact 9-test pre-refactor failure set is frozen as the accepted baseline.
   - GATE-0 PASS: AER-000 through AER-004 are complete and V0/V1/V2 are baseline-equivalent PASS.

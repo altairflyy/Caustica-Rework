@@ -176,7 +176,9 @@ The user reports a separate unresolved bug in the DH/Voxy runtime path. Root
 cause and fix are not yet characterized. Investigation is deliberately deferred
 until the end of the architectural refactoring; no speculative provider,
 meshing, selector or lifetime change is authorized as part of GATE-4 recovery.
-The missing LOD smoke remains an explicit acceptance gap rather than a PASS.
+The missing LOD smoke is classified as `DEFERRED_BASELINE_ISSUE` under the
+narrow canonical GATE-4 exception. It is not a PASS and remains required before
+the final refactoring gate, but it no longer independently blocks GATE-4.
 
 The canonical GATE-4 acceptance additionally requires Vulkan validation without
 new errors and LOD/terrain/entity runtime smoke PASS. No repository smoke runner
@@ -198,6 +200,7 @@ After the main architectural refactoring, separately diagnose and resolve the
 known DH/Voxy bug, then run movement/chunk-streaming smoke with a compatible
 active provider before claiming the LOD portion of GATE-4.
 
-After the evidence passes, update `GATE-4-result.md`, close this blocker, set
+After the non-deferred evidence passes, update `GATE-4-result.md`, narrow this
+blocker to the final DH/Voxy recovery, set
 `GATE-4: PASS` and `AER-050: READY`, and create a separate atomic gate-closure
 commit. Do not start AER-050 before that commit and a clean worktree.
