@@ -212,3 +212,35 @@ exact 4/4 canonical failures and characterization 7/7; V2 PASS. V0, script synta
 and forbidden-change review PASS: no shader/math, push ABI, jitter/reset, AS,
 upscaler algorithm or new waitIdle change. Same-JAR runtime A/B with DLSS-RR and
 synchronization validation: PENDING. AER-083 remains ACTIVE; AER-084 is PENDING.
+
+Path-trace-output same-JAR A/B: PASS. Both runs used SHA-256
+`324803C57E8C161869EA2D668146A371D4F693F5ECD74432D9939FCF74DD88FB`,
+executed DLSS-RR without SVGF fallback, and reported respectively the `legacy`
+and `generated` path-trace barrier markers. Synchronization validation produced
+an exact normalized match: two SDK-owned NGX WAW hazards, two established DH
+vertex-input VUID occurrences and the intermittent shutdown leak. Generated
+path-trace barriers introduced no new finding. The user completed the matched
+first-frame, stationary, movement/camera, menu and reload route without
+reporting a visual or temporal regression.
+
+Accepted path-trace evidence directories:
+
+- legacy A: `build/rewrite-validation/AER-083-path-trace/A-9a008b0b84e5479184dc93e7ed7643c8`
+- generated B: `build/rewrite-validation/AER-083-path-trace/B-65780fd248fa4d109b24d38eb0b77f3e`
+
+## Final acceptance
+
+AER-083 is DONE. POST, denoiser, available upscaler backends and path-trace
+outputs all replace their corresponding legacy barrier at the same command
+boundary behind independent default-OFF feature gates, and every migrated
+family has a same-JAR A/B with synchronization validation. No generated path
+introduced a new Vulkan finding or reported visual regression. NRD, FSR and
+XeSS remain explicitly NOT AVAILABLE on this build and were not credited as
+PASS. No AS barrier, shader/math, push ABI, jitter/reset, algorithm, queue
+scheduling, transient aliasing or hot-path waitIdle change is included.
+
+Final validation for the committed production candidate: targeted family,
+ReSTIR history/math and characterization tests PASS; `validate-build.ps1` PASS,
+V1 240 tests with exact 4/4 canonical failures and characterization 7/7, V2
+PASS; V0 and forbidden-change audit PASS. Queue dependency scheduling remains
+the separate AER-084 task.
