@@ -127,3 +127,26 @@ Accepted evidence directories:
 The denoiser family is qualified. AER-083 remains ACTIVE; upscaler and path-trace
 output families are intentionally untouched and remain to be qualified before
 task closure.
+
+## Upscaler-family candidate
+
+Runtime seams audited: NativeUpscalerBackend pre-blit and RtComposite upscale
+export to exposure. Replace those two legacy calls behind the independent,
+default-OFF engine.upscalerBarriersV2 gate (requires renderGraphV2). The native
+producer is TRANSFER, SDK producers are EXTERNAL, downstream exposure is COMPUTE.
+Per-image declarations distinguish current color, depth/motion, DLSS guides and
+the distinct rrOutput. SDK-owned cross-frame histories/layouts remain opaque and
+unchanged; incoming trace/denoiser barriers retain their original ownership.
+Actual successful producer selection drives export declarations and runtime
+markers, including native fallback. Generated barriers retain legacy stage/access
+scope and command boundaries. POST/denoiser implementations remain unchanged.
+
+Validation: targeted UpscalerBarrierPlan/NativeUpscalerBackend and retained
+POST/denoiser tests PASS; validate-build.ps1 PASS (234 tests, exact 4/4 canonical
+failures, characterization 7/7, V2 PASS). V0 and forbidden-change review PASS:
+no shader math, trace-output barriers, SDK algorithms, reset/jitter changes or
+new waitIdle. A/B harness syntax checked. Same-JAR runtime qualification PENDING.
+FSR/XeSS native binaries are unavailable in this build; their runtime status is
+NOT AVAILABLE. NATIVE and DLSS_RR require separate matched A/B pairs, with
+backend selection fixed by JVM properties and synchronization validation active.
+See AER-083-upscaler-AB.md. AER-083 stays ACTIVE; AER-084 remains PENDING.

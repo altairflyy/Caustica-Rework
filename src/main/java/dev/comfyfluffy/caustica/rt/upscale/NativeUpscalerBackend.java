@@ -1,6 +1,5 @@
 package dev.comfyfluffy.caustica.rt.upscale;
 
-import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
@@ -33,7 +32,9 @@ public final class NativeUpscalerBackend implements UpscalerBackend<NativeUpscal
     @Override
     public UpscaleResult execute(Request input) {
         Objects.requireNonNull(input, "input");
-        VulkanCommandEncoder.memoryBarrier(input.command(), input.stack());
+        dev.comfyfluffy.caustica.rt.graph.UpscalerBarriers.before(input.command(), input.stack(),
+                dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.NATIVE, "produce",
+                dev.comfyfluffy.caustica.rewrite.RewriteGates.upscalerBarriersV2());
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 input.context(), input.command(), "fallback upscale");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.upscale")) {

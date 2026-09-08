@@ -542,6 +542,7 @@ public final class RtComposite {
     private FrameCursor pipelineCursor;
     private int loggedPostBarrierMode = -1;
     private int loggedDenoiserBarrierMode = -1;
+    private String loggedUpscalerBarrierMode;
     private RtContext pipelineContext;
     private RtPipeline pipelineActive;
     private FrameInputs pipelineInputs;
@@ -1331,6 +1332,8 @@ public final class RtComposite {
         VkCommandBuffer cmd = pipelineCommand;
         MemoryStack stack = pipelineStack;
         boolean rrDone = pipelineUpscaleInput.rrDone();
+        dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend barrierBackend =
+                dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.DLSS_RR;
         RtImage upscaleSource = pipelineUpscaleInput.upscaleSource();
         boolean svgfRan = pipelineUpscaleInput.svgfRan();
         boolean nrdDone = pipelineUpscaleInput.nrdDone();
@@ -1348,6 +1351,7 @@ public final class RtComposite {
                                 broadcastTemporalReset(fsrBackend::requestReset);
                             }));
             rrDone = result.executed();
+            if (rrDone) barrierBackend = dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.FSR;
         }
 
         // Intel XeSS occupies the slot when neither RR nor FSR is running: same inputs as FSR
@@ -1362,6 +1366,7 @@ public final class RtComposite {
                                 broadcastTemporalReset(xessBackend::requestReset);
                             }));
             rrDone = result.executed();
+            if (rrDone) barrierBackend = dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.XESS;
         }
 
         // When no upscaler produced the display-res image (disabled, debug view, or a runtime
@@ -1369,8 +1374,15 @@ public final class RtComposite {
         // always has a display-res RT image. With no upscaler render == display, so this is a 1:1 copy.
         if (!rrDone) {
             nativeUpscalerBackend.execute(new NativeUpscalerBackend.Request(ctx, cmd, stack, upscaleSource, rrOutput));
+            barrierBackend = dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.NATIVE;
         }
-        VulkanCommandEncoder.memoryBarrier(cmd, stack); // rrOutput visible to exposure histogram
+        boolean generated = dev.comfyfluffy.caustica.rewrite.RewriteGates.upscalerBarriersV2();
+        dev.comfyfluffy.caustica.rt.graph.UpscalerBarriers.before(cmd, stack, barrierBackend, "export", generated);
+        String barrierMode = (generated ? "generated" : "legacy") + ", backend=" + barrierBackend;
+        if (!barrierMode.equals(loggedUpscalerBarrierMode)) {
+            CausticaMod.LOGGER.info("AER-083 upscaler barriers: path={}, scope=legacy-conservative", barrierMode);
+            loggedUpscalerBarrierMode = barrierMode;
+        }
     }
 
     private void postPresentFrame(FrameContext frame) {
