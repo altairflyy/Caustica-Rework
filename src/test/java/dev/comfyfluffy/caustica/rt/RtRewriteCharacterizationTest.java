@@ -26,6 +26,8 @@ final class RtRewriteCharacterizationTest {
             "src/main/java/dev/comfyfluffy/caustica/rt/lod/LodProviderSelector.java");
     private static final Path NRD = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdDenoiser.java");
+    private static final Path SVGF_BACKEND = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/reconstruction/SvgfReconstructionBackend.java");
 
     @Test
     void restirCurrentAndPreviousUseOppositePingPongHalves() throws IOException {
@@ -46,9 +48,11 @@ final class RtRewriteCharacterizationTest {
     @Test
     void legacyTemporalResetTriggersRemainCharacterized() throws IOException {
         String source = Files.readString(COMPOSITE);
+        String svgfBackend = Files.readString(SVGF_BACKEND);
 
-        assertTrue(source.contains("svgfResources.resetHistory();"),
-                "fresh/recreated SVGF resources must invalidate SVGF history");
+        assertTrue(source.contains("svgfBackend.requestReset();")
+                        && svgfBackend.contains("resources.resetHistory();"),
+                "fresh/recreated SVGF resources must invalidate backend-owned SVGF history");
         assertTrue(source.contains("mvHasPrev = false; // recreated images -> first MV frame is zero"),
                 "resource recreation must invalidate motion-vector history");
         assertTrue(source.contains("RtNrdDenoiser.INSTANCE.resetHistory();"),

@@ -73,7 +73,6 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtFgSkyMaskPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNativeFrameGen;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNativeFrameGenPipeline;
-import dev.comfyfluffy.caustica.rt.pipeline.RtSvgfDenoiser;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNrdDenoiser;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNrdCombinePipeline;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
@@ -84,7 +83,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.lighting.RestirHistory;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
-import dev.comfyfluffy.caustica.rt.reconstruction.SvgfResources;
+import dev.comfyfluffy.caustica.rt.reconstruction.SvgfReconstructionBackend;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
@@ -401,29 +400,6 @@ public final class RtComposite {
     // penumbrae). Radii in degrees; the real sun/moon are ~0.27°, but a touch larger reads pleasantly.
     private static final int WATER_ANCHOR_MASK = 4095;
 
-    // ---- SVGF denoiser tuning (see RtSvgfDenoiser + shaders/display/svgf_*.comp).
-    //
-    // Accumulation window. Longer than the old TAA's 32 frames because history is now rejected on
-    // GEOMETRY rather than thrown away on motion: a long window no longer means ghosting, it means
-    // a converged image. The exponential tail after the 1/n phase still tracks lighting changes.
-    private static final float SVGF_MAX_FRAMES = 48.0f;
-    /**
-     * Debug-view ids that inspect SVGF's internal state instead of the tracer's guides. Unlike the
-     * guide views these leave the denoiser enabled, because the point is to see what it is doing.
-     * 10 = history length (black means the reprojection threw the history away), 11 = variance,
-     * 12 = luminance sigma (bright means the bilateral has degenerated into a box blur).
-     */
-    private static final int SVGF_DEBUG_FIRST = 10;
-    private static final int SVGF_DEBUG_LAST = 12;
-    // Luminance edge-stop, in estimated standard deviations. This is the knob that decides how much
-    // the wavelet trusts its own variance estimate: 4 sigma filters the 1-spp signal hard while
-    // still stopping at genuine luminance edges (SVGF's paper uses 4 as well).
-    private static final float SVGF_PHI_LUMINANCE = 4.0f;
-    // Normal edge-stop exponent, the standard SVGF value: cos^128 keeps block faces separate.
-    private static final float SVGF_PHI_NORMAL = 128.0f;
-    // Depth edge-stop, as a multiple of the local screen-space depth gradient. Scaling by the
-    // gradient is what keeps slanted surfaces from reading as discontinuities.
-    private static final float SVGF_PHI_DEPTH = 2.0f;
     // Matches the viewZ cap the tracer writes for sky/miss pixels: everything beyond is passed
     // through the denoise chain raw (the sky never accumulates history).
     private static final float NRD_DENOISING_RANGE = 500000.0f;
@@ -646,8 +622,7 @@ public final class RtComposite {
     // ping-pong feeding the variance estimate, and the à-trous ping-pong (rgb = colour,
     // a = variance). The reprojection also needs LAST frame's geometry to validate history against,
     // which is what the prev-guide copies hold.
-    private final SvgfResources svgfResources = new SvgfResources();
-    private RtSvgfDenoiser svgfDenoiser;
+    private final SvgfReconstructionBackend svgfBackend = new SvgfReconstructionBackend();
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
     private boolean renderSizeSvgfEnabled;
@@ -1219,7 +1194,7 @@ public final class RtComposite {
             gNrdSpec.destroy();
             gNrdSpec = null;
         }
-        svgfResources.destroy();
+        svgfBackend.releaseResources();
         if (nrdDiffOut != null) {
             nrdDiffOut.destroy();
             nrdDiffOut = null;
@@ -1388,16 +1363,7 @@ public final class RtComposite {
         // ping-pong (whose alpha carries variance), plus copies of last frame's depth/normal guides
         // so the reprojection can validate history against the geometry it came from.
         if (svgfEnabled) {
-            svgfResources.allocate(ctx, renderW, renderH);
-            if (svgfDenoiser == null) {
-                svgfDenoiser = RtSvgfDenoiser.create(ctx);
-                CausticaMod.LOGGER.info("SVGF denoiser active ({} a-trous passes, {} frame window)",
-                        RtSvgfDenoiser.ATROUS_PASSES, (int) SVGF_MAX_FRAMES);
-            } else {
-                // The images above are new. A recycled view handle can compare equal to the one that
-                // was just destroyed, so the descriptor cache must be dropped rather than trusted.
-                svgfDenoiser.invalidateBindings();
-            }
+            svgfBackend.ensureResources(ctx, renderW, renderH);
         }
         // Denoiser outputs + the decoded/summed image the upscale stage consumes exist only while
         // NRD actually runs; the combine pipeline is created lazily with them.
@@ -1425,7 +1391,7 @@ public final class RtComposite {
         broadcastTemporalReset(() -> {
             if (svgfEnabled) {
                 // Fresh buffers hold nothing the reprojection may read.
-                svgfResources.resetHistory();
+                svgfBackend.requestReset();
             }
             if (nrdEnabled) {
                 // NRD's own temporal history cannot survive a resolution change either.
@@ -1524,69 +1490,17 @@ public final class RtComposite {
         }
 
         boolean svgfRan = false;
-        boolean svgfDebugView = pipelineReconstructionInput.debugView() >= SVGF_DEBUG_FIRST
-                && pipelineReconstructionInput.debugView() <= SVGF_DEBUG_LAST;
+        boolean svgfDebugView = SvgfReconstructionBackend.isDebugView(pipelineReconstructionInput.debugView());
         if (pipelineInputs.svgfPath() && !pipelineReconstructionInput.nrdDone()
                 && !pipelineReconstructionInput.nrdValidationOn()
-                && svgfDenoiser != null && svgfResources.historyPing() != null && gViewZ != null) {
-            boolean svgfWriteToPing = svgfResources.writeToPing();
-            int svgfParity = svgfWriteToPing ? 0 : 1;
-            RtImage historyIn = svgfWriteToPing ? svgfResources.historyPong() : svgfResources.historyPing();
-            RtImage historyOut = svgfWriteToPing ? svgfResources.historyPing() : svgfResources.historyPong();
-            RtImage momentsIn = svgfWriteToPing ? svgfResources.momentsPong() : svgfResources.momentsPing();
-            RtImage momentsOut = svgfWriteToPing ? svgfResources.momentsPing() : svgfResources.momentsPong();
-            boolean svgfReset = !svgfResources.hasHistory();
-            float svgfCamForwardDelta = 0.0f;
-            if (svgfResources.hasHistory() && !svgfReset) {
-                double fx = frameViewRotation.m02();
-                double fy = frameViewRotation.m12();
-                double fz = frameViewRotation.m22();
-                svgfCamForwardDelta = (float) -((camX - svgfResources.previousCameraX()) * fx
-                        + (camY - svgfResources.previousCameraY()) * fy
-                        + (camZ - svgfResources.previousCameraZ()) * fz);
-                if (!Float.isFinite(svgfCamForwardDelta)) {
-                    svgfCamForwardDelta = 0.0f;
-                }
-            }
-            int extraSkySmooth = RtFramePresenter.INSTANCE.isActive() ? 1 : 0;
-            VulkanCommandEncoder.memoryBarrier(cmd, stack);
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SVGF denoise");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.svgf")) {
-                svgfDenoiser.reproject(cmd, renderW, renderH, svgfParity,
-                        upscaleSource.view, historyIn.view, momentsIn.view,
-                        historyOut.view, momentsOut.view, svgfResources.filterPing().view,
-                        gMotion.view, gViewZ.view, gNormal.view,
-                        svgfResources.previousViewZ().view, svgfResources.previousNormal().view, gAlbedo.view,
-                        svgfReset, SVGF_MAX_FRAMES, svgfCamForwardDelta);
-                VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                RtImage src = svgfResources.filterPing();
-                RtImage dst = svgfResources.filterPong();
-                for (int pass = 0; pass < RtSvgfDenoiser.ATROUS_PASSES; pass++) {
-                    boolean lastPass = pass == RtSvgfDenoiser.ATROUS_PASSES - 1;
-                    svgfDenoiser.atrous(cmd, renderW, renderH, pass, svgfParity,
-                            src.view, dst.view, gViewZ.view, gNormal.view, momentsOut.view,
-                            gAlbedo.view,
-                            SVGF_PHI_LUMINANCE, SVGF_PHI_NORMAL, SVGF_PHI_DEPTH,
-                            extraSkySmooth, lastPass,
-                            svgfDebugView ? pipelineReconstructionInput.debugView() : 0);
-                    VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                    if (pass == RtSvgfDenoiser.HISTORY_FEEDBACK_PASS) {
-                        copyImage(cmd, stack, dst, historyOut);
-                        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                    }
-                    RtImage swap = src;
-                    src = dst;
-                    dst = swap;
-                }
-                upscaleSource = src;
-                copyImage(cmd, stack, gViewZ, svgfResources.previousViewZ());
-                copyImage(cmd, stack, gNormal, svgfResources.previousNormal());
-                VulkanCommandEncoder.memoryBarrier(cmd, stack);
-            }
-            svgfResources.flipHistory();
-            svgfResources.markHistoryValid();
-            svgfRan = true;
-            svgfResources.snapshotPreviousCamera(camX, camY, camZ);
+                && svgfBackend.available() && gViewZ != null) {
+            dev.comfyfluffy.caustica.rt.reconstruction.ReconstructionResult result = svgfBackend.execute(
+                    new SvgfReconstructionBackend.Request(ctx, cmd, stack, upscaleSource,
+                            gMotion, gViewZ, gNormal, gAlbedo, renderW, renderH,
+                            svgfDebugView ? pipelineReconstructionInput.debugView() : 0,
+                            frameViewRotation, camX, camY, camZ));
+            upscaleSource = result.output();
+            svgfRan = result.executed();
         }
         pipelineReconstructionResult = new ReconstructionResult(rrDone, upscaleSource, svgfRan);
     }
@@ -1736,7 +1650,7 @@ public final class RtComposite {
         boolean fsrPath = !rrPath && RtFsrUpscaler.enabled() && debugView == 0;
         boolean xessPath = !rrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;
         boolean nrdPath = !rrPath && RtNrdDenoiser.active() && debugView == 0;
-        boolean svgfDebugView = debugView >= SVGF_DEBUG_FIRST && debugView <= SVGF_DEBUG_LAST;
+        boolean svgfDebugView = SvgfReconstructionBackend.isDebugView(debugView);
         boolean svgfPath = !rrPath && CausticaConfig.Rt.Denoise.ENABLED.value()
                 && (debugView == 0 || svgfDebugView);
         float jitterX = 0f;
@@ -1805,7 +1719,7 @@ public final class RtComposite {
             // variance, luminance sigma), so unlike the guide views they must keep it RUNNING.
             // They exist because four rounds of fixes reasoned from the source produced no visible
             // change for the user; the filter's state has to be measured in the actual frame.
-            boolean svgfDebugView = debugView >= SVGF_DEBUG_FIRST && debugView <= SVGF_DEBUG_LAST;
+            boolean svgfDebugView = SvgfReconstructionBackend.isDebugView(debugView);
             boolean svgfPath = inputs.svgfPath();
             float jitterX = inputs.jitterX();
             float jitterY = inputs.jitterY();
@@ -2074,7 +1988,7 @@ public final class RtComposite {
             //
             // Two real discontinuities still restart it, and they are handled where they arise
             // rather than by inspecting the matrix: the first frame after (re)allocation, via
-            // svgfResources.hasHistory() below, and a terrain rebase, which RtNrdDenoiser compensates against
+            // the SVGF backend's history state, and a terrain rebase, which RtNrdDenoiser compensates against
             // the anchor. Resolution changes reallocate, which takes the same path.
 
             // ---- NRD / REBLUR (opt-in). Consumes the tracer's demodulated per-lobe signals plus
@@ -2799,10 +2713,7 @@ public final class RtComposite {
             nrdCombinePipeline.destroy();
             nrdCombinePipeline = null;
         }
-        if (svgfDenoiser != null) {
-            svgfDenoiser.destroy();
-            svgfDenoiser = null;
-        }
+        svgfBackend.destroy();
         if (fgSkyMaskPipeline != null) {
             fgSkyMaskPipeline.destroy();
             fgSkyMaskPipeline = null;
@@ -3202,23 +3113,6 @@ public final class RtComposite {
      * non-RR / fallback upscale so display mapping always sees a display-res RT image; a no-op stretch when
      * the two are the same size (RR disabled -> render == display).
      */
-    /**
-     * Same-size image copy between two GENERAL-layout storage images (SVGF's history feedback and
-     * its previous-frame guide snapshots). A copy rather than a ping-pong of yet more images: the
-     * two consumers need the data at a fixed binding across frames, and vkCmdCopyImage on identical
-     * formats is the cheapest way to get it without another descriptor rewrite per frame.
-     */
-    private static void copyImage(VkCommandBuffer cmd, MemoryStack stack, RtImage src, RtImage dst) {
-        VkImageCopy.Buffer region = VkImageCopy.calloc(1, stack);
-        region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0)
-                .baseArrayLayer(0).layerCount(1);
-        region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0)
-                .baseArrayLayer(0).layerCount(1);
-        region.get(0).extent().set(Math.min(src.width, dst.width), Math.min(src.height, dst.height), 1);
-        VK10.vkCmdCopyImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, region);
-    }
-
     private static void blitUpscale(VkCommandBuffer cmd, MemoryStack stack, RtImage src, RtImage dst) {
         VkImageBlit.Buffer region = VkImageBlit.calloc(1, stack);
         region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);

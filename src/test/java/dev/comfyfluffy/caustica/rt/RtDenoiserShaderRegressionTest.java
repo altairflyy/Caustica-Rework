@@ -33,6 +33,8 @@ final class RtDenoiserShaderRegressionTest {
     private static final Path SVGF_ATROUS = REPO_ROOT.resolve("shaders/display/svgf_atrous.comp");
     private static final Path NRD_DENOISER =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdDenoiser.java");
+    private static final Path SVGF_BACKEND = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/reconstruction/SvgfReconstructionBackend.java");
 
     /**
      * The demodulation floors must agree between the shader that divides the material out and the
@@ -130,10 +132,9 @@ final class RtDenoiserShaderRegressionTest {
      */
     @Test
     void svgfDepthGateUsesForwardNotBackwardCameraTravel() throws IOException {
-        String composite = Files.readString(
-                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        String backend = Files.readString(SVGF_BACKEND);
 
-        assertTrue(composite.contains("svgfCamForwardDelta = (float) -((camX - svgfResources.previousCameraX()) * fx"),
+        assertTrue(backend.contains("float delta = (float) -((input.cameraX() - resources.previousCameraX()) * fx"),
                 "the camera's forward travel must negate the dot with view row 2, which points backward");
         String reproject = Files.readString(SVGF_REPROJECT);
         assertTrue(reproject.contains("float expectedZPrev = z + pc.camForwardDelta;"),
@@ -157,12 +158,13 @@ final class RtDenoiserShaderRegressionTest {
     void noTemporalResetIsDrivenByTheProjectionMatrix() throws IOException {
         String composite = Files.readString(
                 REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        String backend = Files.readString(SVGF_BACKEND);
 
-        assertFalse(composite.contains("projectionChanged"),
+        assertFalse(composite.contains("projectionChanged") || backend.contains("projectionChanged"),
                 "an FOV change must not restart accumulation; the motion vectors already carry it");
-        assertFalse(composite.contains("prevProjection"),
+        assertFalse(composite.contains("prevProjection") || backend.contains("prevProjection"),
                 "no leftover projection snapshot should remain to tempt a future reset");
-        assertTrue(composite.contains("boolean svgfReset = !svgfResources.hasHistory();"),
+        assertTrue(backend.contains("boolean reset = !resources.hasHistory();"),
                 "only a genuine absence of history may restart SVGF");
     }
 
