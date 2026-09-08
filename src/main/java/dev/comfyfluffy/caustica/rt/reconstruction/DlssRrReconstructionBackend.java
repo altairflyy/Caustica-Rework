@@ -4,6 +4,7 @@ import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
+import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
 import org.joml.Matrix4fc;
 import org.lwjgl.vulkan.VkCommandBuffer;
@@ -32,8 +33,11 @@ public final class DlssRrReconstructionBackend
         return RtDlssRr.quality();
     }
 
-    public int[] recommendedRenderExtent(int displayWidth, int displayHeight) {
-        return delegate.queryOptimalRenderSize(displayWidth, displayHeight);
+    public FrameContext.Extent recommendedRenderExtent(int displayWidth, int displayHeight) {
+        int[] extent = delegate.queryOptimalRenderSize(displayWidth, displayHeight);
+        return extent == null
+                ? new FrameContext.Extent(displayWidth, displayHeight)
+                : new FrameContext.Extent(extent[0], extent[1]);
     }
 
     public boolean releaseIfDisabled() {

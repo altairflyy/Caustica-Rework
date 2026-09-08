@@ -84,6 +84,7 @@ import dev.comfyfluffy.caustica.rt.reconstruction.SvgfReconstructionBackend;
 import dev.comfyfluffy.caustica.rt.reconstruction.DlssRrReconstructionBackend;
 import dev.comfyfluffy.caustica.rt.upscale.FsrUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.upscale.XessUpscalerBackend;
+import dev.comfyfluffy.caustica.rt.upscale.NativeUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.frame.PathTracePass;
@@ -626,6 +627,7 @@ public final class RtComposite {
     private final DlssRrReconstructionBackend dlssRrBackend = new DlssRrReconstructionBackend();
     private final FsrUpscalerBackend fsrBackend = new FsrUpscalerBackend();
     private final XessUpscalerBackend xessBackend = new XessUpscalerBackend();
+    private final NativeUpscalerBackend nativeUpscalerBackend = new NativeUpscalerBackend();
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
     private boolean renderSizeSvgfEnabled;
@@ -1303,17 +1305,16 @@ public final class RtComposite {
         // of truth for what its dispatch will accept.
         FrameContext.Extent optimal;
         if (rrEnabled) {
-            int[] rrExtent = dlssRrBackend.recommendedRenderExtent(width, height);
-            optimal = rrExtent == null ? null : new FrameContext.Extent(rrExtent[0], rrExtent[1]);
+            optimal = dlssRrBackend.recommendedRenderExtent(width, height);
         } else if (fsrEnabled) {
             optimal = fsrBackend.recommendedRenderExtent(width, height);
         } else if (xessEnabled) {
             optimal = xessBackend.recommendedRenderExtent(width, height);
         } else {
-            optimal = null;
+            optimal = nativeUpscalerBackend.recommendedRenderExtent(width, height);
         }
-        renderW = optimal != null ? optimal.width() : width;
-        renderH = optimal != null ? optimal.height() : height;
+        renderW = optimal.width();
+        renderH = optimal.height();
         renderSizeRrEnabled = rrEnabled;
         renderSizeRrQuality = rrQuality;
         renderSizeFsrEnabled = fsrEnabled;
@@ -1544,11 +1545,7 @@ public final class RtComposite {
         // failure), bring the render-res trace up to display res with a linear blit so the display mapper
         // always has a display-res RT image. With no upscaler render == display, so this is a 1:1 copy.
         if (!rrDone) {
-            VulkanCommandEncoder.memoryBarrier(cmd, stack);
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "fallback upscale");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.upscale")) {
-                blitUpscale(cmd, stack, upscaleSource, rrOutput);
-            }
+            nativeUpscalerBackend.execute(new NativeUpscalerBackend.Request(ctx, cmd, stack, upscaleSource, rrOutput));
         }
         VulkanCommandEncoder.memoryBarrier(cmd, stack); // rrOutput visible to exposure histogram
     }
@@ -2658,6 +2655,7 @@ public final class RtComposite {
         fsrBackend.destroy();
         // And the XeSS upscaler (no-op when it was never initialized).
         xessBackend.destroy();
+        nativeUpscalerBackend.destroy();
         // Tear down the NRD integration (wraps the Vulkan device via NRI) only after its images are
         // released below; destroyGuideImages runs after this in the teardown sequence.
         RtNrdDenoiser.INSTANCE.destroy();
@@ -3058,21 +3056,6 @@ public final class RtComposite {
             enc.signalSemaphore(presentSem, 0L, 4096L);
         }
         return true;
-    }
-
-    /**
-     * Linear-filtered blit of the full render-res image into the full display-res image. Used as the
-     * non-RR / fallback upscale so display mapping always sees a display-res RT image; a no-op stretch when
-     * the two are the same size (RR disabled -> render == display).
-     */
-    private static void blitUpscale(VkCommandBuffer cmd, MemoryStack stack, RtImage src, RtImage dst) {
-        VkImageBlit.Buffer region = VkImageBlit.calloc(1, stack);
-        region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-        region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-        region.get(0).srcOffsets(1).set(src.width, src.height, 1); // srcOffsets[0] zeroed by calloc
-        region.get(0).dstOffsets(1).set(dst.width, dst.height, 1);
-        VK10.vkCmdBlitImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, region, VK10.VK_FILTER_LINEAR);
     }
 
     /**
