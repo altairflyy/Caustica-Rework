@@ -92,4 +92,25 @@ class AccelerationStructureManagerTest {
         assertFalse(builder.contains("prepared.blas.accel.destroy()"));
         assertFalse(table.contains("blas.destroy()"));
     }
+
+    @Test
+    void entityBuildRefitAndLifetimeUseTheManagerBoundary() throws Exception {
+        String entities = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/entity/RtEntities.java"));
+        String composite = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        assertTrue(entities.contains("accelerationStructures().prepareTransientBlas("));
+        assertTrue(entities.contains("accelerationStructures().prepareStaticBlas("));
+        assertTrue(entities.contains("accelerationStructures().prepareUpdatableBlas("));
+        assertTrue(entities.contains("accelerationStructures().refit("));
+        assertTrue(entities.contains("accelerationStructures().destroyPersistentBlas("));
+        assertTrue(entities.contains("accelerationStructures().retire("));
+        assertTrue(composite.contains("accelerationStructures().recordBuilds(ctx, cmd, fe.blas())"));
+        assertFalse(entities.contains("RtAccel.prepareEntityBlas("));
+        assertFalse(entities.contains("RtAccel.preparePersistentEntityBlasBuild("));
+        assertFalse(entities.contains("RtAccel.prepareUpdatableEntityBlasBuild("));
+        assertFalse(entities.contains("RtAccel.refitEntityUpdate("));
+        assertFalse(entities.contains("RtAccel.destroyEntityAccel("));
+    }
 }

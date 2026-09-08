@@ -2008,7 +2008,7 @@ public final class RtComposite {
             // Barriers separate each stage; the graphics-use timeline guards resource reuse.
             if (!fe.blas().isEmpty()) {
                 try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.blasRecord")) {
-                    RtAccel.recordBlasBuilds(ctx, cmd, fe.blas());
+                    ctx.accelerationStructures().recordBuilds(ctx, cmd, fe.blas());
                 }
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // entity BLAS writes visible to the TLAS build
             }

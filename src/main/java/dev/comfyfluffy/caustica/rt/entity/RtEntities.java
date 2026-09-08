@@ -557,12 +557,12 @@ public final class RtEntities {
             motion.reset();
         }
 
-        void releaseDeferred() {
+        void releaseDeferred(dev.comfyfluffy.caustica.rt.gpu.AccelerationStructureManager manager) {
             for (RtAccel.PreparedBlas b : pooledBlas) {
-                RtAccel.releaseEntityBlas(b);
+                manager.releaseTransientBlas(b);
             }
             for (RtBuffer s : refitScratch) {
-                s.destroy();
+                manager.releaseScratch(s);
             }
             for (RtBuffer buf : buffers) {
                 buf.destroy();
@@ -644,7 +644,7 @@ public final class RtEntities {
             // A partially recorded frame may already have installed unbuilt BLAS into persistent slots.
             // Quiesce old frames and drop the entity cache before propagating the original failure.
             ctx.waitIdle();
-            shutdown();
+            shutdown(ctx);
             throw t;
         }
         evictStaleAccels(ctx);
@@ -1257,7 +1257,7 @@ public final class RtEntities {
         long uvAddr = Math.addExact(geometry.deviceAddress, layout.uvOffset);
         long primAddr = Math.addExact(geometry.deviceAddress, layout.primOffset);
         // The cached mesh is replaced rather than updated in place, so build without ALLOW_UPDATE.
-        RtAccel.PersistentBuild pb = RtAccel.preparePersistentEntityBlasBuild(ctx, positionAddr, vertCount,
+        RtAccel.PersistentBuild pb = ctx.accelerationStructures().prepareStaticBlas(ctx, positionAddr, vertCount,
                 indexAddr, packed.bucketTris(), label + " BLAS");
         build.blas.add(pb.op());
         build.refitScratch.add(pb.scratch());
@@ -1331,8 +1331,8 @@ public final class RtEntities {
         RtAccel accel = e.accel;
         RtBuffer backing = e.backing;
         RtBuffer geometry = e.geometry;
-        ctx.deferredDeletionQueue().retireAfterGraphics(e.graphicsUse, () -> {
-            RtAccel.destroyEntityAccel(accel, backing);
+        ctx.accelerationStructures().retire(e.graphicsUse, () -> {
+            ctx.accelerationStructures().destroyPersistentBlas(accel, backing);
             geometry.destroy();
         });
         RtFrameStats.FRAME.count("entityBlockEntityRetirements", 1);
@@ -1379,7 +1379,7 @@ public final class RtEntities {
         }
         FrameLists lists = frameLists[(int) (RtComposite.frameCounter() % frameLists.length)];
         awaitGraphicsUse(build, lists.graphicsUse, "entityFrameListsWaits");
-        lists.releaseDeferred();
+        lists.releaseDeferred(ctx.accelerationStructures());
         lists.reset();
         build.lists = lists;
         build.instances = lists.instances;
@@ -1615,8 +1615,8 @@ public final class RtEntities {
         long uvAddr = Math.addExact(geometry.deviceAddress, layout.uvOffset);
         long primAddr = Math.addExact(geometry.deviceAddress, layout.primOffset);
 
-        RtAccel.PreparedBlas blas = RtAccel.prepareEntityBlas(ctx, positionAddr, vertCount, indexAddr, packed.bucketTris(),
-                "particle BLAS");
+        RtAccel.PreparedBlas blas = ctx.accelerationStructures().prepareTransientBlas(
+                ctx, positionAddr, vertCount, indexAddr, packed.bucketTris(), "particle BLAS");
         build.blas.add(blas);
         build.pooledBlas.add(blas);
 
@@ -1828,7 +1828,7 @@ public final class RtEntities {
             long required = slot.updateScratchSize;
             if (slot.refitScratch == null || slot.refitScratch.size < required) {
                 if (slot.refitScratch != null) {
-                    slot.refitScratch.destroy();
+                    ctx.accelerationStructures().releaseScratch(slot.refitScratch);
                 }
                 slot.refitScratch = allocAlignedBuffer(ctx, required, storage, false, "entity refit scratch",
                         ctx.accelerationStructureScratchAlignment());
@@ -1836,7 +1836,7 @@ public final class RtEntities {
             } else {
                 RtFrameStats.FRAME.count("entityScratchBufferReuses", 1);
             }
-            build.blas.add(RtAccel.refitEntityUpdate(slot.accel, slot.refitScratch,
+            build.blas.add(ctx.accelerationStructures().refit(slot.accel, slot.refitScratch,
                     positionAddr, indexAddr, vertCount, bucketTris,
                     "entity BLAS refit"));
             slot.updatesSinceBuild++;
@@ -1844,17 +1844,18 @@ public final class RtEntities {
         }
         // (Re)build: the selected ring slot's exact prior graphics use has completed, so replace its old AS.
         if (slot.accel != null) {
-            RtAccel.destroyEntityAccel(slot.accel, slot.backing);
+            ctx.accelerationStructures().destroyPersistentBlas(slot.accel, slot.backing);
             slot.accel = null;
             slot.backing = null;
         }
         if (!refitEnabled && slot.refitScratch != null) {
-            slot.refitScratch.destroy();
+            ctx.accelerationStructures().releaseScratch(slot.refitScratch);
             slot.refitScratch = null;
         }
         RtFrameStats.FRAME.count("entityVmaBufferCreates", 2); // persistent AS backing + transient build scratch
         if (refitEnabled) {
-            RtAccel.UpdatableBuild ub = RtAccel.prepareUpdatableEntityBlasBuild(ctx, positionAddr, vertCount,
+            RtAccel.UpdatableBuild ub = ctx.accelerationStructures().prepareUpdatableBlas(
+                    ctx, positionAddr, vertCount,
                     indexAddr, bucketTris, "entity BLAS");
             slot.accel = ub.accel();
             slot.backing = ub.backing();
@@ -1862,7 +1863,8 @@ public final class RtEntities {
             build.blas.add(ub.op());
             build.refitScratch.add(ub.scratch());
         } else {
-            RtAccel.PersistentBuild pb = RtAccel.preparePersistentEntityBlasBuild(ctx, positionAddr, vertCount,
+            RtAccel.PersistentBuild pb = ctx.accelerationStructures().prepareStaticBlas(
+                    ctx, positionAddr, vertCount,
                     indexAddr, bucketTris, "entity BLAS");
             slot.accel = pb.accel();
             slot.backing = pb.backing();
@@ -1924,9 +1926,9 @@ public final class RtEntities {
         }
     }
 
-    private void destroyEntitySlot(EntitySlot slot) {
+    private void destroyEntitySlot(RtContext ctx, EntitySlot slot) {
         if (slot.accel != null) {
-            RtAccel.destroyEntityAccel(slot.accel, slot.backing);
+            ctx.accelerationStructures().destroyPersistentBlas(slot.accel, slot.backing);
             slot.accel = null;
             slot.backing = null;
         }
@@ -1936,7 +1938,7 @@ public final class RtEntities {
             slot.geometry = null;
         }
         if (slot.refitScratch != null) {
-            slot.refitScratch.destroy();
+            ctx.accelerationStructures().releaseScratch(slot.refitScratch);
             slot.refitScratch = null;
         }
         slot.indices = null;
@@ -1957,10 +1959,10 @@ public final class RtEntities {
         slot.refitScratch = null;
         slot.indices = null;
         slot.indexCount = 0;
-        ctx.deferredDeletionQueue().retireAfterGraphics(slot.graphicsUse, () -> {
-            if (accel != null) RtAccel.destroyEntityAccel(accel, backing);
+        ctx.accelerationStructures().retire(slot.graphicsUse, () -> {
+            if (accel != null) ctx.accelerationStructures().destroyPersistentBlas(accel, backing);
             if (geometry != null) geometry.destroy();
-            if (scratch != null) scratch.destroy();
+            if (scratch != null) ctx.accelerationStructures().releaseScratch(scratch);
         });
         RtFrameStats.FRAME.count("entitySlotRetirements", 1);
     }
@@ -2010,22 +2012,22 @@ public final class RtEntities {
     }
 
     /** Free the geometry-table ring and entity resources (teardown; caller has idled the device). */
-    public void shutdown() {
+    public void shutdown(RtContext ctx) {
         for (FrameLists lists : frameLists) {
-            lists.releaseDeferred();
+            lists.releaseDeferred(ctx.accelerationStructures());
             lists.destroyPersistent();
         }
         for (EntityAccel ea : entityAccels.values()) {
             for (EntitySlot slot : ea.ring) {
                 if (slot != null) {
-                    destroyEntitySlot(slot);
+                    destroyEntitySlot(ctx, slot);
                 }
             }
             clearRefGeometry(ea);
         }
         entityAccels.clear();
         for (BeEntry e : beCache.values()) {
-            RtAccel.destroyEntityAccel(e.accel, e.backing);
+            ctx.accelerationStructures().destroyPersistentBlas(e.accel, e.backing);
             e.geometry.destroy();
         }
         beCache.clear();

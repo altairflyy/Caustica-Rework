@@ -101,7 +101,7 @@ public final class CausticaClient implements ClientModInitializer {
 		}
 		RtWorkerPool.INSTANCE.shutdown();
 		if (ctx != null) {
-			RtEntities.INSTANCE.shutdown();
+			RtEntities.INSTANCE.shutdown(ctx);
 		}
 		RtComposite.INSTANCE.destroy();
 		RtEntityTextures.INSTANCE.reset();

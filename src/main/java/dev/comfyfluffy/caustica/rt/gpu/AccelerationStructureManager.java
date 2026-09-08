@@ -45,6 +45,13 @@ public final class AccelerationStructureManager {
                 ctx, vertexAddress, vertexCount, indexAddress, bucketTris, label);
     }
 
+    public RtAccel.PreparedBlas prepareTransientBlas(
+            RtContext ctx, long vertexAddress, int vertexCount, long indexAddress,
+            int[] bucketTris, String label) {
+        return RtAccel.prepareEntityBlas(
+                ctx, vertexAddress, vertexCount, indexAddress, bucketTris, label);
+    }
+
     public RtAccel.PreparedBlas refit(
             RtAccel accel, RtBuffer scratch, long vertexAddress, long indexAddress,
             int vertexCount, int[] bucketTris, String label) {
@@ -79,6 +86,10 @@ public final class AccelerationStructureManager {
 
     public void releaseTransientBlas(RtAccel.PreparedBlas blas) {
         RtAccel.releaseEntityBlas(blas);
+    }
+
+    public void releaseScratch(RtBuffer scratch) {
+        scratch.destroy();
     }
 
     /** Release a terrain/LOD BLAS whose backing is owned by the AS, after its last use. */
