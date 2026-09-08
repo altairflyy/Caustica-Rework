@@ -56,6 +56,17 @@ git status --short
 
 ## Validation levels
 
+Workflow canonico:
+
+- durante lo sviluppo usare `scripts/agent/validate-fast.ps1` (V0 + V1);
+- alla chiusura di un AER o gate usare `scripts/agent/validate-build.ps1`, che
+  dimostra da solo V0 + V1 + V2;
+- non eseguire `validate-fast.ps1` immediatamente prima di
+  `validate-build.ps1`, perché quest'ultimo riesegue già V1 completo.
+
+I test mirati del sottosistema restano obbligatori quando applicabili. Questa
+regola elimina soltanto la seconda esecuzione consecutiva della suite completa.
+
 ### V0 — static (every task)
 
 ```text

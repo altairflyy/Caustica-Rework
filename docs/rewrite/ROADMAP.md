@@ -406,9 +406,9 @@ Per ogni ciclo:
 7. leggere soltanto il codice necessario
 8. scrivere un mini pre-plan nel task log
 9. implementare
-10. eseguire VALIDATE_FAST
+10. durante lo sviluppo eseguire VALIDATE_FAST quando necessario
 11. eseguire test specifici
-12. eseguire VALIDATE_BUILD se richiesto
+12. alla chiusura eseguire VALIDATE_BUILD, senza VALIDATE_FAST immediatamente prima
 13. eseguire runtime validation se disponibile
 14. controllare git diff
 15. verificare forbidden changes
@@ -431,6 +431,19 @@ L'agente deve controllare che non siano entrati file generati, SDK, DLL non rich
 ---
 
 # 6. Livelli di validazione
+
+Workflow canonico Windows:
+
+```text
+durante sviluppo: validate-fast.ps1 (V0 + V1)
+chiusura AER/gate: validate-build.ps1 (V0 + V1 + V2)
+```
+
+`validate-build.ps1` è autosufficiente: riesegue i test Gradle, verifica il match
+esatto delle quattro failure canoniche e la characterization 7/7, quindi esegue
+la build con i test già validati esclusi. Non eseguire `validate-fast.ps1`
+immediatamente prima di `validate-build.ps1`; ciò duplicherebbe V1 senza aumentare
+la copertura. I test specifici richiesti dal task restano separati e obbligatori.
 
 ## V0 — Static
 
