@@ -1,8 +1,8 @@
 param(
     [ValidateSet('A','B')][string]$Mode = 'A',
-    [ValidateSet('Start','Collect')][string]$Action = 'Start',
+    [ValidateSet('Start','Collect','Analyze')][string]$Action = 'Start',
     [string]$RunDirectory,
-    [int]$WarmupFrames = 300,
+    [int]$SampleFrames = 600,
     [string]$Profile = "$env:APPDATA\ModrinthApp\profiles\prova",
     [string]$Launcher = "$env:LOCALAPPDATA\Modrinth App\Modrinth App.exe"
 )
@@ -24,39 +24,49 @@ function Percentile([double[]]$Values, [double]$Quantile) {
     return $sorted[$index]
 }
 
-if ($Action -eq 'Collect') {
-    Assert-Stopped
+if ($Action -in @('Collect', 'Analyze')) {
     if (-not $RunDirectory) { throw 'Specify the run directory printed by Start.' }
     $run = (Resolve-Path -LiteralPath $RunDirectory).Path
     $manifestPath = Join-Path $run 'manifest.json'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $latest = Join-Path $manifest.profile 'logs\latest.log'
-    $csv = Join-Path $manifest.profile 'rt-frame-stats\frame.csv'
-    foreach ($required in @($latest, $csv, $manifest.jar)) {
-        if (-not (Test-Path -LiteralPath $required)) { throw "Required evidence missing: $required" }
+    $evidenceCsv = Join-Path $run 'frame.csv'
+    if ($Action -eq 'Collect') {
+        Assert-Stopped
+        $profileCsv = Join-Path $manifest.profile 'rt-frame-stats\frame.csv'
+        foreach ($required in @($latest, $profileCsv, $manifest.jar)) {
+            if (-not (Test-Path -LiteralPath $required)) { throw "Required evidence missing: $required" }
+        }
+        $started = [datetime]$manifest.startedUtc
+        if ((Get-Item -LiteralPath $latest).LastWriteTimeUtc -lt $started -or
+            (Get-Item -LiteralPath $profileCsv).LastWriteTimeUtc -lt $started) {
+            throw 'Log or frame CSV predates this run.'
+        }
+        if ((Get-FileHash -LiteralPath $manifest.jar -Algorithm SHA256).Hash -ne $manifest.sha256) {
+            throw 'Candidate JAR changed since Start.'
+        }
+        if (Test-Path -LiteralPath $evidenceCsv) { throw 'Run already collected.' }
+        Copy-Item -LiteralPath $latest -Destination (Join-Path $run 'minecraft.log')
+        Copy-Item -LiteralPath $profileCsv -Destination $evidenceCsv
+    } elseif (-not (Test-Path -LiteralPath $evidenceCsv)) {
+        throw 'Collected frame.csv is missing.'
     }
-    $started = [datetime]$manifest.startedUtc
-    if ((Get-Item -LiteralPath $latest).LastWriteTimeUtc -lt $started -or
-        (Get-Item -LiteralPath $csv).LastWriteTimeUtc -lt $started) {
-        throw 'Log or frame CSV predates this run.'
+    $rows = @(Import-Csv -LiteralPath $evidenceCsv)
+    # The user performs the warm-up before the fixed stationary interval. Select an equal-size tail
+    # of actual RT/DLSS-RR frames so menu/loading duration and run length cannot bias A versus B.
+    $active = @($rows | Where-Object {
+        [long]$_.gpuAsLiveCount -gt 0 -and [double]$_.'frame.dlssRrMs' -gt 0
+    })
+    if ($active.Count -lt $SampleFrames) {
+        throw "Need at least $SampleFrames active RT frames; found $($active.Count)."
     }
-    if ((Get-FileHash -LiteralPath $manifest.jar -Algorithm SHA256).Hash -ne $manifest.sha256) {
-        throw 'Candidate JAR changed since Start.'
-    }
-    if (Test-Path -LiteralPath (Join-Path $run 'frame.csv')) { throw 'Run already collected.' }
-    Copy-Item -LiteralPath $latest -Destination (Join-Path $run 'minecraft.log')
-    Copy-Item -LiteralPath $csv -Destination (Join-Path $run 'frame.csv')
-    $rows = @(Import-Csv -LiteralPath $csv)
-    if ($rows.Count -le $WarmupFrames + 600) {
-        throw "Need more than $($WarmupFrames + 600) profiled frames; found $($rows.Count)."
-    }
-    $samples = @($rows | Select-Object -Skip $WarmupFrames | ForEach-Object { [double]$_.totalMs })
+    $samples = @($active | Select-Object -Last $SampleFrames | ForEach-Object { [double]$_.totalMs })
     $average = ($samples | Measure-Object -Average).Average
     $metrics = [ordered]@{
         mode = $manifest.mode
         sha256 = $manifest.sha256
         totalFrames = $rows.Count
-        warmupFramesDiscarded = $WarmupFrames
+        activeRtFrames = $active.Count
         sampleFrames = $samples.Count
         averageMs = [Math]::Round($average, 4)
         p95Ms = [Math]::Round((Percentile $samples 0.95), 4)

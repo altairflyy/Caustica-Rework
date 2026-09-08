@@ -25,9 +25,10 @@ Run A, collect it, then repeat with B:
 For each run, load the same world and fixed viewpoint, wait 30 seconds, then do
 not move or rotate for at least 60 seconds. Exit Minecraft and Modrinth before
 collection. The collector verifies log/CSV freshness and unchanged JAR hash,
-discards 300 warm-up frames, requires at least 600 measured frames, and reports
-average, P95 and P99 frame-envelope time. Acceptance uses the roadmap threshold:
-candidate P99 must not regress by more than 10 percent.
+requires at least 600 active RT/DLSS-RR frames, and compares the final 600-frame
+stationary window from each run. This excludes unequal loading/menu duration and
+reports average, P95 and P99 frame-envelope time. Acceptance uses the roadmap
+threshold: candidate P99 must not regress by more than 10 percent.
 
 ## Final Vulkan smoke
 
