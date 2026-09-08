@@ -381,10 +381,10 @@ public final class RtEntities {
             this.use = use;
         }
 
-        EntitySceneContribution(List<RtAccel.Instance> baseInstances,
-                                List<RtAccel.Instance> dynamicInstances,
-                                List<RtAccel.PreparedBlas> blas,
-                                long geomTableAddr) {
+        public EntitySceneContribution(List<RtAccel.Instance> baseInstances,
+                                       List<RtAccel.Instance> dynamicInstances,
+                                       List<RtAccel.PreparedBlas> blas,
+                                       long geomTableAddr) {
             this(baseInstances, dynamicInstances, blas, geomTableAddr, null);
         }
 

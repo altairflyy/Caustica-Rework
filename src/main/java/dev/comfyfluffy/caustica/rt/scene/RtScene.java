@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Minimal immutable frame-scene contract consumed by the future scene assembler.
+ * Minimal immutable frame-scene contract produced by the scene assembler and consumed by TLAS assembly.
  *
  * <p>This contract deliberately models only the instance segments and published views already
  * required by the current TLAS/frame path. It owns no GPU resources and is not a scene database.
@@ -21,7 +21,7 @@ public record RtScene(
         MaterialView materialView,
         long sceneGeneration
 ) {
-    /** Explicit unversioned value for the legacy scene until AER-064 establishes its authority. */
+    /** Explicit unversioned value while the legacy renderer has no canonical scene-generation authority. */
     public static final long LEGACY_SCENE_GENERATION = 0L;
 
     public RtScene {

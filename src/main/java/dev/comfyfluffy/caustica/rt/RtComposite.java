@@ -79,6 +79,8 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.scene.TerrainSceneContribution;
 import dev.comfyfluffy.caustica.rt.scene.LodSceneContribution;
+import dev.comfyfluffy.caustica.rt.scene.RtScene;
+import dev.comfyfluffy.caustica.rt.scene.SceneAssembler;
 import dev.comfyfluffy.caustica.rt.lighting.RestirSystem;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.reconstruction.SvgfReconstructionBackend;
@@ -98,7 +100,6 @@ import dev.comfyfluffy.caustica.rt.frame.TemporalState;
 import dev.comfyfluffy.caustica.rt.frame.UpscalePass;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.nio.ByteOrder;
 import java.nio.LongBuffer;
 
@@ -1675,13 +1676,19 @@ public final class RtComposite {
             TerrainSceneContribution terrainContribution = terrain.sceneContribution();
             LodSceneContribution lodContribution = RtLodTerrain.INSTANCE.sceneContribution(
                     terrain.blockX, terrain.blockY, terrain.blockZ);
-            ArrayList<RtAccel.Instance> staticInstances = new ArrayList<>(
-                    terrainContribution.instances().size() + lodContribution.instances().size());
-            staticInstances.addAll(terrainContribution.instances());
-            staticInstances.addAll(lodContribution.instances());
+            var staticInstances = SceneAssembler.INSTANCE.staticInstances(terrainContribution, lodContribution);
             RtEntities.EntitySceneContribution fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
             entityContribution = fe;
+            RtScene scene = SceneAssembler.INSTANCE.assemble(
+                    terrainContribution, lodContribution, fe,
+                    new RtScene.LightView(
+                            terrain.lightBufferAddress(), terrain.lightAliasBufferAddress(),
+                            terrain.lightLocalAliasBufferAddress(), terrain.lightGridCellBufferAddress(),
+                            terrain.lightGridSpanBufferAddress(), terrain.lightCount(), terrain.lightGeneration()),
+                    new RtScene.MaterialView(
+                            RtMaterialRegistry.INSTANCE.tableAddress(), RtMaterialRegistry.INSTANCE.epoch()),
+                    RtScene.LEGACY_SCENE_GENERATION);
             // Block-breaking overlay: resolves each destroy-stage RenderType's texture into the
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly
@@ -1790,8 +1797,9 @@ public final class RtComposite {
             }
             RtAccel.PreparedTlas frameTlas;
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.prepareTlas")) {
+                SceneAssembler.TlasInput tlasInput = SceneAssembler.INSTANCE.tlasInput(scene);
                 frameTlas = ctx.accelerationStructures().buildTlas(
-                        ctx, fe.baseInstances(), fe.dynamicInstances(), tlasRing,
+                        ctx, tlasInput.baseInstances(), tlasInput.dynamicInstances(), tlasRing,
                         graphicsUse);
             }
             active.setTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
