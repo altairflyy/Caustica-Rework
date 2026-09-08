@@ -891,6 +891,10 @@ public final class RtComposite {
             throw new IllegalStateException("Previous RT graphics use was never completed");
         }
         RtFrameStats.FRAME.beginIfInactive();
+        RtContext ctx = RtContext.currentOrNull();
+        if (ctx != null) {
+            ctx.accelerationStructures().recordDiagnostics(RtFrameStats.FRAME);
+        }
         hdrWrittenThisFrame = false;
     }
 

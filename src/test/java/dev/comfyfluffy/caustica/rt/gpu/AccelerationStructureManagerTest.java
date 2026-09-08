@@ -113,4 +113,57 @@ class AccelerationStructureManagerTest {
         assertFalse(entities.contains("RtAccel.refitEntityUpdate("));
         assertFalse(entities.contains("RtAccel.destroyEntityAccel("));
     }
+
+    @Test
+    void lifetimeDiagnosticsObserveTheRuntimeAuthorities() throws Exception {
+        String manager = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/gpu/AccelerationStructureManager.java"));
+        String accel = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/accel/RtAccel.java"));
+        String executor = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/RtGpuExecutor.java"));
+        String composite = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        assertTrue(accel.contains("LIVE_AS_COUNT.incrementAndGet()"));
+        assertTrue(accel.contains("LIVE_AS_COUNT.decrementAndGet()"));
+        assertTrue(accel.contains("LIVE_BLAS_BYTES.addAndGet(backing.size)"));
+        assertTrue(accel.contains("Acceleration-structure lifetime counter underflow"));
+        assertTrue(executor.contains("pendingPublishedRetirementCount()"));
+        assertTrue(executor.contains("pendingDestroyCount()"));
+        assertTrue(manager.contains("gpuRetiredResourcesPending"));
+        assertTrue(manager.contains("gpuAsLiveCount"));
+        assertTrue(manager.contains("gpuBlasLiveBytes"));
+        assertTrue(manager.contains("gpuDeferredDestroyQueueDepth"));
+        assertTrue(composite.contains("accelerationStructures().recordDiagnostics(RtFrameStats.FRAME)"));
+    }
+
+    @Test
+    void migratedProductionCallersDoNotBypassTheManagerForCriticalAsDestruction() throws Exception {
+        try (var sources = Files.walk(Path.of("src/main/java"))) {
+            long bypasses = sources.filter(path -> path.toString().endsWith(".java"))
+                    .filter(path -> !path.endsWith(Path.of(
+                            "dev/comfyfluffy/caustica/rt/accel/RtAccel.java")))
+                    .filter(path -> !path.endsWith(Path.of(
+                            "dev/comfyfluffy/caustica/rt/gpu/AccelerationStructureManager.java")))
+                    .map(AccelerationStructureManagerTest::read)
+                    .flatMap(source -> source.lines())
+                    .filter(line -> line.contains("RtAccel.releaseEntityBlas(")
+                            || line.contains("RtAccel.destroyEntityAccel(")
+                            || line.contains("RtAccel.freeBlasScratch(")
+                            || line.contains("RtAccel.destroyTerrainCompaction(")
+                            || line.contains(".accel.destroy()")
+                            || line.contains("blas.destroy()"))
+                    .count();
+            assertEquals(0L, bypasses);
+        }
+    }
+
+    private static String read(Path path) {
+        try {
+            return Files.readString(path);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to read " + path, e);
+        }
+    }
 }

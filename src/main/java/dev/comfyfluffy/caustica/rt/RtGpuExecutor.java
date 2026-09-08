@@ -150,26 +150,42 @@ public final class RtGpuExecutor {
 
     /** Destroy an owner once the specified frame token has completed. */
     public void retireAfterGraphics(GraphicsUse lastUse, Runnable destroy) {
-        enqueueDestroyAfterGraphicsValue(lastUse.value, destroy);
+        enqueueDestroyAfterGraphicsValue(lastUse.value, destroy, true);
     }
 
     /** Destroy a tracked owner once its exact last frame use has completed. */
     public void retireAfterGraphics(TrackedGraphicsUse trackedUse, Runnable destroy) {
         assertRenderThread();
-        enqueueDestroyAfterGraphicsValue(trackedUse.value, destroy);
+        enqueueDestroyAfterGraphicsValue(trackedUse.value, destroy, true);
     }
 
-    private void enqueueDestroyAfterGraphicsValue(long lastUseValue, Runnable destroy) {
+    private void enqueueDestroyAfterGraphicsValue(long lastUseValue, Runnable destroy, boolean published) {
         checkExecutorFailure();
         synchronized (destroyJobs) {
-            destroyJobs.add(new DestroyJob(lastUseValue, destroy));
+            destroyJobs.add(new DestroyJob(lastUseValue, destroy, published));
         }
         jobs.offer(WAKE);
     }
 
     /** Queue destruction of a completed build result that was never visible to graphics. */
     public void retireUnpublished(Runnable destroy) {
-        enqueueDestroyAfterGraphicsValue(0L, destroy);
+        enqueueDestroyAfterGraphicsValue(0L, destroy, false);
+    }
+
+    public int pendingDestroyCount() {
+        synchronized (destroyJobs) {
+            return destroyJobs.size();
+        }
+    }
+
+    public int pendingPublishedRetirementCount() {
+        synchronized (destroyJobs) {
+            int count = 0;
+            for (DestroyJob job : destroyJobs) {
+                if (job.published) count++;
+            }
+            return count;
+        }
     }
 
     public boolean hasPendingDestroys() {
@@ -561,6 +577,6 @@ public final class RtGpuExecutor {
                        BiConsumer<Build, Throwable> finished, Build build) {
     }
 
-    private record DestroyJob(long lastUseValue, Runnable destroy) {
+    private record DestroyJob(long lastUseValue, Runnable destroy, boolean published) {
     }
 }

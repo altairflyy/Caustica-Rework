@@ -31,6 +31,7 @@ import dev.comfyfluffy.caustica.rt.RtGpuExecutor.GraphicsUse;
 import dev.comfyfluffy.caustica.rt.RtGpuExecutor.TrackedGraphicsUse;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_ACCESS_2_MICROMAP_READ_BIT_EXT;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT;
@@ -80,6 +81,8 @@ import static org.lwjgl.vulkan.KHRSynchronization2.vkCmdPipelineBarrier2KHR;
  * factories; free with {@link #destroy()}. One BLAS per section; one TLAS rebuilt per frame.
  */
 public final class RtAccel {
+    private static final AtomicLong LIVE_AS_COUNT = new AtomicLong();
+    private static final AtomicLong LIVE_BLAS_BYTES = new AtomicLong();
     private static final long TLAS_INSTANCE_ADDRESS_ALIGNMENT = 16L;
     // vkCmdBuildMicromapsEXT requires both data.deviceAddress and triangleArray.deviceAddress to be
     // multiples of 256 (VUID-vkCmdBuildMicromapsEXT-pInfos-07515).
@@ -108,27 +111,44 @@ public final class RtAccel {
 
     private final RtBuffer backing;
     private final boolean ownsBacking;
+    private final boolean bottomLevel;
     private OpacityMicromap opacityMicromap;
     private long compactionQueryPool;
     private final VkDevice vk;
     private boolean destroyed;
 
     private RtAccel(VkDevice vk, long handle, long deviceAddress, RtBuffer backing) {
-        this(vk, handle, deviceAddress, backing, true);
+        this(vk, handle, deviceAddress, backing, true, null, false);
     }
 
     private RtAccel(VkDevice vk, long handle, long deviceAddress, RtBuffer backing, boolean ownsBacking) {
-        this(vk, handle, deviceAddress, backing, ownsBacking, null);
+        this(vk, handle, deviceAddress, backing, ownsBacking, null, true);
     }
 
     private RtAccel(VkDevice vk, long handle, long deviceAddress, RtBuffer backing, boolean ownsBacking,
                     OpacityMicromap opacityMicromap) {
+        this(vk, handle, deviceAddress, backing, ownsBacking, opacityMicromap, true);
+    }
+
+    private RtAccel(VkDevice vk, long handle, long deviceAddress, RtBuffer backing, boolean ownsBacking,
+                    OpacityMicromap opacityMicromap, boolean bottomLevel) {
         this.vk = vk;
         this.handle = handle;
         this.deviceAddress = deviceAddress;
         this.backing = backing;
         this.ownsBacking = ownsBacking;
+        this.bottomLevel = bottomLevel;
         this.opacityMicromap = opacityMicromap;
+        LIVE_AS_COUNT.incrementAndGet();
+        if (bottomLevel) LIVE_BLAS_BYTES.addAndGet(backing.size);
+    }
+
+    public static long liveCount() {
+        return LIVE_AS_COUNT.get();
+    }
+
+    public static long liveBlasBytes() {
+        return LIVE_BLAS_BYTES.get();
     }
 
     public void destroy() {
@@ -151,6 +171,11 @@ public final class RtAccel {
             backing.destroy();
         }
         destroyed = true;
+        long remainingCount = LIVE_AS_COUNT.decrementAndGet();
+        long remainingBytes = bottomLevel ? LIVE_BLAS_BYTES.addAndGet(-backing.size) : LIVE_BLAS_BYTES.get();
+        if (remainingCount < 0L || remainingBytes < 0L) {
+            throw new IllegalStateException("Acceleration-structure lifetime counter underflow");
+        }
     }
 
     private OpacityMicromap detachOpacityMicromap() {

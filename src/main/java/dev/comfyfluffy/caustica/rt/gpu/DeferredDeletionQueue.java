@@ -13,19 +13,28 @@ import java.util.function.BiConsumer;
  * runtime retirement entry point without changing token or destruction timing.</p>
  */
 public final class DeferredDeletionQueue {
+    private final RtGpuExecutor executor;
     private final BiConsumer<RtGpuExecutor.GraphicsUse, Runnable> graphicsRetirement;
     private final BiConsumer<RtGpuExecutor.TrackedGraphicsUse, Runnable> trackedRetirement;
 
     public DeferredDeletionQueue(RtGpuExecutor executor) {
         this(Objects.requireNonNull(executor, "executor")::retireAfterGraphics,
-                executor::retireAfterGraphics);
+                executor::retireAfterGraphics, executor);
     }
 
     DeferredDeletionQueue(
             BiConsumer<RtGpuExecutor.GraphicsUse, Runnable> graphicsRetirement,
             BiConsumer<RtGpuExecutor.TrackedGraphicsUse, Runnable> trackedRetirement) {
+        this(graphicsRetirement, trackedRetirement, null);
+    }
+
+    private DeferredDeletionQueue(
+            BiConsumer<RtGpuExecutor.GraphicsUse, Runnable> graphicsRetirement,
+            BiConsumer<RtGpuExecutor.TrackedGraphicsUse, Runnable> trackedRetirement,
+            RtGpuExecutor executor) {
         this.graphicsRetirement = Objects.requireNonNull(graphicsRetirement, "graphicsRetirement");
         this.trackedRetirement = Objects.requireNonNull(trackedRetirement, "trackedRetirement");
+        this.executor = executor;
     }
 
     public void retireAfterGraphics(RtGpuExecutor.GraphicsUse lastUse, Runnable destroy) {
@@ -34,5 +43,13 @@ public final class DeferredDeletionQueue {
 
     public void retireAfterGraphics(RtGpuExecutor.TrackedGraphicsUse trackedUse, Runnable destroy) {
         trackedRetirement.accept(trackedUse, destroy);
+    }
+
+    public int pendingRetirements() {
+        return executor == null ? 0 : executor.pendingPublishedRetirementCount();
+    }
+
+    public int queueDepth() {
+        return executor == null ? 0 : executor.pendingDestroyCount();
     }
 }

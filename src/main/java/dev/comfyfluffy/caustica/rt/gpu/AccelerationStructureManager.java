@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.rt.gpu;
 
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
+import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import org.lwjgl.vulkan.VkCommandBuffer;
@@ -118,5 +119,12 @@ public final class AccelerationStructureManager {
 
     public void retire(RtGpuExecutor.TrackedGraphicsUse trackedUse, Runnable destroy) {
         deletionQueue.retireAfterGraphics(trackedUse, destroy);
+    }
+
+    public void recordDiagnostics(RtFrameStats.Profile profile) {
+        profile.count("gpuRetiredResourcesPending", deletionQueue.pendingRetirements());
+        profile.count("gpuDeferredDestroyQueueDepth", deletionQueue.queueDepth());
+        profile.count("gpuAsLiveCount", RtAccel.liveCount());
+        profile.count("gpuBlasLiveBytes", RtAccel.liveBlasBytes());
     }
 }
