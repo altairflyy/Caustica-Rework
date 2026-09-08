@@ -19,6 +19,7 @@ import java.util.Objects;
  */
 public final class AccelerationStructureManager {
     private final DeferredDeletionQueue deletionQueue;
+    private final RtAccel.TlasRing frameTlasRing = new RtAccel.TlasRing();
 
     public AccelerationStructureManager(DeferredDeletionQueue deletionQueue) {
         this.deletionQueue = Objects.requireNonNull(deletionQueue, "deletionQueue");
@@ -104,9 +105,8 @@ public final class AccelerationStructureManager {
 
     public RtAccel.PreparedTlas buildTlas(
             RtContext ctx, List<RtAccel.Instance> baseInstances,
-            List<RtAccel.Instance> dynamicInstances, RtAccel.TlasRing ring,
-            RtGpuExecutor.GraphicsUse graphicsUse) {
-        return RtAccel.prepareTlas(ctx, baseInstances, dynamicInstances, ring, graphicsUse);
+            List<RtAccel.Instance> dynamicInstances, RtGpuExecutor.GraphicsUse graphicsUse) {
+        return RtAccel.prepareTlas(ctx, baseInstances, dynamicInstances, frameTlasRing, graphicsUse);
     }
 
     public void recordTlas(RtContext ctx, VkCommandBuffer command, RtAccel.PreparedTlas tlas) {
@@ -126,5 +126,10 @@ public final class AccelerationStructureManager {
         profile.count("gpuDeferredDestroyQueueDepth", deletionQueue.queueDepth());
         profile.count("gpuAsLiveCount", RtAccel.liveCount());
         profile.count("gpuBlasLiveBytes", RtAccel.liveBlasBytes());
+    }
+
+    /** Release device-owned frame TLAS slots after queue shutdown has completed. */
+    public void destroy() {
+        frameTlasRing.destroy();
     }
 }

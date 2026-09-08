@@ -56,6 +56,8 @@ class AccelerationStructureManagerTest {
     void productionFrameTlasUsesTheManagerWithoutChangingItsOrderingSeam() throws Exception {
         String context = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtContext.java"));
+        String manager = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/gpu/AccelerationStructureManager.java"));
         String composite = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
 
@@ -69,6 +71,11 @@ class AccelerationStructureManagerTest {
         assertTrue(build < publish && publish < record && record < barrier);
         assertEquals(-1, composite.indexOf("RtAccel.prepareTlas("));
         assertEquals(-1, composite.indexOf("RtAccel.recordTlasBuild("));
+        assertEquals(-1, composite.indexOf("new RtAccel.TlasRing("));
+        assertEquals(-1, composite.indexOf("tlasRing.destroy()"));
+        assertTrue(manager.contains("private final RtAccel.TlasRing frameTlasRing"));
+        assertTrue(manager.contains("frameTlasRing.destroy();"));
+        assertTrue(context.contains("accelerationStructureManager.destroy();"));
     }
 
     @Test

@@ -105,6 +105,7 @@ public final class CausticaClient implements ClientModInitializer {
 			RtEntities.INSTANCE.shutdown(ctx);
 		}
 		RtComposite.INSTANCE.destroy();
+		dev.comfyfluffy.caustica.rt.upscale.UpscalerRuntime.INSTANCE.destroy();
 		RtEntityTextures.INSTANCE.reset();
 		RtBlockMaterials.INSTANCE.destroy();
 		dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.destroy();
@@ -114,11 +115,11 @@ public final class CausticaClient implements ClientModInitializer {
 		}
 		// Shut NGX down once, after every feature (RR + FG) has been released above.
 		dev.comfyfluffy.caustica.ngx.NgxRuntime.INSTANCE.shutdown();
-		// Same ordering for the FidelityFX runtime: the FSR context is already released by
-		// RtComposite.destroy() above; this only clears the shared runtime state for the next device.
+		// Same ordering for the FidelityFX runtime: the upscaler owner has already released its
+		// FSR context above; this only clears the shared runtime state for the next device.
 		dev.comfyfluffy.caustica.fsr.FsrRuntime.INSTANCE.shutdown();
-		// Same ordering for the XeSS runtime: the upscaler is already released by
-		// RtComposite.destroy() above; this clears the shared runtime state for the next device.
+		// Same ordering for the XeSS runtime: the upscaler owner has already released its
+		// feature above; this clears the shared runtime state for the next device.
 		dev.comfyfluffy.caustica.xess.XessRuntime.INSTANCE.shutdown();
 		// Same ordering for the NRD runtime (NRI device wrapper).
 		dev.comfyfluffy.caustica.nrd.NrdRuntime.INSTANCE.shutdown();

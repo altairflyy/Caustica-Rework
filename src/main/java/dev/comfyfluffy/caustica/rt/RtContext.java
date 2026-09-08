@@ -533,6 +533,7 @@ public final class RtContext {
 
     public void destroy() {
         gpuExecutor.shutdown();
+        accelerationStructureManager.destroy();
         if (commandPool != 0L) {
             VK10.vkDestroyCommandPool(vk, commandPool, null);
             commandPool = 0L;

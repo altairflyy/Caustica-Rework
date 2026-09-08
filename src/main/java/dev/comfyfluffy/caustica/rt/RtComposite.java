@@ -91,6 +91,7 @@ import dev.comfyfluffy.caustica.rt.reconstruction.experimental.nrd.ExperimentalN
 import dev.comfyfluffy.caustica.rt.upscale.FsrUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.upscale.XessUpscalerBackend;
 import dev.comfyfluffy.caustica.rt.upscale.NativeUpscalerBackend;
+import dev.comfyfluffy.caustica.rt.upscale.UpscalerRuntime;
 import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.graph.FrameGraph;
@@ -460,9 +461,7 @@ public final class RtComposite {
     private final SvgfReconstructionBackend svgfBackend = new SvgfReconstructionBackend();
     private final DlssRrReconstructionBackend dlssRrBackend = new DlssRrReconstructionBackend();
     private final ExperimentalNrdBackend nrdBackend = new ExperimentalNrdBackend();
-    private final FsrUpscalerBackend fsrBackend = new FsrUpscalerBackend();
-    private final XessUpscalerBackend xessBackend = new XessUpscalerBackend();
-    private final NativeUpscalerBackend nativeUpscalerBackend = new NativeUpscalerBackend();
+    private final UpscalerRuntime upscalers = UpscalerRuntime.INSTANCE;
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
     private boolean renderSizeSvgfEnabled;
@@ -567,11 +566,6 @@ public final class RtComposite {
     private float moonV0;
     private float moonU1 = 1f;
     private float moonV1 = 1f;
-
-    // Per-frame TLAS resources, rebuilt in place from a small ring of persistent slots (see
-    // RtAccel.TlasRing — replaces the old create-and-defer-destroy-per-frame churn whose VMA slow path
-    // showed up as rare multi-ms prepareTlas spikes).
-    private final RtAccel.TlasRing tlasRing = new RtAccel.TlasRing();
 
     // This frame's TLAS handle, published after prepareTlas so the world-overlay pass (block outline's
     // rayQueryEXT occlusion test) can bind the exact same acceleration structure the primary trace used —
@@ -1067,11 +1061,11 @@ public final class RtComposite {
         int rrQuality = rrEnabled ? dlssRrBackend.quality() : Integer.MIN_VALUE;
         // FSR 3 only takes the upscale slot when RR is not running (the selector makes them
         // mutually exclusive, but a hand-edited config could enable both — RR wins).
-        boolean fsrEnabled = !rrEnabled && fsrBackend.available();
-        int fsrQuality = fsrEnabled ? fsrBackend.quality() : Integer.MIN_VALUE;
+        boolean fsrEnabled = !rrEnabled && upscalers.fsr().available();
+        int fsrQuality = fsrEnabled ? upscalers.fsr().quality() : Integer.MIN_VALUE;
         // XeSS shares the slot under the same rules; if a hand-edit stacks them, RR > FSR > XeSS.
-        boolean xessEnabled = !rrEnabled && !fsrEnabled && xessBackend.available();
-        int xessQuality = xessEnabled ? xessBackend.quality() : Integer.MIN_VALUE;
+        boolean xessEnabled = !rrEnabled && !fsrEnabled && upscalers.xess().available();
+        int xessQuality = xessEnabled ? upscalers.xess().quality() : Integer.MIN_VALUE;
         // The denoise slot. Exactly one denoiser ever runs on a frame, in this order:
         //   DLSS-RR (denoises internally, so nothing else may touch the image)
         //   > NRD/REBLUR (opt-in, needs bundled natives)
@@ -1099,10 +1093,8 @@ public final class RtComposite {
         // ensureFeature again in that state, so the RR feature (and its history buffers) would stay
         // allocated for the rest of the session; the device is idle right now, so release it here.
         dlssRrBackend.releaseIfDisabled();
-        // Same reasoning for the FSR context (its history textures) when the upscaler switches away.
-        fsrBackend.releaseIfDisabled();
-        // And for the XeSS upscaler (pipelines + history) on the same switch-away event.
-        xessBackend.releaseIfDisabled();
+        // Release inactive FSR/XeSS state at the same synchronized switch-away seam.
+        upscalers.releaseInactiveBackends();
         if (displayImage != null) {
             displayImage.destroy();
         }
@@ -1132,11 +1124,11 @@ public final class RtComposite {
         if (rrEnabled) {
             optimal = dlssRrBackend.recommendedRenderExtent(width, height);
         } else if (fsrEnabled) {
-            optimal = fsrBackend.recommendedRenderExtent(width, height);
+            optimal = upscalers.fsr().recommendedRenderExtent(width, height);
         } else if (xessEnabled) {
-            optimal = xessBackend.recommendedRenderExtent(width, height);
+            optimal = upscalers.xess().recommendedRenderExtent(width, height);
         } else {
-            optimal = nativeUpscalerBackend.recommendedRenderExtent(width, height);
+            optimal = upscalers.nativeBackend().recommendedRenderExtent(width, height);
         }
         renderW = optimal.width();
         renderH = optimal.height();
@@ -1358,12 +1350,12 @@ public final class RtComposite {
         float jitterY = frame.jitter().y();
         if (!rrDone && fsrPath) {
             float fovY = (float) (2.0 * Math.atan(1.0 / Math.abs(frameProjection.m11())));
-            dev.comfyfluffy.caustica.rt.upscale.UpscaleResult result = fsrBackend.execute(
+            dev.comfyfluffy.caustica.rt.upscale.UpscaleResult result = upscalers.fsr().execute(
                     new FsrUpscalerBackend.Request(ctx, cmd, upscaleSource, gDepth, gMotion, rrOutput,
                             renderW, renderH, displayW, displayH, -jitterX, -jitterY, fovY,
                             camX, camY, camZ, () -> {
                                 recordTemporalReset(TemporalResetReason.TELEPORT);
-                                broadcastTemporalReset(fsrBackend::requestReset);
+                                broadcastTemporalReset(upscalers.fsr()::requestReset);
                             }));
             rrDone = result.executed();
             if (rrDone) barrierBackend = dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.FSR;
@@ -1373,12 +1365,12 @@ public final class RtComposite {
         // (denoised-or-raw color + depth + motion vectors), output straight into rrOutput. The
         // ML reconstruction replaces FSR's analytic pass — same upscale slot, same consumers.
         if (!rrDone && xessPath) {
-            dev.comfyfluffy.caustica.rt.upscale.UpscaleResult result = xessBackend.execute(
+            dev.comfyfluffy.caustica.rt.upscale.UpscaleResult result = upscalers.xess().execute(
                     new XessUpscalerBackend.Request(ctx, cmd, upscaleSource, gDepth, gMotion, rrOutput,
                             renderW, renderH, displayW, displayH, jitterX, jitterY,
                             svgfRan || nrdDone, camX, camY, camZ, () -> {
                                 recordTemporalReset(TemporalResetReason.TELEPORT);
-                                broadcastTemporalReset(xessBackend::requestReset);
+                                broadcastTemporalReset(upscalers.xess()::requestReset);
                             }));
             rrDone = result.executed();
             if (rrDone) barrierBackend = dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.XESS;
@@ -1388,7 +1380,8 @@ public final class RtComposite {
         // failure), bring the render-res trace up to display res with a linear blit so the display mapper
         // always has a display-res RT image. With no upscaler render == display, so this is a 1:1 copy.
         if (!rrDone) {
-            nativeUpscalerBackend.execute(new NativeUpscalerBackend.Request(ctx, cmd, stack, upscaleSource, rrOutput));
+            upscalers.nativeBackend().execute(
+                    new NativeUpscalerBackend.Request(ctx, cmd, stack, upscaleSource, rrOutput));
             barrierBackend = dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.NATIVE;
         }
         boolean generated = dev.comfyfluffy.caustica.rewrite.RewriteGates.upscalerBarriersV2();
@@ -1456,8 +1449,8 @@ public final class RtComposite {
     private FrameInputs prepareFrameInputs() {
         int debugView = debugView();
         boolean rrPath = dlssRrBackend.available() && debugView == 0;
-        boolean fsrPath = !rrPath && fsrBackend.available() && debugView == 0;
-        boolean xessPath = !rrPath && !fsrPath && xessBackend.available() && debugView == 0;
+        boolean fsrPath = !rrPath && upscalers.fsr().available() && debugView == 0;
+        boolean xessPath = !rrPath && !fsrPath && upscalers.xess().available() && debugView == 0;
         boolean nrdPath = !rrPath && nrdBackend.selected() && debugView == 0;
         boolean svgfDebugView = SvgfReconstructionBackend.isDebugView(debugView);
         boolean svgfPath = !rrPath && CausticaConfig.Rt.Denoise.ENABLED.value()
@@ -1744,8 +1737,7 @@ public final class RtComposite {
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.prepareTlas")) {
                 SceneAssembler.TlasInput tlasInput = SceneAssembler.INSTANCE.tlasInput(scene);
                 frameTlas = ctx.accelerationStructures().buildTlas(
-                        ctx, tlasInput.baseInstances(), tlasInput.dynamicInstances(), tlasRing,
-                        graphicsUse);
+                        ctx, tlasInput.baseInstances(), tlasInput.dynamicInstances(), graphicsUse);
             }
             active.setTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
             currentTlasHandle = frameTlas.accel.handle;
@@ -2369,19 +2361,11 @@ public final class RtComposite {
     }
 
     public void destroy() {
-        // Teardown runs after the device is idle (CLIENT_STOPPING waits), so the TLAS ring's slots are no
-        // longer in flight and can be freed immediately.
-        tlasRing.destroy();
         sharc.destroy(RtContext.currentOrNull());
         // Unconditional: backend availability reflects the CURRENT toggles, and the denoiser toggle can
         // have been turned off after a feature was already created. destroy() is a no-op when nothing
         // was ever allocated, so asking it every time is what guarantees the feature is released.
         dlssRrBackend.destroy();
-        // Same contract for the FSR context (no-op when it was never created).
-        fsrBackend.destroy();
-        // And the XeSS upscaler (no-op when it was never initialized).
-        xessBackend.destroy();
-        nativeUpscalerBackend.destroy();
         // Tear down the NRD integration (wraps the Vulkan device via NRI) only after its images are
         // released below; destroyGuideImages runs after this in the teardown sequence.
         nrdBackend.destroy();

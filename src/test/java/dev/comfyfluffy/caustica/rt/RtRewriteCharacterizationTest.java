@@ -73,10 +73,10 @@ final class RtRewriteCharacterizationTest {
         assertTrue(source.contains("nrdBackend.resetHistory();")
                         && nrdQuarantine.contains("delegate.resetHistory();"),
                 "resolution-dependent NRD history must be reset on recreation");
-        assertTrue(source.contains("broadcastTemporalReset(fsrBackend::requestReset)")
+        assertTrue(source.contains("broadcastTemporalReset(upscalers.fsr()::requestReset)")
                         && fsrBackend.contains("delegate.requestReset();"),
                 "FSR must reset through the coordinator on the legacy camera-discontinuity path");
-        assertTrue(source.contains("broadcastTemporalReset(xessBackend::requestReset)")
+        assertTrue(source.contains("broadcastTemporalReset(upscalers.xess()::requestReset)")
                         && xessBackend.contains("delegate.requestReset();"),
                 "XeSS must reset through the coordinator on the legacy camera-discontinuity path");
         assertTrue(source.contains("private final TemporalState temporalState = new TemporalState();"),
@@ -139,11 +139,11 @@ final class RtRewriteCharacterizationTest {
                         && dlssRrBackend.contains("return RtDlssRr.enabled();"),
                 "DLSS-RR remains first in the temporal upscale slot");
         assertTrue(source.contains(
-                        "boolean fsrPath = !rrPath && fsrBackend.available() && debugView == 0;")
+                        "boolean fsrPath = !rrPath && upscalers.fsr().available() && debugView == 0;")
                         && fsrBackend.contains("return RtFsrUpscaler.enabled();"),
                 "FSR may run only when DLSS-RR is not selected");
         assertTrue(source.contains(
-                        "boolean xessPath = !rrPath && !fsrPath && xessBackend.available() && debugView == 0;")
+                        "boolean xessPath = !rrPath && !fsrPath && upscalers.xess().available() && debugView == 0;")
                         && xessBackend.contains("return RtXessUpscaler.enabled();"),
                 "XeSS may run only when neither DLSS-RR nor FSR is selected");
     }
