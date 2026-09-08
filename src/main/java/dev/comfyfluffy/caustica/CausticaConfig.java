@@ -821,7 +821,7 @@ public final class CausticaConfig {
                     clampedFloat("caustica.rt.cloudHeight", "composite.cloud-height", 320.0f, 128.0f, 1024.0f);
             /**
              * Fraction of the sky the deck covers in clear weather. Rain drives this toward fully
-             * overcast on top of whatever is set here (see {@code RtComposite.cloudState}).
+             * overcast on top of whatever is set here (see {@code CloudModule.parameters}).
              */
             public static final FloatSetting CLOUD_COVERAGE =
                     clampedFloat("caustica.rt.cloudCoverage", "composite.cloud-coverage", 0.55f, 0.0f, 1.0f);

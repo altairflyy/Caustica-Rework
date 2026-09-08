@@ -6,6 +6,7 @@ import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.RtUiOverlay;
+import dev.comfyfluffy.caustica.rt.environment.CloudModule;
 import dev.comfyfluffy.caustica.rt.entity.RtEntities;
 import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
 import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
@@ -24,14 +25,14 @@ public final class CausticaClient implements ClientModInitializer {
 		CausticaMod.LOGGER.info("Caustica client initialized");
 
 		// The classic deck's shape is authored data (textures/environment/clouds.png — see
-		// RtCloudCells), so a resource reload can change it: drop the cached cell map and let the next
+		// CloudModule), so a resource reload can change it: drop the cached cell map and let the next
 		// frame re-read the texture. Covers F3+T and pack enable/disable alike.
 		net.fabricmc.fabric.api.resource.v1.ResourceLoader
 				.get(net.minecraft.server.packs.PackType.CLIENT_RESOURCES)
 				.registerReloadListener(
 						net.minecraft.resources.Identifier.fromNamespaceAndPath("caustica", "cloud_cells"),
 						(net.minecraft.server.packs.resources.ResourceManagerReloadListener) manager ->
-								dev.comfyfluffy.caustica.rt.RtCloudCells.INSTANCE.invalidate());
+								CloudModule.INSTANCE.invalidate());
 
 		// The GpuDevice exists well before the first tick, so a one-shot at tick start
 		// runs on the render thread with the device idle between frames.

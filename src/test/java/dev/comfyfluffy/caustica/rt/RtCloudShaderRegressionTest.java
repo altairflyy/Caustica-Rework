@@ -18,6 +18,42 @@ final class RtCloudShaderRegressionTest {
     private static final Path WORLD_RMISS = REPO_ROOT.resolve("shaders/world/world.rmiss.slang");
     private static final Path RT_COMPOSITE =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
+    private static final Path CLOUD_MODULE = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/environment/CloudModule.java");
+
+    @Test
+    void runtimeCloudOwnershipFlowsThroughTheExtractedModule() throws IOException {
+        String composite = Files.readString(RT_COMPOSITE);
+        String module = Files.readString(CLOUD_MODULE);
+
+        assertTrue(composite.contains("cloudModule.parameters(")
+                        && composite.contains("cloudModule.cells()"),
+                "RtComposite must delegate cloud parameters and authored-cell history");
+        assertFalse(composite.contains("CausticaConfig.Rt.Composite.CLOUD_COVERAGE")
+                        || composite.contains("EnvironmentAttributes.CLOUD_COLOR"),
+                "RtComposite must not retain a parallel cloud-parameter authority");
+        assertTrue(module.contains("private volatile int[] packedCells;")
+                        && module.contains("public void invalidate()")
+                        && module.contains("public int[] cells()"),
+                "CloudModule must own resource-pack cloud history and invalidation");
+        assertInOrder(composite,
+                "environment.clouds().params(),",
+                "environment.clouds().anchor(),",
+                "environment.clouds().color(),",
+                "cloudCellsAddress,");
+    }
+
+    @Test
+    void cameraVisibilityAndReflectionParticipationRemainInThePathIntegral() throws IOException {
+        String miss = Files.readString(WORLD_RMISS);
+        String raygen = Files.readString(WORLD_RGEN);
+
+        assertTrue(miss.contains("col = cloudLayer(worldPush, WorldRayOrigin() - worldPush.camOffset"),
+                "camera-visible sky misses must still composite the cloud layer");
+        assertTrue(raygen.contains("CloudVolume segCloud = cloudSegment(worldPush")
+                        && raygen.contains("showCelestial);"),
+                "camera and specular/reflection segments must still integrate cloud volume");
+    }
 
     /**
      * The celestials atlas binding in {@code world.rmiss} must equal the descriptor slot the
