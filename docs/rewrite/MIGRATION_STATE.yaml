@@ -125,7 +125,7 @@ tasks:
     state: DONE
 
   AER-080:
-    state: PENDING
+    state: READY
   AER-081:
     state: PENDING
   AER-082:
@@ -152,7 +152,7 @@ gates:
   GATE-4: PASS
   GATE-5: PASS
   GATE-6: PASS
-  GATE-7: PENDING
+  GATE-7: PASS
   GATE-8: PENDING
   FINAL: PENDING
 
