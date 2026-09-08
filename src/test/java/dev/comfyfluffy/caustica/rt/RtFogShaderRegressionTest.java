@@ -139,9 +139,11 @@ final class RtFogShaderRegressionTest {
                 "public float4   fogParams;",
                 "public float4   fogTint;");
         String composite = Files.readString(RT_COMPOSITE);
+        assertTrue(composite.contains("new EnvironmentParameters.Fog(fogParams(), fogTint(partial))"),
+                "the environment snapshot must materialize fog params and tint together");
         assertInOrder(composite,
-                "fogParams(),",
-                "fogTint()");
+                "environment.fog().params(),",
+                "environment.fog().tint()");
         assertTrue(composite.contains("EnvironmentAttributes.FOG_COLOR"),
                 "the tint must read vanilla's fog colour attribute — biome blend, weather and "
                         + "dimension are already composed there, and re-resolving them here is how "

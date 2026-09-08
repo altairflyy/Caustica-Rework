@@ -58,6 +58,7 @@ import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.entity.RtEntities;
+import dev.comfyfluffy.caustica.rt.environment.EnvironmentParameters;
 import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
 import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
@@ -218,7 +219,7 @@ public final class RtComposite {
      * <p>Fog off writes the whole lane zero (matching {@link #fogParams()}'s "off costs one
      * comparison" contract; the shader multiplies nothing when nobody reads it anyway).
      */
-    private static Float4 fogTint() {
+    private static Float4 fogTint(float partial) {
         float strength = CausticaConfig.Rt.Composite.FOG_BIOME_TINT.value();
         if (!CausticaConfig.Rt.Composite.FOG_ENABLED.value() || strength <= 0f) {
             return new Float4(1f, 1f, 1f, 0f);
@@ -227,7 +228,6 @@ public final class RtComposite {
         try {
             Minecraft mc = Minecraft.getInstance();
             if (mc != null && mc.gameRenderer != null) {
-                float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
                 int argb = mc.gameRenderer.mainCamera().attributeProbe()
                         .getValue(EnvironmentAttributes.FOG_COLOR, partial);
                 r = srgb8ToLinear(ARGB.red(argb));
@@ -1696,12 +1696,7 @@ public final class RtComposite {
             BreakEntry[] breaking = breakingEntries(terrain);
             // Dimension + weather drive the sky model and the celestial light, so both are resolved
             // together, once, from the same level and partial tick.
-            int dimension = dimensionId(level);
-            WeatherState weather = weatherState(level,
-                    Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false));
-            SkyPush sky = skyPush(dimension, weather);
-            // Two lanes, resolved together from the same weather + camera state the sky above used.
-            CloudPush clouds = cloudState(dimension, weather, camY);
+            EnvironmentParameters environment = environmentParameters(level);
             // Analytic held-item light: position + intensity lane and the item's RGB tint; w == 0
             // disables the shader term (toggle off, no luminous item, or no player).
             HandLightState hand = handLightState(terrain);
@@ -1718,13 +1713,13 @@ public final class RtComposite {
                     new Float2(jitterX, jitterY),
                     flags,
                     maxBounces(),
-                    sky.sunDir(),
-                    sky.lightDir(),
-                    sky.lightRadiance(),
-                    sky.moonDir(),
-                    sky.celestial(),
-                    sky.sunUv(),
-                    sky.moonUv(),
+                    environment.sky().sunDir(),
+                    environment.sky().lightDir(),
+                    environment.sky().lightRadiance(),
+                    environment.sky().moonDir(),
+                    environment.sky().celestial(),
+                    environment.sky().sunUv(),
+                    environment.sky().moonUv(),
                     waterParams,
                     waterAnchor,
                     mvCurProjView,
@@ -1743,15 +1738,15 @@ public final class RtComposite {
                     new Float4(CausticaConfig.Rt.Lights.BLOCK_INTENSITY.value(),
                             CausticaConfig.Rt.Lights.DYNAMIC_INTENSITY.value(),
                             0.0f, 0.0f),
-                    new Float4(weather.rain(), weather.thunder(), weather.skyDarken(),
-                            weather.lightAttenuation()),
-                    clouds.clouds(),
-                    clouds.anchor(),
-                    clouds.color(),
+                    new Float4(environment.weather().rain(), environment.weather().thunder(),
+                            environment.weather().skyDarken(), environment.weather().lightAttenuation()),
+                    environment.clouds().params(),
+                    environment.clouds().anchor(),
+                    environment.clouds().color(),
                     cloudCellsAddress,
                     // Shader-only POM: x relief depth (blocks), y max texel crossings, w fade distance.
                     parallaxParams(),
-                    dimension,
+                    environment.dimension(),
                     featureFlags(),
                     // Analytic held-item light: xyz rebased position, w intensity (0 = none held),
                     // then the item's RGB tint lane.
@@ -1775,10 +1770,10 @@ public final class RtComposite {
                     restirBindings.tuning(),
                     // Volumetric fog (WorldPush.fogParams): density lane zero when the toggle is
                     // off, so "off" costs the shader one comparison — see fogParams() above.
-                    fogParams(),
+                    environment.fog().params(),
                     // Biome/weather tint for the fog's scatter (WorldPush.fogTint): the game's
                     // own FOG_COLOR attribute, blended by the slider — see fogTint() above.
-                    fogTint()
+                    environment.fog().tint()
             ).write(push);
             int flushBytes = Math.max(WORLD_PUSH_SIZE, READY_MASK_OFFSET + readyMaskBytes);
             if (cloudCellsAddress != 0L) {
@@ -1987,9 +1982,6 @@ public final class RtComposite {
     }
 
 
-    private record SkyPush(Float4 sunDir, Float4 lightDir, Float4 lightRadiance, Float4 moonDir,
-                           Float4 celestial, Float4 sunUv, Float4 moonUv) {}
-
     private record FrameInputs(boolean rrPath, boolean fsrPath, boolean xessPath, boolean nrdPath,
                                boolean svgfPath, float jitterX, float jitterY) {}
 
@@ -2016,10 +2008,6 @@ public final class RtComposite {
      * @param skyDarken        multiplier on the sky's own radiance
      * @param lightAttenuation multiplier on the direct sun/moon radiance
      */
-    private record WeatherState(float rain, float thunder, float skyDarken, float lightAttenuation) {
-        static final WeatherState CLEAR = new WeatherState(0f, 0f, 1f, 1f);
-    }
-
     /**
      * The three {@code WorldPush} cloud lanes, resolved together by {@link #cloudState} so a caller
      * cannot push a deck's parameters with a mismatched anchor or a mismatched weather fill.
@@ -2029,13 +2017,6 @@ public final class RtComposite {
      * @param anchor xy wrapped sample anchor, z slab thickness, w view limit
      * @param color  xyz vanilla CLOUD_COLOR in linear space, w weather overcast fill 0..1
      */
-    private record CloudPush(Float4 clouds, Float4 anchor, Float4 color) {
-        /** No deck at all: a zeroed coverage/opacity pair short-circuits every cloud path in the shader. */
-        static final CloudPush NONE =
-                new CloudPush(new Float4(0f, 0f, 0f, 0f), new Float4(0f, 0f, 0f, 0f),
-                        new Float4(1f, 1f, 1f, 0f));
-    }
-
     /**
      * Read vanilla's interpolated rain/thunder levels and turn them into the sky/light multipliers.
      *
@@ -2053,13 +2034,13 @@ public final class RtComposite {
      * <p>Dimensions without weather (Nether, End) always report clear — {@code getRainLevel} is already
      * zero there, but returning the shared constant keeps the fast path allocation-free.
      */
-    private static WeatherState weatherState(ClientLevel level, float partial) {
+    private static EnvironmentParameters.Weather weatherState(ClientLevel level, float partial) {
         if (level == null || !CausticaConfig.Rt.Composite.WEATHER_LIGHTING.value()) {
-            return WeatherState.CLEAR;
+            return EnvironmentParameters.Weather.CLEAR;
         }
         float rain = Math.clamp(level.getRainLevel(partial), 0f, 1f);
         if (rain <= 0f) {
-            return WeatherState.CLEAR;
+            return EnvironmentParameters.Weather.CLEAR;
         }
         // getThunderLevel already includes the rain level as a factor in vanilla; clamp defensively so a
         // datapack or mod that drives it independently cannot push the multipliers negative.
@@ -2071,7 +2052,19 @@ public final class RtComposite {
         float stormLight = 1.0f - 0.50f * thunder;
         float rainSky = 1.0f - 0.55f * rain;
         float stormSky = 1.0f - 0.45f * thunder;
-        return new WeatherState(rain, thunder, rainSky * stormSky, rainLight * stormLight);
+        return new EnvironmentParameters.Weather(rain, thunder, rainSky * stormSky, rainLight * stormLight);
+    }
+
+    private EnvironmentParameters environmentParameters(ClientLevel level) {
+        float partial = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false);
+        double gameTimeTicks = level == null ? 0.0 : level.getGameTime() + partial;
+        EnvironmentParameters.Time time = new EnvironmentParameters.Time(partial, gameTimeTicks);
+        int dimension = dimensionId(level);
+        EnvironmentParameters.Weather weather = weatherState(level, partial);
+        EnvironmentParameters.Sky sky = skyPush(dimension, weather, time);
+        EnvironmentParameters.Clouds clouds = cloudState(dimension, weather, camY, time);
+        EnvironmentParameters.Fog fog = new EnvironmentParameters.Fog(fogParams(), fogTint(partial));
+        return new EnvironmentParameters(dimension, time, weather, sky, fog, clouds);
     }
 
     /** Baseline radiance*area product of the analytic held-item light at light level 15. Calibrated so
@@ -2273,13 +2266,14 @@ public final class RtComposite {
      * <p><b>Height.</b> Pushed camera-relative, matching every other position in the push (the terrain
      * rebase means absolute world coordinates are not meaningful in the shader).
      */
-    private CloudPush cloudState(int dimension, WeatherState weather, double cameraY) {
+    private EnvironmentParameters.Clouds cloudState(int dimension, EnvironmentParameters.Weather weather,
+                                                     double cameraY, EnvironmentParameters.Time time) {
         float coverage = CausticaConfig.Rt.Composite.CLOUD_COVERAGE.value();
         float opacity = CausticaConfig.Rt.Composite.CLOUD_OPACITY.value();
         float shadow = CausticaConfig.Rt.Composite.CLOUD_SHADOW_STRENGTH.value();
         if (dimension != DIMENSION_OVERWORLD) {
             // Neither the Nether nor the End has a sky to put clouds in; both draw a closed skybox.
-            return CloudPush.NONE;
+            return EnvironmentParameters.Clouds.NONE;
         }
         // Weather FILL, kept separate from the player's coverage slider all the way to the shader:
         // rain alone must be able to close the sky completely (the old 0.85/0.15 split topped out
@@ -2291,13 +2285,7 @@ public final class RtComposite {
         float fill = Math.min(1f, weather.rain() + weather.thunder());
         float height = CausticaConfig.Rt.Composite.CLOUD_HEIGHT.value();
         // Wind drift, in blocks, from world time. Wrapped with the anchor below.
-        double gameTime = 0.0;
-        var level = Minecraft.getInstance().level;
-        if (level != null) {
-            gameTime = level.getGameTime()
-                    + Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false);
-        }
-        double drift = gameTime * CLOUD_WIND_BLOCKS_PER_TICK;
+        double drift = time.gameTimeTicks() * CLOUD_WIND_BLOCKS_PER_TICK;
         // camX/camZ place the deck in world space; the shader adds the ray's camera-relative offset back
         // on, so the pattern stays pinned to the world while the camera moves through it. The fixed Z
         // offset matches vanilla's own (cameraZ + 3.96 in CloudRenderer.render).
@@ -2319,7 +2307,7 @@ public final class RtComposite {
         // would make the two sliders fight each other — the base is the edge the player actually sees
         // and judges the height by.
         float deckCentre = height + thickness * 0.5f;
-        return new CloudPush(
+        return new EnvironmentParameters.Clouds(
                 new Float4(Math.clamp(coverage, 0f, 1f), Math.clamp(opacity, 0f, 1f),
                         Math.clamp(shadow, 0f, 1f), (float) (deckCentre - cameraY)),
                 new Float4(wrapCloudAnchor(anchorX), wrapCloudAnchor(anchorZ),
@@ -2398,11 +2386,12 @@ public final class RtComposite {
      * would be light arriving from nothing. The raygen skips the whole NEE block — shadow ray included —
      * when the radiance is zero, so those dimensions also stop paying for a light they do not have.
      */
-    private SkyPush skyPush(int dimension, WeatherState weather) {
+    private EnvironmentParameters.Sky skyPush(int dimension, EnvironmentParameters.Weather weather,
+                                              EnvironmentParameters.Time time) {
         float sunX, sunY, sunZ, dayFactor, lx, ly, lz, rr, rg, rb, lightRadius;
         float moonX, moonY, moonZ, moonPhase, starAngle, starBrightness;
         Minecraft mc = Minecraft.getInstance();
-        float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+        float partial = time.partialTick();
         var probe = mc.gameRenderer.mainCamera().attributeProbe();
         float sunAngle = probe.getValue(EnvironmentAttributes.SUN_ANGLE, partial) * (float) (Math.PI / 180.0);
         float moonAngle = probe.getValue(EnvironmentAttributes.MOON_ANGLE, partial) * (float) (Math.PI / 180.0);
@@ -2465,7 +2454,7 @@ public final class RtComposite {
         starBrightness *= 1.0f - weather.rain();
 
         CelestialUv uv = celestialUv(moonPhase);
-        return new SkyPush(
+        return new EnvironmentParameters.Sky(
                 new Float4(sunX, sunY, sunZ, dayFactor),
                 new Float4(lx, ly, lz, lightRadius),
                 new Float4(rr, rg, rb, starBrightness),
