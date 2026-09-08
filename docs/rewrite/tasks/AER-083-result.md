@@ -1,4 +1,4 @@
-# AER-083 pre-audit — BLOCKED
+# AER-083 progress — ACTIVE
 
 AER-082 completed in `6fef5fb`; its worktree was clean before this audit.
 No automatic barrier implementation has been added or enabled. AER-084 has not
@@ -47,6 +47,39 @@ diagnostic is not synchronization qualification.
 4. Complete and commit AER-083 before AER-084. Gate closure also requires Vulkan
    error comparison, complete resource coverage and comparable P99 evidence.
 
-See BLOCKER-003. This is an unmet prerequisite, not a passing implementation.
-No shader, lifetime or synchronization changes were made in this audit. The
-installed profile was not modified. Documentation diff check: PASS.
+See BLOCKER-003. This pre-audit originally identified the runtime prerequisite;
+the first-family results below resolve that portion while the task stays ACTIVE.
+
+## Post-image family candidate
+
+The first family now has a same-JAR A/B implementation. The generated path is
+selected by `engine.renderGraphV2=true` plus `engine.postBarriersV2=true`; the
+legacy path remains the default. Concrete operations cover histogram clear,
+histogram dispatch, exposure resolve/manual clear, display mapping, display copy
+and final export. The candidate emits a barrier only for a compiled hazard while
+retaining the exact broad stage/access scope of Minecraft 26.2's legacy barrier.
+
+Runtime A/B used candidate SHA-256
+`41F3BC827A451F2646B4305F4AE6FC0A737C0596F1FD6155B280BD16DFD82646`.
+Both runs enabled the graph and explicit Khronos synchronization validation.
+The logs prove `legacy` for A and `generated` for B, including automatic and
+manual exposure with HDR disabled.
+
+The validation findings are baseline-equivalent across A and B:
+
+- two `VUID-VkGraphicsPipelineCreateInfo-Input-08733` messages from the known
+  Distant Horizons vertex-input incompatibility;
+- two identical `SYNC-HAZARD-WRITE-AFTER-WRITE` reports on named NGX DLSSD
+  internal resources;
+- one identical `VUID-vkDestroyDevice-device-05137` report with 49 objects at
+  shutdown.
+
+No new VUID or synchronization hazard appeared on B. The user reports visual
+equivalence and successful operation for both runs. HDR was not exercised and is
+recorded as `NOT TESTED`, not PASS. Post SDR automatic/manual A/B: PASS.
+
+Static validation for this candidate: targeted barrier/graph tests PASS;
+`validate-build.ps1` PASS with 224 tests, exact 4/4 canonical failures and
+characterization 7/7; V2 PASS. The preflight also proved the settings file enables
+Core Checks and Synchronization. AER-083 remains ACTIVE while the denoiser,
+upscaler and path-trace output families are implemented and qualified.

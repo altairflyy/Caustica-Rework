@@ -2,7 +2,7 @@
 
 ## BLOCKER-003 — GATE-8 automatic-barrier qualification
 
-**Status:** OPEN
+**Status:** PARTIALLY RESOLVED — POST SDR PASS
 
 **Task:** AER-083; blocks AER-084 and GATE-8.
 
@@ -24,9 +24,11 @@ aggregate shadow declarations or passing unit tests.
 
 **Changes reverted:** none; no generated barriers or queue changes introduced.
 
-**Next action:** establish a repeatable validation scenario with human-assisted
-runtime execution or a tested harness, then implement and qualify the first
-post-image family. AER-084 remains PENDING; GATE-8 remains PENDING.
+**Progress:** the repeatable harness and first post-image candidate now exist.
+Same-JAR A/B with active synchronization validation is baseline-equivalent for
+SDR automatic/manual exposure; HDR is NOT TESTED. Evidence is recorded in the
+AER-083 result. The remaining denoiser, upscaler and path-trace output families
+must still be implemented and qualified. AER-084 and GATE-8 remain pending.
 
 ## BLOCKER-001 — GATE-0 baseline characterization
 
