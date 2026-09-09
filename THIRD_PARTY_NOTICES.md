@@ -11,6 +11,9 @@ SDK runtime components, including DLSS Ray Reconstruction and Frame Generation
 libraries. These NVIDIA components are proprietary third-party software and are
 not licensed under the LGPL.
 
+NVIDIA DLSS/NGX runtime binaries are not stored in the public source repository.
+They are supplied through the supported `DLSS_SDK` build configuration.
+
 The NVIDIA SDK components remain subject to the NVIDIA RTX SDKs license:
 
 <https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt>
@@ -23,8 +26,10 @@ This software contains source code provided by NVIDIA Corporation.
 
 Bundled NVIDIA SDK runtime libraries may include files matching:
 
+- `caustica/natives/windows-x64/nvngx_dlss.dll`
 - `caustica/natives/windows-x64/nvngx_dlssd.dll`
 - `caustica/natives/windows-x64/nvngx_dlssg.dll`
+- `caustica/natives/linux-x64/libnvidia-ngx-dlss.so*`
 - `caustica/natives/linux-x64/libnvidia-ngx-dlssd.so*`
 - `caustica/natives/linux-x64/libnvidia-ngx-dlssg.so*`
 

@@ -11,7 +11,9 @@ changes while the renderer is being built.
 
 ## About This Fork
 
-This repository is an architectural rewrite fork of [Caustica](https://github.com/xysgottaken2/Caustica) (originally created by ComfyFluffy and contributors, licensed under `LGPL-3.0-or-later`).
+This repository is a heavily reworked derivative of Caustica and is published as a direct GitHub fork of the original [ComfyFluffy/Caustica](https://github.com/ComfyFluffy/Caustica) repository (licensed under `LGPL-3.0-or-later`).
+
+The rewrite was initially developed from the [xysgottaken2/Caustica](https://github.com/xysgottaken2/Caustica) development fork before diverging into the current architecture.
 
 The primary focus of this rewrite fork is to introduce a robust, modular rendering architecture for Minecraft 26.2's Vulkan backend:
 - **Modular Resource & Pass Architecture**: Decoupled ownership across `FramePipeline`, `RenderGraph`, `PostProcessing`, `WorldTraceResources`, and `TraceFrameResources`.
@@ -19,11 +21,14 @@ The primary focus of this rewrite fork is to introduce a robust, modular renderi
 - **Enhanced Ray-Tracing Pipeline**: Full Vulkan hardware path tracing, ReSTIR spatio-temporal resampling, SHaRC spatial hash radiance cache, native SVGF denoising, and DLSS Ray Reconstruction.
 - **Color & Presentation**: Native HDR10/PQ presentation on supported platforms alongside standard SDR.
 
-See the upstream project at <https://github.com/xysgottaken2/Caustica> and project license files for original authorship and licensing details.
+NVIDIA DLSS/NGX runtime binaries are not stored in this public source repository. They are supplied through the supported `DLSS_SDK` build configuration.
+
+See the original upstream project at <https://github.com/ComfyFluffy/Caustica> and the development base at <https://github.com/xysgottaken2/Caustica> for historical context, original authorship, and licensing details.
 
 ## Links
 
-- [Upstream Repository](https://github.com/xysgottaken2/Caustica)
+- [Original Upstream Repository (ComfyFluffy/Caustica)](https://github.com/ComfyFluffy/Caustica)
+- [Development Base Repository (xysgottaken2/Caustica)](https://github.com/xysgottaken2/Caustica)
 - [Discord](https://discord.gg/SeWCjyKu2)
 - [Modrinth](https://modrinth.com/mod/caustica)
 - [CurseForge](https://www.curseforge.com/minecraft/mc-mods/caustica/preview)
