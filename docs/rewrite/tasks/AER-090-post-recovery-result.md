@@ -13,4 +13,13 @@ failure, preserving the old partial-frame failure behavior.
 
 Targeted characterization checks ownership, lifecycle ordering, formats,
 descriptor binding order and record/notification/barrier ordering. Existing POST
-barrier-plan tests remain unchanged. Validation pending.
+barrier-plan tests remain unchanged.
+
+Validation:
+
+- `validate-build.ps1`: PASS; V0 + V1 + V2 demonstrated in one run.
+- V1: 248 tests, exact 4/4 canonical baseline failures; characterization 7/7 PASS.
+- V2: Gradle build PASS; NGX shim present (83,968 bytes).
+- `git diff --check`: PASS.
+- Forbidden-change audit: no shader/math, synchronization, feature-selection,
+  tuning or new `waitIdle` changes.
