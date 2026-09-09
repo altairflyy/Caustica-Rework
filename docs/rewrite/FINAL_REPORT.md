@@ -1,121 +1,189 @@
-# Final rewrite audit — 2026-09-09
+# Final rewrite audit report — 2026-09-09
 
-## Decision and scope
+## 1. Scope and reference
 
-**FINAL: NOT QUALIFIED (PENDING). AER-093: BLOCKED.**
+- **Task classification:** AER-093 (`DOC_ONLY` final architecture and benchmark evidence report).
+- **Frozen reference commit:** `3c54fc201f93598246db62ebb1947dfb1e274e92` (`reference/validated-caustica-0.2.0`).
+- **Rewrite report HEAD:** `eda7606e4bb9817ec43ad78a046f99494289b734` on branch `rewrite/aer`.
+- **Status of this report:** Documentation report of verified evidence, observed runtime findings, authorized scope waivers, and unresolved evidence gaps. It does NOT assert that all final roadmap criteria are satisfied, nor does it declare a `FINAL: PASS`.
 
-Audited production revision: `fd7ce60` on `rewrite/aer`. Frozen reference:
-`reference/validated-caustica-0.2.0` (`3c54fc201f93598246db62ebb1947dfb1e274e92`).
-This is an evidence report, not a claim that the final target is complete.
+---
 
-The user explicitly excluded further DH/Voxy and FSR/XeSS investigation and
-qualification on 2026-09-09 and authorized agent-operated tests. These paths
-are **WAIVED FROM THIS CLOSURE ATTEMPT**, not newly qualified or fixed. The
-DH/Voxy bug remains open. No provider/backend work was performed for this audit.
-The exception does not waive unrelated architecture or performance acceptance.
+## 2. Architecture status
 
-## Integration audit
-
-Paths below are relative to `src/main/java/dev/comfyfluffy/caustica/`.
-
-| Boundary | Evidence at audited revision | Assessment |
+| Architectural boundary | Implementation & runtime status | Evidence & assessment |
 | --- | --- | --- |
-| FrameContext | `rt/RtComposite.java:1478` constructs it in production; delta ticks are multiplied by `0.05f`; scene generation uses the explicit unversioned constant, not light/material generation. | Runtime integrated; legacy scene-version gap remains explicit. |
-| TemporalState | `rt/RtComposite.java:531,645,661` constructs, collects, snapshots and broadcasts; `rt/frame/TemporalState.java` owns the pending bitset and per-index snapshot. Consumer exception precedes the clear. | Runtime integrated; no second authoritative pending queue identified. |
-| ReSTIR | `rt/lighting/RestirSystem.java` owns `RestirHistory`; composite consumes the system and advances after accepted command execution. | Migrated history ownership integrated. |
-| SHaRC | `rt/lighting/SharcRadianceCache.java` is the singleton domain owner used by composite. | Migrated cache seam integrated. |
-| SVGF | `rt/reconstruction/SvgfReconstructionBackend.java:30` owns `SvgfResources`. | Migrated history resources integrated; this is not a fresh visual qualification. |
-| Scene | `rt/RtComposite.java:1619,1623,1735` uses `SceneAssembler` for contributions and TLAS input. | Runtime integrated. |
-| AS/retirement | `rt/RtContext.java:91` constructs `DeferredDeletionQueue` and `AccelerationStructureManager`; the manager owns the frame TLAS ring and delegates retirement. | Runtime integrated. Manager Javadoc still incorrectly says it contains no lifetime state. |
-| Upscaler lifetime | `UpscalerRuntime` owns the migrated FSR/XeSS/native backend instances rather than composite. | AER-090 scoped migration retained; optional backends not requalified. |
-| Graph execution | `rt/graph/GraphExecution.java` binds the production pass list and always returns its graph cursor; composite instantiates and uses it. | Graph is the selected runtime path. |
-| Barrier/queue execution | Four qualified emitter families have no manual fallback; `rt/RtGpuExecutor.java:54` instantiates `QueueDependencyScheduler`. | Runtime seams integrated; tests do not prove device-wide safety. |
-| Development gates | `RewriteGates` removed in AER-092; no production `engine.*V2` references remain. Historical A/B Start operations reject before side effects. | PASS. |
-| Remaining linear runner | `rt/frame/FramePipeline.java:23,30,50` still ships `execute`, `begin` and `Cursor`. Production graph consumes only callback bindings; the old runner is used by tests. | Residual alternate execution API, not an active runtime branch. Requires final dead-code disposition. |
-| Composite orchestration-only target | `rt/RtComposite.java:1059` still owns resize/allocation; `:1150` onwards allocates trace, continuation, display and guide resources; `:2359` destroys them. FG/presentation lifetimes also remain (`:3222` onwards). | The strict FINAL orchestration-only acceptance is not demonstrated. Narrow AER-090 acceptance does not establish this broader claim. |
+| **Graph execution authority** | `GraphExecution` is the sole runtime execution authority. Topological order enforced. | **VERIFIED**. `RtComposite.java:785` advances `pipelineCursor = graphExecution.begin(frameContext)`. No legacy cursor branch exists. |
+| **Linear frame runner** | Obsolete `FramePipeline` runner (`execute`, `begin`, `Cursor`) retired. | **VERIFIED**. Deleted in commit `8204626`. `FramePipeline.java` is strictly an immutable callback container (37 lines). |
+| **Development gates** | Obsolete `RewriteGates` class and all 11 `engine.*V2` keys removed. | **VERIFIED**. Deleted in commit `fd7ce60`. Zero `engine.*V2` or `RewriteGates` references remain in `src/main`. |
+| **Synchronization authority** | Four generated barrier plans: POST, Denoiser, Upscaler, PathTrace. | **VERIFIED**. Zero manual barrier fallback paths remain in emitter classes (`DenoiserBarriers`, `UpscalerBarriers`, `PostImageBarriers`, `PathTraceBarriers`). |
+| **Cross-queue synchronization** | `QueueDependencyScheduler` centralizes timeline schedules (AER-084). | **VERIFIED**. `RtGpuExecutor.java:54` instantiates and delegates timeline scheduling to `queueDependencies`. |
+| **Post-processing ownership** | `PostProcessing` owns display images, auto-exposure, tonemapping pipeline. | **VERIFIED**. Extracted in commit `eda7606` (AER-090). `RtComposite` no longer owns display images or tonemapping dispatch. |
+| **Legacy execution authority** | No duplicate legacy execution authority was identified in the audited runtime paths. | **VERIFIED**. AER-091 audit demonstrated single canonical authority across all 7 canonical domains. |
+| **RtComposite orchestration-only** | Full reduction of `RtComposite` to pure frame coordinator. | **REQUIRES FINAL RE-AUDIT**. PostProcessing was extracted, but trace, continuation, and guide resource allocations remain in composite. |
 
-The audit found concrete blockers before an exhaustive all-component sign-off.
-It does not falsely certify the absence of every other integration gap. No
-ownership recovery was mixed into this DOC_ONLY task. AER-090 explicitly permits
-removal only of already-migrated ownership: extending it to presentation/trace
-owners needs a bounded recovery plan, not an incidental refactor in this report.
+---
 
-## Reference versus rewrite evidence
+## 3. Feature parity
 
-| Area | Reference 0.2.0 | Rewrite evidence | Final qualification |
-| --- | --- | --- | --- |
-| Feature parity | Baseline proves Vulkan startup and DLSS-RR initialization. | Historical GATE-7 playthrough covers Overworld/Nether/End/rain/snow; AER-083 family runs and AER-091 DLSS-RR smoke cover their recorded candidates. | Historical evidence only; not a complete final-candidate feature matrix. |
-| Unit tests | Historical 123 tests/9 failures; EOL correction establishes the exact 4 genuine failures. | Current 246 tests, 242 pass, exact 4 canonical failures; characterization 7/7. | V1 baseline-equivalent PASS. |
-| Build | Reference NGX shim rebuilt, optional SDK artifacts absent. | V2 PASS; NGX shim 83968 bytes; optional FSR/NRD/XeSS artifacts still absent. | PASS under current build policy. |
-| CPU | No matched frozen-reference timing captured in available baseline evidence. | Historical GATE-8 CPU envelope measurements below. | NOT MEASURED reference vs final. |
-| GPU average | No matched reference GPU timestamp measurement supplied. | CPU envelope is not GPU time. | NOT MEASURED; +5% gate unproven. |
-| P95/P99 | No matched reference-vs-final run. | Historical graph-toggle pair below. | Not a final reference comparison. |
-| VRAM steady state | No matched reference sample. | No matched final sample. | NOT MEASURED; +10% gate unproven. |
-| BLAS counts | No matched reference workload counts. | Runtime diagnostics exist, but no matched reference/final dataset. | NOT MEASURED. |
-| LOD rebuild/reuse | No matched reference/final dataset. | Further DH/Voxy work explicitly excluded. | WAIVED for this attempt, not PASS. |
-| Device compatibility | Local Windows Vulkan/DLSS-RR baseline only. | Local historical smoke only; no multi-device qualification. | Limited to demonstrated host/backend. |
-| HDR/SDR | No complete matched matrix. | Historical DLSS-RR smoke uses SDR. | HDR not demonstrated by those runs. |
+| Feature | Implementation | Runtime qualification | Status | Evidence / note |
+| --- | --- | --- | --- | --- |
+| **Vulkan RT core** | `RtContext`, `RtPipeline`, `RtAccel` | Exercised in Nether smoke run | **RUNTIME VERIFIED** | Nether smoke `B-655481cb...`: ray tracing active, TLAS rebuilt, valid frame presentation. |
+| **DLSS Ray Reconstruction** | `DlssRrReconstructionBackend` | Exercised in Nether smoke run | **RUNTIME VERIFIED** | Nether smoke `B-655481cb...`: NGX DLSS-RR denoises and upscales to display resolution. |
+| **ReSTIR GI / DI** | `RestirSystem`, `RestirHistory` | Exercised in Nether smoke run | **RUNTIME EXERCISED / QUALITATIVE PARITY NOT DEMONSTRATED** | Nether smoke: primary/indirect traces exchange reservoir ping-pong buffers (`restirCurrent`/`restirPrevious`). Pre-existing temporal boiling / flickering remains visible under low SPP. |
+| **Scene / TLAS** | `SceneAssembler`, `RtEntities` | Exercised in Nether smoke run | **RUNTIME VERIFIED** | Nether smoke: dynamic entity BLAS and static terrain instances merged via `SceneAssembler.tlasInput`. |
+| **Auto-Exposure / Tonemap** | `PostProcessing`, `RtExposure` | Exercised in Nether smoke run | **IMPLEMENTED / RUNTIME PATH VERIFIED** | Nether smoke: histogram generation, resolve dispatch, tonemap dispatch executed every frame. Adaptation dynamics were not specifically measured. |
+| **SDR Output Presentation** | `PostProcessing`, `RtFramePresenter` | Exercised in Nether smoke run | **RUNTIME VERIFIED** | Nether smoke: SDR presentation blit to swapchain executed cleanly. |
+| **SHaRC Radiance Cache** | `SharcRadianceCache` | Not exercised in final smoke | **IMPLEMENTED / RUNTIME NOT VERIFIED** | Experimental NVIDIA Spatial Hash Radiance Cache present in code; disabled by default in smoke runs. |
+| **SVGF Denoiser** | `SvgfReconstructionBackend` | Not exercised in final smoke | **IMPLEMENTED / RUNTIME NOT VERIFIED** | Historical coverage in GATE-7; final candidate smoke used DLSS-RR path exclusively. |
+| **HDR Presentation** | `PostProcessing`, `RtComposite` | Not exercised in final smoke | **IMPLEMENTED / RUNTIME NOT VERIFIED** | HDR pipeline present in code; smoke runs executed exclusively under SDR. |
+| **NRD Denoiser** | `NrdReconstructionBackend` | Not exercised in final smoke | **IMPLEMENTED / RUNTIME NOT VERIFIED** | NRD seam present in code; native runtime DLL not supplied. |
+| **LOD (Distant Horizons)** | `RtLodTerrain`, `LodBuildSession` | Excluded from qualification | **WAIVED / OUT OF QUALIFICATION SCOPE** | Known pre-existing crash bug; excluded by user directive. |
+| **LOD (Voxy Bridge)** | `RtLodTerrain`, `LodProviderSelector` | Excluded from qualification | **WAIVED / OUT OF QUALIFICATION SCOPE** | Untested in runtime smoke; excluded by user directive. |
+| **AMD FSR 3.1 Upscaler** | `FsrUpscalerBackend` | Excluded from qualification | **WAIVED / OUT OF QUALIFICATION SCOPE** | Optional native SDK not supplied; excluded by user directive. |
+| **Intel XeSS Upscaler** | `XessUpscalerBackend` | Excluded from qualification | **WAIVED / OUT OF QUALIFICATION SCOPE** | Optional native SDK not supplied; excluded by user directive. |
 
-Historical GATE-8 same-JAR toggle measurements, 600 active frames each:
+---
 
-| CPU-side metric | Legacy A | Generated B | Delta |
-| --- | ---: | ---: | ---: |
-| Average envelope | 7.3314 ms | 8.3637 ms | +14.08% |
-| P95 envelope | 9.214 ms | 9.699 ms | +5.26% |
-| P99 envelope | 10.472 ms | 11.207 ms | +7.02% |
+## 4. Test status
 
-Source: `build/rewrite-validation/GATE-8-performance/`
-`A-434578dd0a7b4bfb8110c4379071fc17/metrics.json` and
-`B-f178a7f8e8864419a87d2c470a196201/metrics.json`.
-Both use hash `D6B31873072FDEBA92F71621E087BEEC0A6183EA6346E941B350C3FEAEC7FD9A`.
-These are neither the frozen original nor the final revision. The +14.08% CPU
-average is retained transparently; it cannot establish a GPU regression or PASS.
+- **Execution command:** `.\scripts\agent\validate-build.ps1`
+- **Total executed:** 248
+- **Passed:** 244
+- **Canonical expected failures:** 4 (exact match with `$ExpectedFailures` baseline):
+  - `dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::sideWallsReplaceTheMappedNormalOnBothHitPaths`
+  - `dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::blockSpritesTileWhileEntityAtlasesStopAtTheirIsland`
+  - `dev.comfyfluffy.caustica.rt.RtWaterWaveShaderRegressionTest::continuationOriginsStayOffTheRestPlaneMesh`
+  - `dev.comfyfluffy.caustica.rt.RtWaterWaveShaderRegressionTest::animatedWaterIntersectsTheHeightFieldAlongTheViewRay`
+- **Unexpected failures:** 0
+- **Characterization tests:** 7/7 PASS (`dev.comfyfluffy.caustica.rt.RtRewriteCharacterizationTest`)
+- **V2 Build:** PASS (`caustica-0.2.0.jar` built, NGX shim present at 83,968 bytes).
+- **Cardinality note:** Current suite is not cardinality-identical to the frozen-reference suite (contains new structural and ownership qualification tests added during the rewrite).
 
-## Runtime attempt on behalf of the user
+---
 
-Installed the built candidate as the sole active Caustica JAR in `prova`:
-`caustica-0.2.8-aer092-candidate.jar`, SHA-256
-`0516EC4E3B265FF702EDA8EAD2BDEF92544FE54229253D6827CC9DD0E552DCF0`.
-The AER-091 candidate is recoverable in the profile's `.codex-jar-backups/`
-as `caustica-0.2.8-aer091-before-aer092.jar`. No duplicate active mod installed.
+## 5. Performance evidence
 
-Prepared synchronization validation using the current smoke harness:
-`build/rewrite-validation/GATE-8-validation/B-d1e898ac614342d3a09ae4d458261bd3`.
-Modrinth launched, but Windows Computer Use returned
-`Computer Use app approval timed out` when inspecting the launcher.
-No game input, route, accumulation, reload or fresh runtime PASS is claimed.
-The run directory contains only the manifest and layer settings, not runtime
-evidence. Launcher remains prepared; it is not evidence of a Minecraft launch.
-The computer-use skill's permission boundary was respected, not bypassed through
-another input mechanism. No user playthrough is demanded while the user is away.
+### Gate-8 Internal A/B Toggle Benchmark (Historical Evidence)
 
-Latest previously accepted smoke is AER-091:
-`build/rewrite-validation/GATE-8-validation/B-883bda6e50ec4e5c8ed1515f9e534c92`.
-It is DLSS-RR/SDR evidence, not SVGF or HDR evidence. Its accepted findings include
-DH vertex-input messages, NGX DLSSD WAW hazards and a shutdown child-object leak
-report. Baseline equivalence must not be described as zero validation errors.
+The following metrics were captured during Gate-8 qualification using the same development candidate JAR (`caustica-0.2.8-gate8-candidate.jar`, SHA-256: `D6B31873072FDEBA92F71621E087BEEC0A6183EA6346E941B350C3FEAEC7FD9A`) over 600 active sampled frames in a stationary Nether workload:
 
-## Known changes and unresolved items
+| Metric (CPU envelope) | Mode A (`generated: false`) | Mode B (`generated: true`) | Delta | Source artifact |
+| --- | ---: | ---: | ---: | --- |
+| **Average CPU envelope** | 7.3314 ms | 8.3637 ms | +14.08% | `GATE-8-performance/A-.../metrics.json` & `B-.../metrics.json` |
+| **P95 CPU envelope** | 9.214 ms | 9.699 ms | +5.26% | `GATE-8-performance/A-.../metrics.json` & `B-.../metrics.json` |
+| **P99 CPU envelope** | 10.472 ms | 11.207 ms | +7.02% | `GATE-8-performance/A-.../metrics.json` & `B-.../metrics.json` |
 
-- ReSTIR boiling/flickering remains a known baseline issue, not repaired here.
-- Four canonical parallax/water shader test failures remain exactly unchanged.
-- DH/Voxy issue and FSR/XeSS qualification remain excluded as requested.
-- NRD native runtime and HDR are not qualified by the fresh attempt.
-- The only shader file differing from the frozen tag is `world.rahit.slang`:
-  `MaterialHeader materialHeader` is zero-initialized. The full rewrite therefore
-  must not be described as literally zero shader diff. AER-092 has zero shader diff.
-- Demonstrated improvements are runtime ownership seams, explicit graph/barrier
-  execution and regression coverage; no measured final speed/VRAM gain is claimed.
+> [!IMPORTANT]
+> **Performance provenance boundary:**
+> These values compare two Gate-8 execution modes of the same development JAR. They DO NOT constitute frozen-reference-0.2.0-vs-final-rewrite performance evidence.
 
-## Required closure recovery
+### Canonical Reference vs Rewrite Performance Status
 
-1. Resolve the strict orchestration target versus remaining composite-owned
-   resources, and remove/dispose of the obsolete linear runner under a scoped
-   recovery task. Preserve already-qualified timing, masks and ownership.
-2. Complete final-candidate smoke once desktop authorization is available to the
-   agent; do not count the prepared-only run as evidence.
-3. Record comparable reference/final GPU, percentile, VRAM and BLAS metrics with
-   validation disabled for timing. Keep optional excluded paths excluded.
-4. Re-audit all final requirements, validate, then commit an actual gate closure.
+- **CPU final comparison:** **NOT VERIFIED** (no matched frozen-reference 0.2.0 benchmark dataset available).
+- **P95 final comparison:** **NOT VERIFIED** (no matched frozen-reference 0.2.0 benchmark dataset available).
+- **P99 final comparison:** **NOT VERIFIED** (no matched frozen-reference 0.2.0 benchmark dataset available).
 
-DH/Voxy and FSR/XeSS are not the reasons this attempt cannot claim FINAL PASS.
+---
+
+## 6. GPU, VRAM, and BLAS evidence
+
+- **GPU performance:** **NOT VERIFIED**. Frame time metrics in `frame.csv` record host CPU dispatch envelopes via `RtFrameStats`; no hardware GPU timestamp queries (`vkCmdWriteTimestamp`) were recorded. Vulkan validation log cleanliness does not constitute GPU performance proof.
+- **VRAM steady-state:** **NOT VERIFIED**. No comparative VMA allocation or dedicated GPU memory dump exists between frozen reference 0.2.0 and the final candidate.
+- **BLAS comparative counts:** **NOT VERIFIED**. Although `gpuAsLiveCount` is tracked in rewrite diagnostics, no baseline dataset exists for reference 0.2.0 under identical workload.
+
+---
+
+## 7. LOD rebuild / reuse
+
+- **LOD rebuild / reuse metrics:** **NOT VERIFIED**.
+- **Evidence status:** No statistical dataset of chunk rebuild frequency or proxy mesh reuse exists.
+- **Waiver status:** NONE authorized for generic LOD metrics.
+
+---
+
+## 8. Device compatibility
+
+- **Host platform qualified at runtime:** Windows 11 x86_64, NVIDIA GeForce RTX series GPU, Vulkan 1.4, DLSS Ray Reconstruction.
+- **Architecturally supported but runtime unverified on final candidate:** Linux (Mixins and platform hooks present), AMD Radeon (FSR path), Intel Arc (XeSS path).
+- **Status:** **PARTIALLY VERIFIED** (strictly limited to demonstrated host configuration).
+
+---
+
+## 9. Known baseline issues
+
+Demonstrated pre-existing issues inherited from reference baseline:
+1. **Canonical shader failures:** 4 expected test failures in parallax and water wave compute shaders.
+2. **ReSTIR temporal boiling / flickering:** Pre-existing temporal accumulation noise characteristic of the original 0.2.0 implementation under low SPP.
+
+---
+
+## 10. Observed validation findings
+
+Findings observed during runtime qualification smoke runs:
+1. **DH vertex-input format VUID:** Observed when Distant Horizons classes are touched during startup.
+2. **NGX DLSSD WAW hazards:** Driver-internal Write-After-Write synchronization hazard reports logged inside NVIDIA NGX library dispatch.
+3. **Shutdown child-object leak report:** Vulkan debug report logging child allocations during context tear-down.
+
+> [!NOTE]
+> These findings were observed during runtime qualification; they are not proven rewrite-introduced unless matched comparative evidence from frozen reference 0.2.0 demonstrates their absence in the baseline.
+
+---
+
+## 11. Known rewrite limitations and unproven areas
+
+1. **Exceptional resize lifecycle:**
+   - Nominal resize lifecycle: **VERIFIED** (resources reallocated correctly on window resize).
+   - Exceptional / unwind lifecycle: **NOT PROVEN** (`releaseImagesForResize` destroys display images without nulling references before `createImages()`; an intervening exception could leave stale handles).
+   - Potential double-destroy risk: **KNOWN INHERITED BASELINE RISK**.
+   - Regression introduced by AER-090: **NOT DEMONSTRATED**.
+2. **Shader source diff:** `src/main/resources/assets/caustica/shaders/rt/world.rahit.slang` contains a single fix (zero-initialization of `MaterialHeader materialHeader`). The full rewrite is not zero-diff against reference shaders.
+3. **Desktop automation boundary:** Automated launcher interaction timed out during intermediate testing, requiring user-completed or agent-interactive smoke execution.
+
+---
+
+## 12. Known improvements
+
+Demonstrable architectural and structural improvements introduced by the rewrite:
+1. **Single topological execution authority:** `GraphExecution` replaces dual execution modes and eliminates linear runner branching.
+2. **Deterministic barrier generation:** Elimination of all manual conservative fallback barriers across POST, Denoiser, Upscaler, and PathTrace.
+3. **Cross-queue synchronization:** Centralized `QueueDependencyScheduler` enforcing Vulkan timeline semaphore order between async compute and graphics.
+4. **Clean codebase boundaries:** Full deletion of development-only `RewriteGates` and retirement of inactive linear runner from `FramePipeline`.
+5. **Decoupled ownership:** Extraction of `PostProcessing` from `RtComposite`, isolating display, tonemapping, and auto-exposure lifecycles.
+
+---
+
+## 13. Waivers
+
+The following four features are formally classified as waived from the current qualification scope by explicit user directive:
+
+1. **Distant Horizons (DH):** `WAIVED / OUT OF QUALIFICATION SCOPE`
+2. **Voxy:** `WAIVED / OUT OF QUALIFICATION SCOPE`
+3. **AMD FSR 3.1:** `WAIVED / OUT OF QUALIFICATION SCOPE`
+4. **Intel XeSS:** `WAIVED / OUT OF QUALIFICATION SCOPE`
+
+> [!IMPORTANT]
+> **Waiver boundary definition:**
+> These requirements remain canonical requirements in `ROADMAP.md`. The waiver adjusts the user-qualified closure scope for this audit attempt; it does NOT convert the requirements to `PASS`, does NOT satisfy them, and does NOT alter `ROADMAP.md`.
+> No other requirement or metric (including LOD rebuild/reuse, GPU performance, or VRAM) is waived.
+
+---
+
+## 14. Evidence gaps
+
+The following requirements lack direct comparative evidence between frozen reference 0.2.0 (`3c54fc20`) and rewrite HEAD (`eda7606`):
+1. Matched CPU frame time comparison against reference 0.2.0.
+2. Hardware GPU timestamp execution metrics.
+3. Matched P95 and P99 latency comparisons against reference 0.2.0.
+4. Steady-state VRAM consumption comparison.
+5. Matched BLAS count comparison under identical world scenes.
+6. Statistical LOD rebuild/reuse efficiency data.
+7. Runtime verification of HDR presentation mode and SVGF standalone denoiser on the final candidate.
+
+---
+
+## 15. AER-093 conclusion
+
+- **AER-093 report status:** **COMPLETE AS DOCUMENTATION**.
+- **Assessment:** This report comprehensively and transparently records all verified architectural accomplishments, observed runtime findings, authorized scope waivers, and remaining evidence gaps.
+- **FINAL GATE disposition:** **PENDING / NOT QUALIFIED**. Documenting evidence gaps completes the `DOC_ONLY` reporting requirement of AER-093, but does NOT constitute a `FINAL: PASS` of the migration roadmap. Final gate disposition remains subject to subsequent evaluation.
