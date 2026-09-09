@@ -48,31 +48,10 @@ class PathTraceBarrierPlanTest {
                 && use.mode() == BarrierSynthesis.Mode.WRITE));
     }
 
-    @Test void flagDefaultsOffAndRequiresGraph() {
-        String graph = dev.comfyfluffy.caustica.rewrite.RewriteGates.RENDER_GRAPH_V2_KEY;
-        String flag = dev.comfyfluffy.caustica.rewrite.RewriteGates.PATH_TRACE_BARRIERS_V2_KEY;
-        String oldGraph = System.getProperty(graph), oldFlag = System.getProperty(flag);
-        try {
-            System.clearProperty(graph);
-            System.clearProperty(flag);
-            assertFalse(dev.comfyfluffy.caustica.rewrite.RewriteGates.pathTraceBarriersV2());
-            System.setProperty(graph, "true");
-            System.setProperty(flag, "true");
-            assertTrue(dev.comfyfluffy.caustica.rewrite.RewriteGates.pathTraceBarriersV2());
-            System.setProperty(graph, "false");
-            assertFalse(dev.comfyfluffy.caustica.rewrite.RewriteGates.pathTraceBarriersV2());
-        } finally {
-            restore(graph, oldGraph);
-            restore(flag, oldFlag);
-        }
-    }
 
     @Test void generatedScopeMatchesLegacyBarrier() {
         assertEquals(PostImageBarriers.STAGES, PathTraceBarriers.STAGES);
         assertEquals(PostImageBarriers.ACCESS, PathTraceBarriers.ACCESS);
     }
 
-    private static void restore(String key, String value) {
-        if (value == null) System.clearProperty(key); else System.setProperty(key, value);
-    }
 }

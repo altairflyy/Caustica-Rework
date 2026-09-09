@@ -31,20 +31,4 @@ class UpscalerBarrierPlanTest {
         assertEquals(uses.size(), uses.stream().map(BarrierSynthesis.Use::resource).distinct().count());
     }
 
-    @Test void flagDefaultsOffAndRequiresGraph() {
-        String graph = "engine.renderGraphV2", flag = "engine.upscalerBarriersV2";
-        String oldGraph = System.getProperty(graph), oldFlag = System.getProperty(flag);
-        try {
-            System.clearProperty(flag);
-            System.setProperty(graph, "true");
-            assertFalse(dev.comfyfluffy.caustica.rewrite.RewriteGates.upscalerBarriersV2());
-            System.setProperty(flag, "true");
-            assertTrue(dev.comfyfluffy.caustica.rewrite.RewriteGates.upscalerBarriersV2());
-            System.setProperty(graph, "false");
-            assertFalse(dev.comfyfluffy.caustica.rewrite.RewriteGates.upscalerBarriersV2());
-        } finally {
-            if (oldGraph == null) System.clearProperty(graph); else System.setProperty(graph, oldGraph);
-            if (oldFlag == null) System.clearProperty(flag); else System.setProperty(flag, oldFlag);
-        }
-    }
 }

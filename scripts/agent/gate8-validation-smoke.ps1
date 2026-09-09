@@ -87,7 +87,7 @@ $validationLog = (Join-Path $run 'validation.log').Replace('\','/')
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $run 'manifest.json')
 $previous = @{}
 $values = @{
-    JAVA_TOOL_OPTIONS = "$env:JAVA_TOOL_OPTIONS -Dengine.renderGraphV2=true -Dengine.postBarriersV2=true -Dengine.denoiserBarriersV2=true -Dengine.upscalerBarriersV2=true -Dengine.pathTraceBarriersV2=true -Dcaustica.rt.dlssRr=true -Dcaustica.rt.denoiser=true -Dcaustica.rt.fsr=false -Dcaustica.rt.xess=false -Dcaustica.rt.nrd=false -Dcaustica.rt.fg=false"
+    JAVA_TOOL_OPTIONS = "$env:JAVA_TOOL_OPTIONS -Dcaustica.rt.dlssRr=true -Dcaustica.rt.denoiser=true -Dcaustica.rt.fsr=false -Dcaustica.rt.xess=false -Dcaustica.rt.nrd=false -Dcaustica.rt.fg=false"
     VK_INSTANCE_LAYERS = 'VK_LAYER_KHRONOS_validation'
     VK_LAYER_PATH = (Join-Path $VulkanSdk 'Bin')
     VK_LAYER_SETTINGS_PATH = $run

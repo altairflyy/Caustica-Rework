@@ -9,24 +9,6 @@ import static dev.comfyfluffy.caustica.rt.graph.BarrierSynthesis.Layout.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PostBarrierPlanTest {
-    @Test void generatedBarriersRequireBothFlagsAndDefaultOff() {
-        String graphKey = dev.comfyfluffy.caustica.rewrite.RewriteGates.RENDER_GRAPH_V2_KEY;
-        String postKey = dev.comfyfluffy.caustica.rewrite.RewriteGates.POST_BARRIERS_V2_KEY;
-        String oldGraph = System.getProperty(graphKey), oldPost = System.getProperty(postKey);
-        try {
-            System.clearProperty(graphKey);
-            System.clearProperty(postKey);
-            assertFalse(dev.comfyfluffy.caustica.rewrite.RewriteGates.postBarriersV2());
-            for (boolean graph : List.of(false, true)) for (boolean post : List.of(false, true)) {
-                System.setProperty(graphKey, Boolean.toString(graph));
-                System.setProperty(postKey, Boolean.toString(post));
-                assertEquals(graph && post, dev.comfyfluffy.caustica.rewrite.RewriteGates.postBarriersV2());
-            }
-        } finally {
-            if (oldGraph == null) System.clearProperty(graphKey); else System.setProperty(graphKey, oldGraph);
-            if (oldPost == null) System.clearProperty(postKey); else System.setProperty(postKey, oldPost);
-        }
-    }
     @Test void allFourModesMatchLegacyBarrierPositionsAndCounts() {
         for (boolean auto : List.of(false, true)) for (boolean hdr : List.of(false, true)) {
             PostBarrierPlan plan = PostBarrierPlan.of(auto, hdr);

@@ -55,29 +55,10 @@ class DenoiserBarrierPlanTest {
         assertTrue(plan.before(DenoiserBarrierPlan.NRD_EXPORT).required());
     }
 
-    @Test void denoiserFlagRequiresGraphAndDefaultsOff() {
-        String graph = dev.comfyfluffy.caustica.rewrite.RewriteGates.RENDER_GRAPH_V2_KEY;
-        String denoiser = dev.comfyfluffy.caustica.rewrite.RewriteGates.DENOISER_BARRIERS_V2_KEY;
-        String oldGraph = System.getProperty(graph), oldDenoiser = System.getProperty(denoiser);
-        try {
-            System.clearProperty(graph); System.clearProperty(denoiser);
-            assertFalse(dev.comfyfluffy.caustica.rewrite.RewriteGates.denoiserBarriersV2());
-            for (boolean g : List.of(false, true)) for (boolean d : List.of(false, true)) {
-                System.setProperty(graph, Boolean.toString(g));
-                System.setProperty(denoiser, Boolean.toString(d));
-                assertEquals(g && d, dev.comfyfluffy.caustica.rewrite.RewriteGates.denoiserBarriersV2());
-            }
-        } finally {
-            restore(graph, oldGraph); restore(denoiser, oldDenoiser);
-        }
-    }
 
     @Test void generatedScopeMatchesLegacyBarrier() {
         assertEquals(PostImageBarriers.STAGES, DenoiserBarriers.STAGES);
         assertEquals(PostImageBarriers.ACCESS, DenoiserBarriers.ACCESS);
     }
 
-    private static void restore(String key, String value) {
-        if (value == null) System.clearProperty(key); else System.setProperty(key, value);
-    }
 }

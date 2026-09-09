@@ -7,6 +7,9 @@ param(
     [string]$Launcher = "$env:LOCALAPPDATA\Modrinth App\Modrinth App.exe"
 )
 $ErrorActionPreference = 'Stop'
+if ($Action -eq 'Start') {
+    throw 'Historical A/B harness retired by AER-092: the legacy branch no longer exists. Use gate8-validation-smoke.ps1 for current runtime validation; use a historical checkout for historical A/B.'
+}
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
 function Assert-Stopped {

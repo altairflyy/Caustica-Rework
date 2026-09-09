@@ -140,9 +140,9 @@ tasks:
   AER-091:
     state: DONE
   AER-092:
-    state: READY
+    state: DONE
   AER-093:
-    state: PENDING
+    state: READY
 
 gates:
   GATE-0: PASS

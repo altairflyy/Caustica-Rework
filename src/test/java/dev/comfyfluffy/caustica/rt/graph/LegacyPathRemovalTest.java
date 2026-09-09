@@ -12,10 +12,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 final class LegacyPathRemovalTest {
     @Test
     void productionNoLongerSelectsLegacyRewriteBranches() throws Exception {
+        assertFalse(Files.exists(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rewrite/RewriteGates.java")));
         try (var sources = Files.walk(Path.of("src/main/java"))) {
             long gateCallers = sources.filter(path -> path.toString().endsWith(".java"))
-                    .filter(path -> !path.endsWith(Path.of(
-                            "dev/comfyfluffy/caustica/rewrite/RewriteGates.java")))
                     .map(LegacyPathRemovalTest::read)
                     .filter(source -> source.contains("RewriteGates."))
                     .count();
