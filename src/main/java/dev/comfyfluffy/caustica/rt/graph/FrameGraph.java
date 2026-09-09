@@ -9,8 +9,8 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Non-executing graph description of the current linear frame pipeline.
- * GPU execution and resource ownership remain entirely in the legacy pipeline.
+ * Validated graph description whose topological order drives {@link GraphExecution}.
+ * Pass callbacks retain their established resource owners; this graph owns no GPU resources.
  */
 public final class FrameGraph {
     private final List<GraphPass> passes;

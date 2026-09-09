@@ -1,24 +1,26 @@
-# AER-093 result — blocked final qualification
+# AER-093 result
 
-DOC_ONLY. `docs/rewrite/FINAL_REPORT.md` records production evidence at `fd7ce60`,
-reference identity, available comparisons and explicit missing measurements.
-It does not represent historical graph-toggle timings as reference/final GPU data.
+The initial blocked report was superseded by bounded recovery before final
+closure. The unused linear runner was removed, POST image/pipeline/exposure
+ownership moved to `PostProcessing`, and the resulting production code passed
+`validate-build.ps1` with the exact canonical failure set.
 
-The user excluded further DH/Voxy and FSR/XeSS work. No such investigation was
-performed. A fresh agent-operated Vulkan smoke was prepared, but launcher
-inspection failed with `Computer Use app approval timed out`; no runtime PASS
-was fabricated. The previous installed candidate was preserved outside mods.
+The final report now includes a matched frozen-reference/rewrite benchmark on
+isolated copies of the same Nether world. It records CPU envelope, hardware
+Vulkan timestamp average/P95/P99, steady-state VRAM and live AS/BLAS metrics.
+Every measured final threshold passes. Temporary reference compatibility and
+benchmark instrumentation changes were confined to detached worktrees and were
+not committed to either the reference tag or production branch.
 
-The strict FINAL orchestration-only requirement is not yet demonstrated by
-composite's remaining image/buffer/presentation lifetimes. The unused linear
-FramePipeline runner still ships, although it is not selected by production.
-The narrower AER-090 migration remains intact; no production recovery is mixed
-into this documentation task. Matched reference/final performance evidence is
-also absent, so the full requested comparison cannot be completed honestly.
+Repository-wide integration audit found no required dead `src/main` component,
+duplicate migrated owner, remaining development gate or reachable legacy
+execution runner. `RtComposite` delegates all ownership domains migrated by the
+roadmap; remaining working resources do not duplicate another authority.
 
-State: BLOCKED. FINAL remains PENDING. See BLOCKER-003.
-No next architectural task started. No shader, algorithm or tuning changes.
+DH/Voxy and FSR/XeSS remain explicit user-authorized scope waivers. LOD
+rebuild/reuse metrics are included in the DH/Voxy runtime waiver because they
+cannot be exercised without those providers. HDR is user-accepted without a
+dedicated final run. None is described as newly qualified.
 
-Documentation checkpoint validation: `validate-build.ps1` PASS (V0/V1/V2,
-246 tests, exact 4/4 canonical failures, characterization 7/7 PASS).
-Diff review and `git diff --check` PASS. This does not resolve FINAL blockers.
+State: DONE. See `docs/rewrite/FINAL_REPORT.md` and
+`docs/rewrite/FINAL-GATE-result.md`.

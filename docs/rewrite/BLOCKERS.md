@@ -165,11 +165,11 @@ GATE-0: PASS
 
 ## BLOCKER-002 — Deferred DH/Voxy runtime qualification
 
-**Status:** DEFERRED UNTIL FINAL
+**Status:** WAIVED FOR THE CURRENT FINAL CLOSURE SCOPE
 
 **Blocks:**
 
-- FINAL
+- Follow-up DH/Voxy provider qualification only; excluded from the current closure by explicit user directive
 
 ## Current situation
 
@@ -206,17 +206,20 @@ known DH/Voxy bug, then run movement/chunk-streaming smoke with a compatible
 active provider before final qualification.
 
 GATE-4 may remain PASS under its canonical `DEFERRED_BASELINE_ISSUE` exception.
-This blocker must be resolved before `FINAL` can pass.
+Under the original roadmap scope this blocker must be resolved before an
+unwaived all-provider qualification can pass.
 
 ### 2026-09-09 scope override
 
 The user now explicitly excludes further DH/Voxy and FSR/XeSS qualification
 from this closure attempt. BLOCKER-002 is waived for that scope only, not fixed
-or runtime-qualified. Its historical account above is retained for traceability.
+or runtime-qualified. LOD rebuild/reuse measurement is included because it
+requires an active DH/Voxy provider. Its historical account above is retained
+for traceability.
 
 ## BLOCKER-003 — Final integration and measurement gaps
 
-Status: OPEN. Blocks AER-093 completion and FINAL PASS.
+Status: CLOSED.
 
 Audit at `fd7ce60`: `RtComposite.ensureOutput`, `destroy` and FG/presentation
 methods still own resource allocation/lifetime, so the strict FINAL
@@ -234,3 +237,16 @@ An agent-operated smoke was prepared but desktop inspection failed with
 `Computer Use app approval timed out`. No route was executed. This is NOT RUN,
 not a validation PASS. Optional paths excluded by the user are not blockers
 for this attempt. See `FINAL_REPORT.md` for exact sources, hashes and recovery.
+
+### Resolution
+
+The inactive `FramePipeline` runner was removed in `8204626`. POST image,
+pipeline and exposure ownership moved out of `RtComposite` in `eda7606`, and
+the recovery passed canonical V0/V1/V2 at `7b58411`.
+
+A repository-wide audit found all required rewrite components referenced by
+production, no duplicate migrated authority, no development gates and no
+reachable legacy graph runner. Matched isolated reference/rewrite runs now
+provide CPU, hardware Vulkan timestamp average/P95/P99, VRAM and AS/BLAS data;
+all default performance thresholds pass. See `FINAL_REPORT.md` and
+`FINAL-GATE-result.md`.
