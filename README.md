@@ -1,12 +1,12 @@
-# Caustica Rewrite
+# Caustica Rework
 
-**Caustica Rewrite** is a heavily reworked direct fork and architectural overhaul of [Caustica](https://github.com/ComfyFluffy/Caustica), an experimental hardware ray-traced renderer for Minecraft 26.2's Vulkan backend. It brings native hardware path tracing, NVIDIA DLSS Ray Reconstruction, native SVGF denoising, and HDR presentation to Minecraft while preserving the vanilla UI and gameplay intact.
+**Caustica Rework** is a heavily reworked direct fork and architectural overhaul of [Caustica](https://github.com/ComfyFluffy/Caustica), an experimental hardware ray-traced renderer for Minecraft 26.2's Vulkan backend. It brings native hardware path tracing, NVIDIA DLSS Ray Reconstruction, native SVGF denoising, and HDR presentation to Minecraft while preserving the vanilla UI and gameplay intact.
 
 This repository is published as a direct GitHub fork of the original [ComfyFluffy/Caustica](https://github.com/ComfyFluffy/Caustica) repository, with development initially based upon the [xysgottaken2/Caustica](https://github.com/xysgottaken2/Caustica) development fork before systematically diverging into a redesigned, decoupled architecture.
 
 The rewrite was undertaken to replace monolithic GPU resource ownership with strict architectural boundaries, explicit frame graphs, robust device quiescence on level transitions and shutdown, and a qualified real-time path tracing pipeline.
 
-![Caustica Rewrite](docs/gallery/causticafork.png)
+![Caustica Rework](docs/gallery/causticafork.png)
 
 ## Links
 
@@ -19,7 +19,7 @@ The rewrite was undertaken to replace monolithic GPU resource ownership with str
 
 ## What changed?
 
-Compared to earlier monolithic iterations of the renderer, Caustica Rewrite introduces substantial architectural, stability, and rendering improvements:
+Compared to earlier monolithic iterations of the renderer, Caustica Rework introduces substantial architectural, stability, and rendering improvements:
 
 - **Orchestration vs Ownership (`RtComposite`)**: `RtComposite` has been reduced from a universal GPU resource owner to a lightweight pass orchestrator and delegation coordinator.
 - **Dedicated Ownership Domains**: Dedicated, isolated lifecycle boundaries were established for `WorldTraceResources`, `TraceFrameResources`, `FrameGenerationResources`, and `PostProcessing`.
