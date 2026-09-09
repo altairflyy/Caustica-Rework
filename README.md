@@ -9,8 +9,21 @@ changes while the renderer is being built.
 
 ![Fork](docs/gallery/causticafork.png)
 
+## About This Fork
+
+This repository is an architectural rewrite fork of [Caustica](https://github.com/xysgottaken2/Caustica) (originally created by ComfyFluffy and contributors, licensed under `LGPL-3.0-or-later`).
+
+The primary focus of this rewrite fork is to introduce a robust, modular rendering architecture for Minecraft 26.2's Vulkan backend:
+- **Modular Resource & Pass Architecture**: Decoupled ownership across `FramePipeline`, `RenderGraph`, `PostProcessing`, `WorldTraceResources`, and `TraceFrameResources`.
+- **Reliable Lifecycle & Teardown**: Strict device quiescence on level transitions and client teardown to prevent GPU crashes and resource leaks.
+- **Enhanced Ray-Tracing Pipeline**: Full Vulkan hardware path tracing, ReSTIR spatio-temporal resampling, SHaRC spatial hash radiance cache, native SVGF denoising, and DLSS Ray Reconstruction.
+- **Color & Presentation**: Native HDR10/PQ presentation on supported platforms alongside standard SDR.
+
+See the upstream project at <https://github.com/xysgottaken2/Caustica> and project license files for original authorship and licensing details.
+
 ## Links
 
+- [Upstream Repository](https://github.com/xysgottaken2/Caustica)
 - [Discord](https://discord.gg/SeWCjyKu2)
 - [Modrinth](https://modrinth.com/mod/caustica)
 - [CurseForge](https://www.curseforge.com/minecraft/mc-mods/caustica/preview)
@@ -20,6 +33,8 @@ changes while the renderer is being built.
 
 - Vulkan hardware path-traced world rendering
 - DLSS Ray Reconstruction support
+- Native SVGF denoiser
+- ReSTIR spatio-temporal resampling and SHaRC radiance caching
 - DLSS Frame Generation support (experimental)
 - HDR output
 - Dynamic entity rendering in the ray-traced scene
@@ -62,11 +77,14 @@ Caustica takes over the world renderer, so other mods that heavily modify world
 rendering, shader pipelines, post-processing, or the Vulkan backend may conflict.
 UI-only mods are more likely to work.
 
-## Status
+## Status & Qualification
 
-Caustica is not a finished renderer yet. Current work focuses on visual
-correctness, world coverage, stability, and making the SDR/HDR presentation
-paths behave consistently.
+Caustica is experimental software under active development. Current work focuses on visual correctness, world coverage, and runtime stability.
+
+### Runtime Target & Qualification Scope
+- **Qualified Core Pipeline**: Vulkan hardware ray tracing, DLSS Ray Reconstruction, native SVGF denoising, ReSTIR spatio-temporal resampling, SHaRC radiance cache, LabPBR 1.3 materials, and SDR/HDR presentation are qualified.
+- **Compatibility & Upscaling Waivers**: Integration code for Distant Horizons (DH), Voxy, AMD FSR 3, and Intel XeSS is present in the repository, but runtime qualification is covered under authorized waivers.
+- **Denoiser Scope**: NVIDIA Real-Time Denoisers (NRD) is experimental, quarantined, and **out of target / not required** for production. The production baseline uses NVIDIA DLSS-RR and the native SVGF denoiser.
 
 ## License
 
@@ -79,7 +97,9 @@ license terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## TODO List
 
-- [X] Nether/End sky, weather, volumetric fog/clouds
-- [x] NRD + FSR for non-NVIDIA GPUs (Windows only)
-- [X] LOD
-- [X] ReSTIR
+- [x] Nether/End sky, weather, volumetric fog/clouds
+- [x] Spatio-temporal ReSTIR & SHaRC radiance cache
+- [x] Modular architecture rewrite & device quiescence lifecycle
+- [x] Native SVGF denoiser pipeline
+- [ ] Non-NVIDIA upscaler qualification (FSR 3 / XeSS waivers)
+- [ ] Distant Horizons & Voxy compatibility qualification (waivers)
