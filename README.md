@@ -1,6 +1,18 @@
 # Caustica Rework
 
+[![Release](https://img.shields.io/badge/release-0.1.0-blue.svg)](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.0)
+[![License](https://img.shields.io/badge/license-LGPL--3.0--or--later-green.svg)](LICENSE.md)
+[![Minecraft](https://img.shields.io/badge/minecraft-26.2-brightgreen.svg)](https://minecraft.net/)
+[![Fabric](https://img.shields.io/badge/fabric-0.19.3+-orange.svg)](https://fabricmc.net/)
+[![Vulkan RT](https://img.shields.io/badge/vulkan-ray%20tracing-red.svg)](https://www.vulkan.org/)
+[![Downloads](https://img.shields.io/github/downloads/altairflyy/Caustica-Rework/total?color=blue)](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.0)
+
 **Caustica Rework** is a heavily reworked direct fork and architectural overhaul of [Caustica](https://github.com/ComfyFluffy/Caustica), an experimental hardware ray-traced renderer for Minecraft 26.2's Vulkan backend. It brings native hardware path tracing, NVIDIA DLSS Ray Reconstruction, native SVGF denoising, and HDR presentation to Minecraft while preserving the vanilla UI and gameplay intact.
+
+> ### [Download Caustica Rework 0.1.0](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.0)
+> Verified release artifact: `caustica-0.1.0.jar` &bull; [Direct JAR Download](https://github.com/altairflyy/Caustica-Rework/releases/download/rework-0.1.0/caustica-0.1.0.jar) &bull; [Installation Guide](#install)
+
+[Download](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.0) | [Install](#install) | [Requirements](#requirements) | [Building from Source](#building-from-source) | [Known Limitations](#known-limitations) | [Architecture](#architecture) | [Rewrite Documentation](#rewrite-documentation)
 
 This repository is published as a direct GitHub fork of the original [ComfyFluffy/Caustica](https://github.com/ComfyFluffy/Caustica) repository, with development initially based upon the [xysgottaken2/Caustica](https://github.com/xysgottaken2/Caustica) development fork before systematically diverging into a redesigned, decoupled architecture.
 
