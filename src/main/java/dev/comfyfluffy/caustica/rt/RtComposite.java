@@ -62,7 +62,6 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtFgSkyMaskPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNativeFrameGen;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNativeFrameGenPipeline;
-import dev.comfyfluffy.caustica.rt.pipeline.RtNrdCombinePipeline;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
@@ -272,7 +271,6 @@ public final class RtComposite {
 
     // Matches the viewZ cap the tracer writes for sky/miss pixels: everything beyond is passed
     // through the denoise chain raw (the sky never accumulates history).
-    private static final float NRD_DENOISING_RANGE = 500000.0f;
     // Celestial rotation axis (the pole the sun/moon arc about): perpendicular to the east-west arc,
     // tilted by SUN_NOON_SOUTH_TILT. Pushed so the sky shader can build the sun/moon square's tangent
     // frame (right = travel direction) and wheel the starfield. = normalize(noonDir x sunriseDir).
@@ -421,12 +419,11 @@ public final class RtComposite {
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
     private boolean renderSizeSvgfEnabled;
     // NRD/REBLUR: the denoiser's own input/output pair + the combined (decoded + summed) radiance
-    // the upscale stage consumes, plus the validation overlay target and the combine pipeline.
+    // the upscale stage consumes, plus the validation overlay target.
     private RtImage nrdDiffOut;
     private RtImage nrdSpecOut;
     private RtImage nrdCombined;
     private RtImage nrdValidation;
-    private RtNrdCombinePipeline nrdCombinePipeline;
     private boolean renderSizeNrdEnabled;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
@@ -961,15 +958,11 @@ public final class RtComposite {
             // Allocated unconditionally (cheap RGBA8) so toggling nrdValidation live needs no rebuild;
             // REBLUR only writes it when the validation flag is set.
             nrdValidation = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R8G8B8A8_UNORM, "nrd validation overlay " + renderW + "x" + renderH);
-            if (nrdCombinePipeline == null) {
-                nrdCombinePipeline = RtNrdCombinePipeline.create(ctx);
-            } else {
-                nrdCombinePipeline.invalidateBindings(); // same recycled-handle hazard as SVGF above
-            }
             // Re-modulation reads the same guides the tracer demodulated with (see nrd_combine.comp),
             // and the raw trace supplies the sky, which REBLUR does not denoise.
-            nrdCombinePipeline.setImages(nrdDiffOut.view, nrdSpecOut.view, nrdCombined.view,
-                    output.view, gAlbedo.view, gViewZ.view, gSpecAlbedo.view, gNormal.view);
+            nrdBackend.bindCombine(ctx, new ExperimentalNrdBackend.NrdFrameViews(
+                    nrdDiffOut.view, nrdSpecOut.view, nrdCombined.view,
+                    output.view, gAlbedo.view, gViewZ.view, gSpecAlbedo.view, gNormal.view));
         }
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
@@ -1549,7 +1542,7 @@ public final class RtComposite {
                     DenoiserBarriers.before(cmd, stack, nrdBarrierPlan,
                             DenoiserBarrierPlan.NRD_COMBINE);
                     try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrdCombine")) {
-                        nrdCombinePipeline.dispatch(cmd, renderW, renderH, NRD_DENOISING_RANGE);
+                        nrdBackend.combine(cmd, renderW, renderH);
                     }
                     DenoiserBarriers.before(cmd, stack, nrdBarrierPlan,
                             DenoiserBarrierPlan.NRD_EXPORT);
@@ -2048,10 +2041,6 @@ public final class RtComposite {
         // Tear down the NRD integration (wraps the Vulkan device via NRI) only after its images are
         // released below; destroyGuideImages runs after this in the teardown sequence.
         nrdBackend.destroy();
-        if (nrdCombinePipeline != null) {
-            nrdCombinePipeline.destroy();
-            nrdCombinePipeline = null;
-        }
         svgfBackend.destroy();
         if (fgSkyMaskPipeline != null) {
             fgSkyMaskPipeline.destroy();
