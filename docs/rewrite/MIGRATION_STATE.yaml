@@ -154,18 +154,19 @@ gates:
   GATE-6: PASS
   GATE-7: PASS
   GATE-8: PASS
-  FINAL: PENDING
+  FINAL: DONE
 
 last_verified_reference: reference/validated-caustica-0.2.0
 
 notes:
+  - 2026-09-09 FINAL DONE at production candidate 98ce86e555376a671fcbc753d551e8a9d55cbc7d. Architecture, GPU lifetime, safety, required runtime qualification, in-scope performance and integration completeness pass. NRD is explicitly OUT OF TARGET; complete end-to-end GPU frame timing is explicitly OUT OF SCOPE. Neither is a PASS or waiver. Authorized waivers remain exactly DH, Voxy, FSR, XeSS.
   - 2026-09-09 closure scope override from user excludes further DH/Voxy and FSR/XeSS qualification; these are waived for this attempt, not fixed or newly qualified.
-  - Final qualification requires remediation. The previous PASS disposition was withdrawn after a repository-wide consistency audit demonstrated remaining canonical architecture failures and incomplete qualification. Demonstrated canonical failures: RtComposite is not orchestration/delegation-only; GPU lifetime is not fully centralized; integration completeness delegation target is not satisfied. Additional qualification gaps remain, including complete GPU frame-time coverage and multiple non-waived functional runtime scenarios. Authorized waivers remain exactly: DH, Voxy, FSR, XeSS. See FINAL_REPORT.md and FINAL-GATE-result.md.
+  - Historical: the premature PASS was withdrawn after a consistency audit. REMEDIATION-04 through REMEDIATION-08 subsequently removed significant RtComposite GPU ownership and established centralized retirement plus pre-owner shutdown quiescence.
   - The validated reference is tag reference/validated-caustica-0.2.0 at commit 3c54fc201f93598246db62ebb1947dfb1e274e92.
   - DLSS-RR runtime initialization passes with the NGX shim rebuilt from source.
   - The external ngx.path override is not required.
   - ReSTIR temporal boiling/flickering is a known pre-refactor baseline issue.
-  - DH/Voxy runtime support has a known pre-existing unresolved bug; GATE-4 may classify only its provider smoke as DEFERRED_BASELINE_ISSUE, with diagnosis and qualification required before FINAL.
+  - DH/Voxy runtime support has a known pre-existing unresolved bug and remains explicitly waived for this FINAL closure.
   - The baseline Gradle run reported 123 tests: 114 PASS and 9 existing shader regression failures.
   - AER-004 characterization tests PASS: 7/7. The exact 9-test pre-refactor failure set is frozen as the accepted baseline.
   - GATE-0 PASS: AER-000 through AER-004 are complete and V0/V1/V2 are baseline-equivalent PASS.

@@ -219,7 +219,21 @@ Its historical account above is retained for traceability.
 
 ## BLOCKER-003 — Final integration and qualification gaps
 
-Status: OPEN. Blocks FINAL qualification.
+Status: CLOSED.
+
+### Final resolution
+
+REMEDIATION-04 through REMEDIATION-06 transferred world-trace, trace-frame, Frame Generation and
+presentation ownership out of `RtComposite`. REMEDIATION-08 established global device quiescence
+before GPU owner teardown while preserving normal exact-token and frame-tail retirement.
+
+Final runtime evidence qualifies water/glass, LabPBR, ReSTIR, SHaRC, SVGF, HDR and clean shutdown.
+The user explicitly classified NRD as `OUT OF TARGET / NOT REQUIRED` and complete end-to-end GPU
+frame timing as `OUT OF SCOPE / NOT REQUIRED`; neither is PASS or a waiver. The exact waiver set
+remains DH, Voxy, FSR and XeSS. All requirements remaining in the agreed FINAL target are satisfied
+at candidate `98ce86e555376a671fcbc753d551e8a9d55cbc7d`.
+
+### Historical audit state
 
 Audit at `fd7ce60`: `RtComposite.ensureOutput`, `destroy` and FG/presentation
 methods still own resource allocation/lifetime, so the strict FINAL
@@ -238,7 +252,7 @@ An agent-operated smoke was prepared but desktop inspection failed with
 not a validation PASS. Optional paths excluded by the user are not blockers
 for this attempt. See `FINAL_REPORT.md` for exact sources, hashes and recovery.
 
-### Current disposition
+### Superseded disposition before remediation
 
 The inactive `FramePipeline` runner was removed in `8204626` and POST image,
 pipeline and exposure ownership moved out of `RtComposite` in `eda7606`.
@@ -248,20 +262,20 @@ resources are still created, destroyed and recreated directly by
 `RtComposite`. Therefore the canonical orchestration/delegation-only and full
 GPU-lifetime-centralization targets are not satisfied.
 
-Demonstrated canonical failures:
+Historical demonstrated canonical failures, now resolved:
 
 - `RtComposite` is not orchestration/delegation-only;
 - GPU lifetime is not fully centralized;
 - the `RtComposite` delegation-only integration target is not satisfied.
 
-Qualification blockers:
+Historical qualification blocker, now removed from agreed scope by explicit user decision:
 
 - canonical complete GPU frame-time Average/P95/P99 coverage is blocked because
   the retained timestamp interval covers only the composite command buffer;
 - matched frozen-reference-vs-rewrite Vulkan validation is unavailable as
   qualification evidence, but is not a separate FINAL requirement row.
 
-Runtime not-tested areas:
+Historical runtime not-tested areas, subsequently qualified except NRD:
 
 - water/glass, LabPBR, ReSTIR runtime, full SHaRC qualification, direct SVGF
   dispatch qualification, HDR and NRD.

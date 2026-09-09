@@ -2,110 +2,61 @@
 
 ## Disposition
 
-Canonical FINAL disposition: `FAIL`.
-User-qualified FINAL disposition: `FAIL`.
+Canonical requirements remaining in the agreed target: `PASS`.
+FINAL state: `DONE`.
 
-DH/Voxy and FSR/XeSS remain the exact user-authorized waivers. HDR, NRD,
-SHaRC, SVGF direct dispatch, water/glass, LabPBR and ReSTIR runtime
-qualification remain NOT TESTED. This result does not relabel any untested or
-waived path as runtime qualified.
+- NRD: **OUT OF TARGET / NOT REQUIRED**, not PASS or waiver.
+- Complete end-to-end GPU frame-time Average/P95/P99: **OUT OF SCOPE / NOT REQUIRED**, not PASS or waiver.
+- Authorized waivers, exactly: **DH, Voxy, FSR, XeSS**.
 
-## Repository-wide integration audit
+## Canonical requirement audit
 
-| Requirement | Status | Evidence |
+| Exact FINAL requirement | Status | Evidence |
 | --- | --- | --- |
-| Required rewrite components are live | PASS | Every added architecture class under `src/main` has a production reference outside its declaration; the targeted integration suite passes. |
-| No duplicate migrated ownership | PASS | ReSTIR history, SVGF history, temporal state, SHaRC, LOD lifecycle, TLAS lifetime, deferred deletion, upscaler lifetime and POST each have one owner. Direct-owner searches find no parallel fields in `RtComposite`. |
-| Mandatory APIs are present | PASS | Gate result documents plus production/tests cover FrameContext, temporal coordination, neutral LOD, explicit pipeline, GPU/AS boundaries, backend contracts, scene assembly, environment modules and render graph. |
-| Development gates removed | PASS | No `RewriteGates` or `engine.*V2` reference exists in `src/main`. |
-| Legacy execution unreachable | PASS | `GraphExecution` is the sole cursor authority; `FramePipeline` exposes immutable callbacks only; barrier emitters have no legacy fallback. |
-| Composite target | FAIL | `RtComposite` still directly creates, destroys and recreates significant guide, trace, continuation, Frame Generation and presentation resources. The canonical target requires orchestration/delegation only. |
-| Owners are univocal | FAIL | Domain-specific migrated owners remain valid, but significant GPU create/destroy/recreate ownership is still split with `RtComposite`; deferred retirement centralization does not make all GPU ownership univocal. |
-| Report matches committed code | PASS | `FINAL_REPORT.md` was updated after POST recovery, runner removal, canonical validation and matched benchmark capture. |
+| Functional features are preserved where the reference supported them | **PASS / WAIVED** | All required targets are qualified; only DH/Voxy/FSR/XeSS are waived. NRD is explicitly out of target. |
+| `Vulkan resta backend` | **PASS** | Vulkan remains the sole rendering backend. |
+| `Iris non è dependency` | **PASS** | No Iris dependency exists. |
+| `DH/Voxy sono adapters` | **PASS** | Neutral adapter/provider boundaries remain. |
+| ``RtComposite` non è più il proprietario universale` | **PASS** | Significant GPU ownership is delegated. |
+| `GPU lifetime centralizzato` | **PASS** | Exact-token, frame-tail and shutdown-quiescence authorities cover their domains. |
+| `AS lifetime centralizzato` | **PASS** | `AccelerationStructureManager` is the authority. |
+| `temporal reset centralizzato` | **PASS** | `TemporalState` is the authority. |
+| `pipeline esplicita` | **PASS** | Explicit pass/pipeline contract is runtime-wired. |
+| `Render Graph deriva dalla pipeline verificata` | **PASS** | `FrameGraph` derives from `FramePipeline`; `GraphExecution` executes validated order. |
+| `nessun nuovo waitIdle hot path` | **PASS** | REMEDIATION-08 relocates the existing shutdown wait only. |
+| `nessun stale geometry cross-dimension` | **PASS** | World/dimension invalidation and qualified transition evidence remain intact. |
+| `nessuna UAF GPU nota` | **PASS** | Central retirement plus REMEDIATION-08 pre-owner quiescence closes identified lifetime gaps. |
+| `nessun device-lost riproducibile` | **PASS** | No reproducible device loss in the qualified candidate. |
+| `nessun LOD hole persistente` | **PASS / WAIVED SCOPE** | No persistent hole in qualified base terrain; DH/Voxy provider runtime is explicitly waived. |
+| `nessuna coarse/fine duplicated geometry pubblicata` | **PASS / WAIVED SCOPE** | Publication invariants pass; DH/Voxy provider runtime is explicitly waived. |
+| `nessun componente src/main introdotto dal rewrite e richiesto dall'architettura resta morto/non referenziato` | **PASS** | Every required component has a production consumer. |
+| `nessuna ownership migrata rimane duplicata nel legacy` | **PASS** | Repository-wide ownership audit found none. |
+| `nessuna API minima obbligatoria è mancante` | **PASS** | Required boundaries are implemented. |
+| `i dev gate rimasti hanno ancora due implementazioni reali oppure vengono rimossi in AER-092` | **PASS** | Obsolete gates were removed. |
+| `il percorso legacy rimosso in AER-091 non è ancora raggiungibile` | **PASS** | `GraphExecution` is sole execution authority. |
+| ``RtComposite` contiene soltanto orchestration/delega prevista dal target` | **PASS** | Direct significant GPU ownership is none. |
+| `GPU/AS/temporal/scene/pipeline/render-graph authority hanno un owner univoco` | **PASS** | Single-owner/dependency audit passes. |
+| `FINAL_REPORT.md descrive il codice realmente committato e validato` | **PASS** | Report targets candidate `98ce86e` with exact evidence boundaries. |
+| Performance thresholds for metrics remaining in scope | **PASS** | CPU dispatch, composite GPU duration and VRAM are within limits; full-frame timing is out of scope, not PASS. |
 
-The audit found no new shader math/layout change and no new hot-path `waitIdle`.
-The one shader delta from the frozen reference is the known `MaterialHeader`
-zero-initialization compiler-compatibility fix. GPU lifetime is not fully
-centralized: deferred retirement is centralized, but significant resource
-create/destroy/recreate ownership remains in `RtComposite`.
+## Runtime and validation
 
-## Targeted integration validation
+Required PASS: Overworld, Nether, End, entities, particles/weather, water/glass, LabPBR, ReSTIR, SHaRC, SVGF, DLSS-RR, HDR, SDR and clean shutdown. Remaining required runtime NOT TESTED: **NONE**.
 
-The ownership/integration suite includes composite/POST ownership, legacy-path
-removal, graph execution/validation, frame pipeline, temporal state, ReSTIR,
-SHaRC, SVGF resources, AS/deferred deletion, scene assembly and the seven
-rewrite characterization checks. It passes without failures.
+ReSTIR evidence: `lightCount=10596`, non-zero light buffer, `restirMode=1`, valid previous/current reservoirs and `restirPathOn=true`. LabPBR evidence: `spec=1906`, `normal=1899`, `labPbrEmission=19636`.
 
-## Matched performance qualification
+- Candidate: `98ce86e555376a671fcbc753d551e8a9d55cbc7d`.
+- Validation: 266 total, 262 passed, exact 4 canonical failures, 0 unexpected, characterization 7/7 and V2 PASS.
+- Closure diff: documentation/tracker only.
 
-Reference: `3c54fc201f93598246db62ebb1947dfb1e274e92` plus the minimal current-compiler
-`MaterialHeader` initialization. Rewrite: `7b58411`. Both used isolated copies
-of the same Nether world, position and settings at 2560x1440 with DLSS-RR/SDR,
-render distance 12 and the same disabled optional backends.
+## Performance and accounting
 
-| Metric | Reference | Rewrite | Delta | Limit | Result |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Average hardware GPU duration | 62.4092 ms | 61.8635 ms | -0.87% | +5% | PASS |
-| P95 hardware GPU duration | 64.6060 ms | 63.9419 ms | -1.03% | +7% | PASS |
-| P99 hardware GPU duration | 64.9217 ms | 64.3197 ms | -0.93% | +10% | PASS |
-| Average global VRAM | 3971.47 MiB | 4053.28 MiB | +2.06% | +10% | PASS |
-| Average CPU envelope | 8.8065 ms | 8.7924 ms | -0.16% | Informational | PASS |
-| P95 CPU envelope | 10.046 ms | 10.019 ms | -0.27% | Informational | PASS |
-| P99 CPU envelope | 11.415 ms | 11.166 ms | -2.18% | Informational | PASS |
+- Matched CPU dispatch: **PASS**.
+- Composite command-buffer GPU duration: **PASS**.
+- VRAM: **PASS**, +2.06% against +10%.
+- Complete end-to-end GPU frame timing: **OUT OF SCOPE / NOT REQUIRED**, not PASS.
+- Required FAIL/BLOCKED/NOT TESTED: **NONE**.
+- WAIVED: **DH, Voxy, FSR, XeSS**.
+- OUT OF TARGET: **NRD**.
 
-Hardware GPU values use the last 600 of 1088 symmetric Vulkan timestamp samples
-per variant around the composite command buffer. The resulting metric is
-composite command-buffer GPU duration, not complete frame GPU time. It includes
-ray/path tracing, ReSTIR work recorded in the composite, denoiser, upscaler and
-composite post work. UI/HUD, presentation/blit, other command buffers, separate
-async/build/SDK submissions and Frame Generation are not demonstrated inside
-the interval. Temporary probes were removed after capture. Live AS/BLAS deltas over 300 steady frames are bounded: median AS
-`+0.45%`, P95 AS `+0.53%`, median BLAS bytes `+0.07%`, P95 BLAS bytes `+0.15%`.
-
-**Composite GPU duration comparison: VERIFIED.**
-**Canonical complete GPU frame-time Average/P95/P99: BLOCKED.**
-
-## Functional and safety evidence
-
-- Tested: Overworld, Nether, End, entities, particles/weather, DLSS-RR and SDR.
-- Not tested for canonical qualification: water/glass, LabPBR, ReSTIR runtime,
-  SHaRC full qualification, SVGF directly proven dispatch, HDR and NRD.
-- Waived only: DH, Voxy, FSR and XeSS.
-- Canonical four-failure shader baseline and characterization remain exact.
-- No new device loss, known UAF, stale cross-dimension geometry or hot-path
-  `waitIdle` was introduced by final recovery.
-- The known ReSTIR boiling and DH/Voxy provider bug remain unchanged.
-
-## Validation
-
-- Targeted integration/ownership suite: PASS.
-- `validate-build.ps1`: PASS; V0 + V1 + V2 in one run.
-- V1: 248 tests, exact 4/4 canonical failures and characterization 7/7 PASS.
-- V2: Gradle build PASS; NGX shim present at 83,968 bytes.
-- `git diff --check`: PASS.
-- Gate-8 same-candidate A/B validation: supporting evidence only.
-- Matched frozen-reference-vs-rewrite validation: NOT AVAILABLE; this is not a
-  separate canonical FINAL requirement row.
-- Forbidden-change audit: no executable code, shader/math, ownership,
-  synchronization, tuning or `waitIdle` change in the gate-closure diff.
-
-## Final qualification status
-
-Demonstrated FAIL:
-
-- `RtComposite` orchestration-only;
-- GPU lifetime centralized;
-- `RtComposite` delegation-only integration target.
-
-Blocked:
-
-- complete canonical GPU frame-time Average/P95/P99 coverage.
-
-NOT TESTED:
-
-- water/glass, LabPBR, ReSTIR runtime, SHaRC full qualification, SVGF direct
-  dispatch qualification, HDR and NRD.
-
-WAIVED:
-
-- DH, Voxy, FSR, XeSS.
+**FINAL CLOSED.**
