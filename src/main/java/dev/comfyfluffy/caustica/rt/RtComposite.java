@@ -56,12 +56,8 @@ import dev.comfyfluffy.caustica.rt.environment.FogModule;
 import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.post.PostProcessing;
-import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
-import dev.comfyfluffy.caustica.rt.pipeline.RtFsrFrameGen;
-import dev.comfyfluffy.caustica.rt.pipeline.RtFgSkyMaskPipeline;
-import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiCompositePipeline;
-import dev.comfyfluffy.caustica.rt.pipeline.RtNativeFrameGen;
-import dev.comfyfluffy.caustica.rt.pipeline.RtNativeFrameGenPipeline;
+import dev.comfyfluffy.caustica.rt.framegen.FrameGenerationResources;
+import dev.comfyfluffy.caustica.rt.framegen.GeneratedFrameUiComposer;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
@@ -316,6 +312,25 @@ public final class RtComposite {
             new WorldTraceResources(WORLD_PUSH_BUFFER_SIZE, GUIDE_COUNT);
     private final TraceFrameResources traceFrameResources = new TraceFrameResources(PATH_RECORD_BYTES);
     private final PostProcessing postProcessing = new PostProcessing();
+    private final FrameGenerationResources frameGenerationResources = new FrameGenerationResources(
+            destruction -> RtContext.get().frameTailRetirement().retire(destruction));
+    private final GeneratedFrameUiComposer generatedFrameUiComposer = new GeneratedFrameUiComposer() {
+        @Override
+        public long uiSampler(RtContext ctx) {
+            return ensureUiSampler(ctx) ? hdrUiSampler : 0L;
+        }
+
+        @Override
+        public void composeHdrGenerated(VkCommandBuffer command, RtImage target, long overlayView,
+                                        int width, int height) {
+            ensureHdrUiResources();
+            if (hdrCompositePipeline != null) {
+                hdrCompositePipeline.setImages(target.view, overlayView, hdrUiSampler);
+                hdrCompositePipeline.dispatch(command, width, height,
+                        CausticaConfig.Rt.Hdr.paperWhiteNits());
+            }
+        }
+    };
     // ReSTIR DI/GI history is a strict two-buffer ping-pong: a dispatch reads only `previous` and writes
     // only `current`, so spatial neighbour reuse never races another raygen invocation. The pair exists
     // only while the player setting is ON; live toggles idle the device before destruction/allocation.
@@ -326,16 +341,6 @@ public final class RtComposite {
     // Set true after this frame's display dispatch wrote postProcessing.hdrImage() (HDR enabled + RT ran); gates the
     // HDR present blit so a frame where RT did not run falls back to the vanilla SDR present.
     private boolean hdrWrittenThisFrame;
-    // DLSS-FG "hudless" resource: a copy of the main render target before the combined UI overlay
-    // composites back on top. Lazily allocated (only meaningful once FG + the UI overlay redirect are both
-    // active), resized on demand.
-    private RtImage fgHudlessImage;
-    // Same idea as fgHudlessImage but for the HDR present path: a copy of postProcessing.hdrImage() taken in
-    // presentHdr right before its own combined-UI composite dispatch overwrites it in place (see
-    // captureFgHdrHudless). Already PQ-encoded (same as postProcessing.hdrImage()), so this is a plain image copy, not
-    // a format conversion — DLSS-FG requires a display-ready EOTF-encoded [0,1] signal (its programming
-    // guide explicitly disallows scRGB), and PQ is exactly that.
-    private RtImage fgHdrHudlessImage;
     // Step C.2: composites the combined UI overlay over postProcessing.hdrImage() at paper white, just before present.
     private RtHdrCompositePipeline hdrCompositePipeline;
     private long hdrUiSampler;
@@ -345,50 +350,6 @@ public final class RtComposite {
     // raw-copied (misdisplayed). Lazily created; the image is sized to the swapchain.
     private RtSdrPresentPipeline sdrPresentPipeline;
     private RtImage sdrPresentImage;
-    // DLSS Frame Generation: per-generated-frame interpolated output images (backbuffer size/format), and
-    // the jitter-free reprojection matrices derived from the MV view-projections each frame. In HDR mode
-    // these hold DLSSG's raw PQ-encoded output, which is blitted straight to the (PQ) swapchain — no decode
-    // needed since the swapchain itself is PQ-native.
-    private RtImage[] fgInterp = new RtImage[0];
-    private int fgInterpW = -1;
-    private int fgInterpH = -1;
-    private int fgInterpFormat = Integer.MIN_VALUE;
-    // SDR FG backbuffer copy: Minecraft's main target arrives in TRANSFER_SRC layout (MC's own
-    // blit barrier ran first in the encoder) with no contractually known format, but the FFX FG
-    // GENERATE reads its presentColor as GENERAL with the declared format taken literally — a
-    // mismatch on either axis is undefined reads (the flickering generated frames). Blitting into
-    // an image we own makes both the layout (GENERAL) and the format (RGBA8) certain.
-    private RtImage fgBackbufferCopy;
-    private int fgBackbufferCopyW = -1;
-    private int fgBackbufferCopyH = -1;
-    private boolean fgReset = true;
-    // Caustica native frame generation: the motion-vector interpolation pipeline plus the previous
-    // presented frame it interpolates from. fgPrevFrame holds last tick's final image (same
-    // format/size as fgBackbufferCopy / the HDR backbuffer); the current frame is copied into it
-    // after each interpolation dispatch so the next tick can blend. fgPrevFrameValid is false until
-    // the first successful capture (and after any resize), which makes that tick fall back to
-    // duplicating the real frame instead of blending against garbage.
-    private RtNativeFrameGenPipeline nativeFgPipeline;
-    private boolean nativeFgFailed;
-    // SDR UI re-composite for native FG's generated frames (HDR reuses hdrCompositePipeline).
-    private RtFgUiCompositePipeline fgUiCompositePipeline;
-    private boolean fgUiCompositeFailed;
-    // frameCounter of the last native-FG interpolation; a gap (> 2 composite frames) means the
-    // stored previous frame no longer neighbours the current one (menu/loading/toggle gap) and
-    // must be dropped before blending. -1 = never ran.
-    private long fgNativeLastUseFrame = -1;
-    private RtImage fgPrevFrame;
-    private int fgPrevFrameW = -1;
-    private int fgPrevFrameH = -1;
-    private int fgPrevFrameFormat = Integer.MIN_VALUE;
-    private boolean fgPrevFrameValid;
-    private final Matrix4f fgClipToPrev = new Matrix4f();
-    private final Matrix4f fgPrevToClip = new Matrix4f();
-    private final Matrix4f fgMatTmp = new Matrix4f();
-    // Jitter applied to this frame's trace (signed, render pixels) — the FG PREPARE input wants the
-    // same sub-pixel offset the camera rays used; captured in recordFrame, read at present time.
-    private float fgJitterX;
-    private float fgJitterY;
     // ---- SVGF (the renderer's own denoiser for every non-DLSS path).
     //
     // colour/history ping-pong (rgb = colour, a = accumulated frame count), the luminance-moment
@@ -399,8 +360,6 @@ public final class RtComposite {
     private final DlssRrReconstructionBackend dlssRrBackend = new DlssRrReconstructionBackend();
     private final ExperimentalNrdBackend nrdBackend = new ExperimentalNrdBackend();
     private final UpscalerRuntime upscalers = UpscalerRuntime.INSTANCE;
-    /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
-    private RtFgSkyMaskPipeline fgSkyMaskPipeline;
     // Experimental SHaRC (Spatially Hashed Radiance Cache). Shader-only — the host only owns the
     // persistent cache buffer and publishes its device address (no native lib, no extra binding).
     private final SharcRadianceCache sharc = SharcRadianceCache.INSTANCE;
@@ -878,8 +837,7 @@ public final class RtComposite {
         }
         temporalState.snapshot(frame);
         // FG reads the frame's jitter at present time (PREPARE wants the offset the rays used).
-        fgJitterX = frame.jitter().x();
-        fgJitterY = frame.jitter().y();
+        frameGenerationResources.captureJitter(frame.jitter().x(), frame.jitter().y());
     }
 
     private void recordPathTrace(FrameContext frame) {
@@ -1898,23 +1856,8 @@ public final class RtComposite {
         // Tear down the NRD integration (wraps the Vulkan device via NRI) before its borrowed images.
         nrdBackend.destroy();
         svgfBackend.destroy();
-        if (fgSkyMaskPipeline != null) {
-            fgSkyMaskPipeline.destroy();
-            fgSkyMaskPipeline = null;
-        }
-        if (fgUiCompositePipeline != null) {
-            fgUiCompositePipeline.destroy();
-            fgUiCompositePipeline = null;
-        }
+        frameGenerationResources.destroyAfterDeviceIdle();
         postProcessing.destroyImages();
-        if (fgHudlessImage != null) {
-            fgHudlessImage.destroy();
-            fgHudlessImage = null;
-        }
-        if (fgHdrHudlessImage != null) {
-            fgHdrHudlessImage.destroy();
-            fgHdrHudlessImage = null;
-        }
         RtWorldOverlay.INSTANCE.destroy(); // overlay features/pipelines/scratch live on the same device lifetime
         traceFrameResources.release();
         restirSystem.destroy();
@@ -1938,36 +1881,6 @@ public final class RtComposite {
             sdrPresentImage.destroy();
             sdrPresentImage = null;
         }
-        for (RtImage img : fgInterp) {
-            if (img != null) {
-                img.destroy();
-            }
-        }
-        fgInterp = new RtImage[0];
-        fgInterpW = -1;
-        fgInterpH = -1;
-        fgInterpFormat = Integer.MIN_VALUE;
-        if (fgBackbufferCopy != null) {
-            fgBackbufferCopy.destroy();
-            fgBackbufferCopy = null;
-        }
-        fgBackbufferCopyW = -1;
-        fgBackbufferCopyH = -1;
-        if (nativeFgPipeline != null) {
-            nativeFgPipeline.destroy();
-            nativeFgPipeline = null;
-        }
-        if (fgPrevFrame != null) {
-            fgPrevFrame.destroy();
-            fgPrevFrame = null;
-        }
-        fgPrevFrameW = -1;
-        fgPrevFrameH = -1;
-        fgPrevFrameFormat = Integer.MIN_VALUE;
-        fgPrevFrameValid = false;
-        nativeFgCamValid = false;
-        fgNativeLastUseFrame = -1;
-        fgNativeSeededTick = false;
         worldTraceResources.destroy();
     }
 
@@ -2028,8 +1941,8 @@ public final class RtComposite {
             // captureFgHudless's SDR pattern (pre-UI copy) but reusing this frame's already-open command
             // buffer. Both DLSS-FG (hudless resource) and the native engine (interpolation source +
             // UI re-composite) consume it.
-            if (fgHudlessNeeded()) {
-                captureFgHdrHudless(cmd, stack, src);
+            if (FrameGenerationResources.hudlessNeeded()) {
+                frameGenerationResources.captureHdrHudless(RtContext.get(), cmd, stack, src);
             }
 
             // Step C.2: composite the combined UI overlay over the HDR world image (in place) at paper white,
@@ -2217,614 +2130,24 @@ public final class RtComposite {
         return true;
     }
 
-    /**
-     * DLSS Frame Generation quality: capture a copy of {@code main} (the main render target) into
-     * {@link #fgHudlessImage} for {@link #fgInterpolate} to feed DLSSG as the "hudless" resource. Call from
-     * {@code GameRendererMixin} right after {@code GuiRenderer.render()} but BEFORE
-     * {@link RtUiOverlay#compositeIfUsed()} — at that point, when the UI overlay redirect is active, {@code
-     * main} still has no combined UI baked in (world overlays, hand/screen effects and GUI went to the
-     * overlay target instead). No-op (and {@link #fgInterpolate} passes 0/0/0 for hudless, same as always)
-     * unless both FG and the UI overlay redirect are active — capturing this without the redirect would just
-     * copy the ALREADY-composited backbuffer, which is useless as a distinct hudless input.
-     */
+    /** Capture the pre-UI SDR frame at the existing renderer seam. */
     public void captureFgHudless(RenderTarget main) {
-        if (!fgHudlessNeeded() || !RtUiOverlay.enabled() || main == null || main.getColorTexture() == null) {
-            return;
-        }
-        RtContext ctx = RtContext.currentOrNull();
-        if (ctx == null) {
-            return;
-        }
-        long srcImage;
-        try {
-            srcImage = vkImage(main.getColorTexture());
-        } catch (IllegalStateException e) {
-            return; // not a Vulkan-backed texture (shouldn't happen on this backend)
-        }
-        if (fgHudlessImage == null || fgHudlessImage.width != main.width || fgHudlessImage.height != main.height) {
-            if (fgHudlessImage != null) {
-                fgHudlessImage.destroy();
-            }
-            fgHudlessImage = ctx.createStorageImage(main.width, main.height, VK10.VK_FORMAT_R8G8B8A8_UNORM,
-                    "FG hudless capture " + main.width + "x" + main.height);
-        }
-        var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
-        VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            // Make writes into `main` visible to the copy (the combined UI has not touched `main` yet this
-            // frame — it went to the UI overlay target instead).
-            VulkanCommandEncoder.memoryBarrier(cmd, stack);
-            VK10.vkCmdCopyImage(cmd, srcImage, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                    fgHudlessImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, main.width, main.height));
-            VulkanCommandEncoder.memoryBarrier(cmd, stack);
-        }
-        if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-            throw new IllegalStateException("vkEndCommandBuffer(fg hudless capture) failed");
-        }
-        encoder.execute(cmd);
+        frameGenerationResources.captureHudless(main);
     }
 
-    /**
-     * HDR counterpart of {@link #captureFgHudless} — copies {@code src} (this frame's {@code postProcessing.hdrImage()},
-     * before the combined UI overlay is blended in) into {@link #fgHdrHudlessImage} for {@link
-     * #fgInterpolate}'s HDR path to feed DLSSG as the "hudless" resource. A plain copy, not a format
-     * conversion: both images are
-     * already PQ-encoded (the display-ready EOTF-encoded [0,1] signal DLSS-FG's programming guide requires),
-     * so no encode step is needed. Called from {@link #presentHdr} using its already-open {@code cmd}/
-     * {@code stack}, right before that method's own combined-UI composite dispatch overwrites
-     * {@code postProcessing.hdrImage()} in place — same "capture before the UI gets baked back in" timing as the SDR
-     * version, just within a single method instead of split across a mixin hook.
-     */
-    private void captureFgHdrHudless(VkCommandBuffer cmd, MemoryStack stack, RtImage src) {
-        RtContext ctx = RtContext.currentOrNull();
-        if (ctx == null) {
-            return;
-        }
-        if (fgHdrHudlessImage == null || fgHdrHudlessImage.width != src.width || fgHdrHudlessImage.height != src.height) {
-            if (fgHdrHudlessImage != null) {
-                fgHdrHudlessImage.destroy();
-            }
-            fgHdrHudlessImage = ctx.createStorageImage(src.width, src.height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    "FG HDR hudless capture (PQ) " + src.width + "x" + src.height);
-        }
-        // Make composite()'s writes to postProcessing.hdrImage() (an earlier submit this frame) visible to this copy;
-        // the copy's write is then made visible to the UI-composite dispatch that follows (and to DLSSG's
-        // read, in a later command buffer) by the same idiom.
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-        VK10.vkCmdCopyImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                fgHdrHudlessImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, src.width, src.height));
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-    }
-
-    /**
-     * DLSS Frame Generation: record the DLSSG evaluate for generated frame {@code index} of {@code count}
-     * (backbuffer = the final frame; HW depth = {@code frameViews().depth()}; motion = {@code frameViews().motion()}) into Minecraft's
-     * command encoder, returning the interpolated output image (backbuffer size) for {@link RtFramePresenter}
-     * to blit into a generated swapchain image. On {@code index == 1} it ensures the feature (created in its
-     * own synchronous submit), the per-index output images, and the jitter-free reprojection matrices.
-     * Returns {@code null} (caller falls back to duplicating the real frame for this one frame, no session
-     * impact) when there's simply no captured RT frame to interpolate from right now — routine and expected
-     * on menu/loading/transition frames, since {@link RtFramePresenter#isActive} only gates on being in a
-     * world, not on RT having actually produced a frame this tick. Throws instead for failures that should
-     * never happen once RT is actively producing frames (DLSSG feature creation failing, an out-of-range
-     * index, the evaluate itself failing) — the caller treats those as fatal and disables FG for the
-     * session, same as any other FG present-record failure, rather than silently degrading to duplicated
-     * (non-interpolated) frames forever with no visible sign anything is wrong. Rotation-only matrices;
-     * camera translation is carried by the mvecs (cameraMotionIncluded).
-     *
-     * <p>{@code hdrBackbuffer} selects the HDR path. Per the DLSS-FG programming guide's HDR section, scRGB is
-     * explicitly unsupported as a DLSS-FG input ("not suitable as inputs to DLSS-FG" — it wants a
-     * display-ready, EOTF-encoded [0,1] signal, recommending HDR10/ST.2084) — since the renderer's whole HDR
-     * pipeline is natively PQ-encoded, every image fed to {@code RtDlssFg.evaluate} in HDR mode is already in
-     * that format with no extra conversion needed: the backbuffer is the raw {@code backbufferView}/
-     * {@code backbufferImage} the caller passed in ({@link #hdrBackbufferView()}, already PQ + UI-composited
-     * by {@link #presentHdr}); the hudless resource is {@link #fgHdrHudlessImage} (copied by {@link
-     * #presentHdr} <em>before</em> its own UI composite ran, mirroring {@link #captureFgHudless}'s pre-UI
-     * timing); and DLSSG's own (also PQ-encoded) output is returned as-is, since the swapchain itself is
-     * PQ-native and can blit it directly. The UI resource itself needs no HDR-specific handling — it's the
-     * same combined {@link RtUiOverlay} texture used by both present paths (only the *compositing* math that
-     * consumes it differs, done separately by {@code presentHdr}/{@code RtUiOverlay}, not here).
-     */
-    /**
-     * Generated-frame count the active FG backend will actually produce this frame: the native
-     * engine clamps to its cap (up to 3 generated = 4x); FSR 3.1 is hard-capped at 1 generated
-     * frame (= 2x) because that is all the FFX runtime writes (see RtFsrFrameGen.MAX_GENERATED_FRAMES)
-     * — presenting more would show never-written images; DLSS clamps to the driver-reported MFG
-     * maximum. Called by the present hooks ({@code VulkanGpuSurfaceMixin}) instead of the
-     * DLSS-only getter.
-     */
     public static int fgGeneratedCount() {
-        if (RtNativeFrameGen.enabled()) {
-            return RtNativeFrameGen.INSTANCE.effectiveGeneratedCount();
-        }
-        if (RtFsrFrameGen.enabled()) {
-            return RtFsrFrameGen.INSTANCE.effectiveGeneratedCount();
-        }
-        return RtDlssFg.INSTANCE.effectiveMultiFrameCount();
+        return FrameGenerationResources.generatedCount();
     }
 
-    public RtImage fgInterpolate(VulkanCommandEncoder enc, long backbufferView, long backbufferImage,
-            int swapW, int swapH, int index, int count, boolean hdrBackbuffer) {
-        TraceFrameResources.TraceFrameViews views = frameViews();
-        if (failed || views == null || views.depth() == null || views.motion() == null || !frameCaptured) {
-            return null;
-        }
-        RtContext ctx = RtContext.currentOrNull();
-        if (ctx == null) {
-            return null;
-        }
-        final int fmt = hdrBackbuffer ? VK10.VK_FORMAT_R16G16B16A16_SFLOAT : VK10.VK_FORMAT_R8G8B8A8_UNORM;
-        if (RtNativeFrameGen.enabled()) {
-            return fgInterpolateNative(ctx, enc, backbufferImage, swapW, swapH, index, count, hdrBackbuffer, fmt);
-        }
-        if (RtFsrFrameGen.enabled()) {
-            return fgInterpolateFsr(ctx, enc, backbufferImage, swapW, swapH, index, count, hdrBackbuffer, fmt);
-        }
-        if (index == 1) {
-            if (!ensureFgFeature(ctx, swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), fmt)) {
-                throw new IllegalStateException("DLSSG feature not ready (ensureFgFeature failed)");
-            }
-            ensureFgInterp(ctx, count, swapW, swapH, fmt);
-            // clipToPrevClip = prevVP * inverse(curVP); prevClipToClip = curVP * inverse(prevVP). Both from
-            // the (rotation-only, camera-relative) MV view-projections, so jitter-free.
-            fgMatTmp.set(mvCurProjView).invert();
-            fgClipToPrev.set(mvPrevProjView).mul(fgMatTmp);
-            fgMatTmp.set(mvPrevProjView).invert();
-            fgPrevToClip.set(mvCurProjView).mul(fgMatTmp);
-        }
-        if (index < 1 || index > fgInterp.length || fgInterp[index - 1] == null) {
-            throw new IllegalStateException(
-                    "fgInterpolate index " + index + " out of range for fgInterp[" + fgInterp.length + "]");
-        }
-        RtImage out = fgInterp[index - 1];
-        // Only feed hudless/ui when they exist AND match this frame's backbuffer size — a stale or mismatched
-        // size (e.g. mid-resize) is worse than skipping, so fall back to 0/0/0 (DLSSG just does without).
-        RtImage hudlessSrc = hdrBackbuffer ? fgHdrHudlessImage : fgHudlessImage;
-        boolean hudlessReady = hudlessSrc != null && hudlessSrc.width == swapW && hudlessSrc.height == swapH;
-        long hudlessView = hudlessReady ? hudlessSrc.view : 0L;
-        long hudlessImg = hudlessReady ? hudlessSrc.image : 0L;
-        int hudlessFmt = hdrBackbuffer ? VK10.VK_FORMAT_R16G16B16A16_SFLOAT : VK10.VK_FORMAT_R8G8B8A8_UNORM;
-        boolean uiReady = RtUiOverlay.overlayWidth() == swapW && RtUiOverlay.overlayHeight() == swapH
-                && RtUiOverlay.overlayColorView() != 0L && RtUiOverlay.overlayColorImage() != 0L;
-        long uiView = uiReady ? RtUiOverlay.overlayColorView() : 0L;
-        long uiImg = uiReady ? RtUiOverlay.overlayColorImage() : 0L;
-
-        VkCommandBuffer cmd = enc.allocateAndBeginTransientCommandBuffer();
-        boolean ok = RtDlssFg.INSTANCE.evaluate(cmd.address(),
-                backbufferView, backbufferImage, fmt,
-                frameViews().depth().view, frameViews().depth().image, VK10.VK_FORMAT_R32_SFLOAT,
-                frameViews().motion().view, frameViews().motion().image, VK10.VK_FORMAT_R16G16_SFLOAT,
-                hudlessView, hudlessImg, hudlessReady ? hudlessFmt : 0,
-                uiView, uiImg, uiReady ? VK10.VK_FORMAT_R8G8B8A8_UNORM : 0,
-                out.view, out.image, fmt,
-                swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), count, index, 1.0f, 1.0f,
-                true /* depthInverted (reversed-Z) */, hdrBackbuffer /* colorBuffersHDR */,
-                true /* cameraMotionIncluded (in mvecs) */, fgReset,
-                fgClipToPrev, fgPrevToClip);
-        if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-            throw new IllegalStateException("vkEndCommandBuffer(fg interpolate) failed");
-        }
-        fgReset = false;
-        if (!ok) {
-            throw new IllegalStateException("ngxshim_evaluate_dlssg failed (RtDlssFg.evaluate returned false)");
-        }
-        enc.execute(cmd);
-        return out;
+    /** Route frame-generation work to its semantic resource owner. */
+    public RtImage fgInterpolate(VulkanCommandEncoder encoder, long backbufferView, long backbufferImage,
+                                 int swapW, int swapH, int index, int count, boolean hdrBackbuffer) {
+        return frameGenerationResources.interpolate(encoder, backbufferView, backbufferImage,
+                swapW, swapH, index, count, hdrBackbuffer,
+                new FrameGenerationResources.FrameData(
+                        frameViews(), mvCurProjView, mvPrevProjView, frameProjection, frameViewRotation,
+                        camX, camY, camZ, frameCounter, !failed && frameCaptured),
+                generatedFrameUiComposer);
     }
 
-    /**
-     * FSR 3.1 branch of {@link #fgInterpolate}: one PREPARE + one GENERATE dispatch produce ALL
-     * requested interpolated frames at {@code index == 1} (the FFX API generates them in a single
-     * dispatch into {@code outputs[1..4]}); later indices just hand back the already-generated image.
-     * Same fatal-on-failure / null-on-no-captured-frame contract as the DLSS branch. Camera position
-     * and the three view-space axes come straight from the captured camera (rotation matrix rows:
-     * Minecraft's +Z-forward view space makes row0/row1/row2 = right/up/forward in world space).
-     */
-    private RtImage fgInterpolateFsr(RtContext ctx, VulkanCommandEncoder enc, long backbufferImage,
-            int swapW, int swapH, int index, int count, boolean hdrBackbuffer, int fmt) {
-        if (index == 1) {
-            if (!RtFsrFrameGen.INSTANCE.ensureFeature(swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), fmt)) {
-                throw new IllegalStateException("FSR FG feature not ready (ensureFeature failed)");
-            }
-            ensureFgInterp(ctx, count, swapW, swapH, fmt);
-            if (fgInterp.length != count) {
-                throw new IllegalStateException("FSR FG interp targets mismatch: " + fgInterp.length + " != " + count);
-            }
-            float fovY = (float) (2.0 * Math.atan(1.0 / Math.abs(frameProjection.m11())));
-            long[] outputs = new long[count];
-            for (int i = 0; i < count; i++) {
-                outputs[i] = fgInterp[i].image;
-            }
-            // Rotation-only view matrix rows = the view-space axes in world coordinates
-            // (Minecraft's +Z-forward view space: row0 right, row1 up, row2 forward).
-            setVec3(camPosF, camX, camY, camZ);
-            setVec3(camRightF, frameViewRotation.m00(), frameViewRotation.m01(), frameViewRotation.m02());
-            setVec3(camUpF, frameViewRotation.m10(), frameViewRotation.m11(), frameViewRotation.m12());
-            setVec3(camForwardF, frameViewRotation.m20(), frameViewRotation.m21(), frameViewRotation.m22());
-            // FFX FG's GENERATE reads presentColor as GENERAL with the declared format taken
-            // literally. The HDR backbuffer is already our own rgba16f GENERAL image, but the SDR
-            // path feeds Minecraft's main target — TRANSFER_SRC layout (MC's own blit barrier ran
-            // first in this encoder) and no contractually known format — so it gets blitted into
-            // an owned RGBA8 GENERAL copy first. Feeding the target directly was undefined reads
-            // (the flickering generated frames).
-            long presentImage = backbufferImage;
-            int presentFmt = fmt;
-            if (!hdrBackbuffer) {
-                recordFgBackbufferCopy(ctx, enc, backbufferImage, swapW, swapH);
-                presentImage = fgBackbufferCopy.image;
-                presentFmt = VK10.VK_FORMAT_R8G8B8A8_UNORM;
-            }
-            VkCommandBuffer cmd = enc.allocateAndBeginTransientCommandBuffer();
-            // Same jitter sign convention as the FSR upscale dispatch (negated).
-            boolean ok = RtFsrFrameGen.INSTANCE.prepareAndGenerate(cmd.address(),
-                    frameViews().depth().image, frameViews().motion().image, frameViews().renderWidth(), frameViews().renderHeight(),
-                    -fgJitterX, -fgJitterY, fovY,
-                    camPosF, camUpF, camRightF, camForwardF,
-                    presentImage, presentFmt, outputs, count, swapW, swapH, hdrBackbuffer);
-            // Sky mask right after the generate, in the same command buffer: FG's block-based
-            // interpolation breaks on sky pixels (~0 depth + textureless gradients + 1-SPP hot
-            // samples) and emits black blocks and gray smudges there — the sky flicker the player
-            // sees whenever the sky is on screen. Every sky pixel of each generated frame is
-            // replaced with the real frame's sky (see RtFgSkyMaskPipeline). The barrier makes the
-            // FFX output writes visible to the mask's read-modify-write.
-            ensureFgSkyMask(ctx);
-            if (ok && fgSkyMaskPipeline != null) {
-                try (MemoryStack maskStack = MemoryStack.stackPush()) {
-                    VulkanCommandEncoder.memoryBarrier(cmd, maskStack);
-                    long maskPresentView = hdrBackbuffer ? hdrBackbufferView() : fgBackbufferCopy.view;
-                    for (int i = 0; i < count; i++) {
-                        fgSkyMaskPipeline.dispatch(cmd, fgInterp[i].view, maskPresentView, frameViews().depth().view,
-                                swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), hdrBackbuffer);
-                    }
-                }
-            }
-            if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-                throw new IllegalStateException("vkEndCommandBuffer(fsr fg) failed");
-            }
-            if (!ok) {
-                throw new IllegalStateException("fsrshim FG prepare/generate failed");
-            }
-            enc.execute(cmd);
-        }
-        if (index < 1 || index > fgInterp.length || fgInterp[index - 1] == null) {
-            throw new IllegalStateException(
-                    "FSR fgInterpolate index " + index + " out of range for fgInterp[" + fgInterp.length + "]");
-        }
-        return fgInterp[index - 1];
-    }
-
-    /**
-     * Caustica native FG branch of {@link #fgInterpolate}: motion-vector interpolation between the
-     * previous presented frame ({@link #fgPrevFrame}) and this frame's final image. At {@code index == 1}
-     * it records ALL {@code count} generated frames at times t = (k+1)/(count+1) between prev (t=0)
-     * and current (t=1); later indices just hand back the already-generated image. The renderer's
-     * jitter-free motion vectors are exact per pixel (entities included), so no optical flow is
-     * needed — the shader back-warps both real frames and blends them, with a forward/backward
-     * consistency check falling back toward the current frame at occlusion boundaries.
-     *
-     * <p>The seeding tick (no previous frame captured yet — first frame, resize, teleport) returns
-     * {@code null} for every index, which makes the presenter duplicate the real frame for just
-     * that tick; interpolation starts on the next one. Same routine-fallback contract as the other
-     * branches.
-     */
-    private RtImage fgInterpolateNative(RtContext ctx, VulkanCommandEncoder enc, long backbufferImage,
-            int swapW, int swapH, int index, int count, boolean hdrBackbuffer, int fmt) {
-        if (index == 1) {
-            fgNativeSeededTick = false;
-            ensureNativeFgPipeline(ctx);
-            if (nativeFgPipeline == null) {
-                throw new IllegalStateException("native FG pipeline not ready");
-            }
-            ensureFgInterp(ctx, count, swapW, swapH, fmt);
-            if (fgInterp.length != count) {
-                throw new IllegalStateException("native FG interp targets mismatch: " + fgInterp.length + " != " + count);
-            }
-            // Source selection — HUD-LESS whenever the UI overlay redirect captured one this tick
-            // (hand, screen effects and GUI live on the overlay, not in the world image): the
-            // interpolation then never sees screen-fixed content, so it cannot wobble the hotbar /
-            // hand / overlays — the UI is stamped back onto every generated frame afterwards (see
-            // the composite passes below). Without a hudless capture (overlay latched off), fall
-            // back to interpolating the final frame as-is.
-            RtImage hudless = hdrBackbuffer ? fgHdrHudlessImage : fgHudlessImage;
-            boolean hudlessReady = hudless != null && hudless.width == swapW && hudless.height == swapH;
-            long curView;
-            long curImage;
-            if (hudlessReady) {
-                curView = hudless.view;
-                curImage = hudless.image;
-            } else if (!hdrBackbuffer) {
-                // SDR fallback: main target (TRANSFER_SRC, no contractual format) into the owned copy.
-                recordFgBackbufferCopy(ctx, enc, backbufferImage, swapW, swapH);
-                curView = fgBackbufferCopy.view;
-                curImage = fgBackbufferCopy.image;
-            } else {
-                curView = hdrBackbufferView();
-                curImage = backbufferImage;
-            }
-            ensureFgPrevFrame(ctx, swapW, swapH, fmt);
-            // Staleness guard: if FG hasn't interpolated for a couple of composite frames (menu /
-            // loading gap / FG just toggled on), the stored previous frame no longer neighbours the
-            // current one — drop it instead of blending across the gap.
-            if (fgNativeLastUseFrame >= 0 && frameCounter - fgNativeLastUseFrame > 2) {
-                fgPrevFrameValid = false;
-            }
-            fgNativeLastUseFrame = frameCounter;
-            // Camera discontinuity (teleport / respawn / world change): the previous frame depicts a
-            // different world; drop it so nothing of the old one leaks into the blend (same 32-block
-            // rule the upscaler resets use).
-            if (nativeFgCamValid) {
-                double ndx = camX - prevNativeFgCamX;
-                double ndy = camY - prevNativeFgCamY;
-                double ndz = camZ - prevNativeFgCamZ;
-                if (ndx * ndx + ndy * ndy + ndz * ndz > 32.0 * 32.0) {
-                    fgPrevFrameValid = false;
-                }
-            }
-            prevNativeFgCamX = camX;
-            prevNativeFgCamY = camY;
-            prevNativeFgCamZ = camZ;
-            nativeFgCamValid = true;
-
-            boolean hadPrev = fgPrevFrameValid;
-            VkCommandBuffer cmd = enc.allocateAndBeginTransientCommandBuffer();
-            try (MemoryStack stack = MemoryStack.stackPush()) {
-                if (hadPrev) {
-                    // Make the cur source (captured earlier this frame) and last tick's prev-frame
-                    // write visible.
-                    VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                    for (int k = 0; k < count; k++) {
-                        float t = (k + 1.0f) / (count + 1.0f);
-                        nativeFgPipeline.dispatch(cmd, fgInterp[k].view, curView, fgPrevFrame.view, frameViews().motion().view,
-                                swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), t, hdrBackbuffer);
-                    }
-                    // Sky mask on the generated frames (same protection as the FSR path): sky pixels
-                    // copy the real frame's sky instead of trusting the blend at the horizon/sun edge.
-                    ensureFgSkyMask(ctx);
-                    if (fgSkyMaskPipeline != null) {
-                        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                        for (int k = 0; k < count; k++) {
-                            fgSkyMaskPipeline.dispatch(cmd, fgInterp[k].view, curView, frameViews().depth().view,
-                                    swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), hdrBackbuffer);
-                        }
-                    }
-                    // UI re-composite (hudless path only): stamp this tick's overlay — hand, GUI,
-                    // screen effects, mod overlays — onto every generated frame, identical across the
-                    // group, which is what stops screen-fixed content from wobbling.
-                    long overlayView = hudlessReady ? RtUiOverlay.overlayColorView() : 0L;
-                    boolean uiReady = overlayView != 0L
-                            && RtUiOverlay.overlayWidth() == swapW && RtUiOverlay.overlayHeight() == swapH;
-                    if (uiReady && ensureUiSampler(ctx)) {
-                        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                        if (hdrBackbuffer) {
-                            ensureHdrUiResources();
-                            if (hdrCompositePipeline != null) {
-                                for (int k = 0; k < count; k++) {
-                                    hdrCompositePipeline.setImages(fgInterp[k].view, overlayView, hdrUiSampler);
-                                    hdrCompositePipeline.dispatch(cmd, swapW, swapH,
-                                            CausticaConfig.Rt.Hdr.paperWhiteNits());
-                                }
-                            }
-                        } else {
-                            ensureFgUiComposite(ctx);
-                            if (fgUiCompositePipeline != null) {
-                                for (int k = 0; k < count; k++) {
-                                    fgUiCompositePipeline.dispatch(cmd, fgInterp[k].view, overlayView,
-                                            hdrUiSampler, swapW, swapH);
-                                }
-                            }
-                        }
-                    }
-                    // Interp reads of fgPrevFrame are done; the advance below may overwrite it.
-                    VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                }
-                // Advance the history for the next tick: this frame becomes the previous frame.
-                VK10.vkCmdCopyImage(cmd, curImage, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                        fgPrevFrame.image, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, swapW, swapH));
-                VulkanCommandEncoder.memoryBarrier(cmd, stack); // prev write visible to the next tick's read
-            }
-            if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-                throw new IllegalStateException("vkEndCommandBuffer(native fg) failed");
-            }
-            enc.execute(cmd);
-            fgPrevFrameValid = true;
-            if (!hadPrev) {
-                fgNativeSeededTick = true; // every index this tick falls back to the real frame
-                return null;
-            }
-        }
-        if (fgNativeSeededTick) {
-            return null; // seeding tick: no generated content for any slot yet
-        }
-        if (index < 1 || index > fgInterp.length || fgInterp[index - 1] == null) {
-            throw new IllegalStateException(
-                    "native fgInterpolate index " + index + " out of range for fgInterp[" + fgInterp.length + "]");
-        }
-        return fgInterp[index - 1];
-    }
-
-    // Native FG camera-jump bookkeeping (see fgInterpolateNative).
-    private double prevNativeFgCamX;
-    private double prevNativeFgCamY;
-    private double prevNativeFgCamZ;
-    private boolean nativeFgCamValid;
-    // Set when the current tick seeded the previous-frame history: every fgInterpolate index of
-    // this tick returns null so the presenter duplicates the real frame (no blend against garbage).
-    private boolean fgNativeSeededTick;
-
-    private final float[] camPosF = new float[3];
-    private final float[] camRightF = new float[3];
-    private final float[] camUpF = new float[3];
-    private final float[] camForwardF = new float[3];
-
-    /** Fill a scratch float[3] (avoids per-frame allocation at present time). */
-    private static void setVec3(float[] dst, double x, double y, double z) {
-        dst[0] = (float) x;
-        dst[1] = (float) y;
-        dst[2] = (float) z;
-    }
-
-    private boolean ensureFgFeature(RtContext ctx, int w, int h, int rw, int rh, int fmt) {
-        if (RtDlssFg.INSTANCE.featureReadyFor(w, h, rw, rh, fmt)) {
-            return true;
-        }
-        // Create the feature in its own submit + wait (not folded into MC's frame submit).
-        ctx.submitSync(c -> RtDlssFg.INSTANCE.ensureFeature(c.address(), w, h, rw, rh, fmt));
-        fgReset = true; // fresh feature has no temporal history
-        return RtDlssFg.INSTANCE.featureReadyFor(w, h, rw, rh, fmt);
-    }
-
-    private void ensureFgInterp(RtContext ctx, int count, int w, int h, int fmt) {
-        if (fgInterp.length == count && fgInterpW == w && fgInterpH == h && fgInterpFormat == fmt
-                && (count == 0 || fgInterp[0] != null)) {
-            return;
-        }
-        for (RtImage img : fgInterp) {
-            if (img != null) {
-                img.destroy();
-            }
-        }
-        fgInterp = new RtImage[count];
-        for (int i = 0; i < count; i++) {
-            fgInterp[i] = ctx.createStorageImage(w, h, fmt, "FG interp " + i + " " + w + "x" + h);
-        }
-        fgInterpW = w;
-        fgInterpH = h;
-        fgInterpFormat = fmt;
-    }
-
-    /** Owned GENERAL/RGBA8 target for the SDR FG backbuffer copy (see fgBackbufferCopy's docs). */
-    private void ensureFgBackbufferCopy(RtContext ctx, int w, int h) {
-        if (fgBackbufferCopy != null && fgBackbufferCopyW == w && fgBackbufferCopyH == h) {
-            return;
-        }
-        if (fgBackbufferCopy != null) {
-            fgBackbufferCopy.destroy();
-        }
-        fgBackbufferCopy = ctx.createStorageImage(w, h, VK10.VK_FORMAT_R8G8B8A8_UNORM,
-                "FG backbuffer copy " + w + "x" + h);
-        fgBackbufferCopyW = w;
-        fgBackbufferCopyH = h;
-    }
-
-    /**
-     * Record the SDR main-target -&gt; {@link #fgBackbufferCopy} blit into the encoder (own command
-     * buffer, executed immediately). Minecraft's main target arrives in TRANSFER_SRC layout with no
-     * contractually known format; the FG consumers read GENERAL with the format taken literally, so
-     * this copy makes both certain (see fgBackbufferCopy's docs). Shared by the FSR and native FG
-     * branches.
-     */
-    private void recordFgBackbufferCopy(RtContext ctx, VulkanCommandEncoder enc, long backbufferImage,
-            int swapW, int swapH) {
-        ensureFgBackbufferCopy(ctx, swapW, swapH);
-        VkCommandBuffer copyCmd = enc.allocateAndBeginTransientCommandBuffer();
-        try (MemoryStack copyStack = MemoryStack.stackPush()) {
-            VkImageMemoryBarrier2.Buffer toDst = VkImageMemoryBarrier2.calloc(1, copyStack).sType$Default();
-            toDst.get(0).srcStageMask(0L).srcAccessMask(0L).dstStageMask(4096L).dstAccessMask(4096L)
-                    .oldLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-                    .srcQueueFamilyIndex(-1).dstQueueFamilyIndex(-1).image(fgBackbufferCopy.image);
-            toDst.get(0).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1);
-            // The main target's TRANSFER_SRC state + contents were made available by MC's
-            // barrier earlier in this encoder; a global memory dependency chains this blit
-            // after it (same pattern the FG present blits use).
-            VkMemoryBarrier2.Buffer srcVis = VkMemoryBarrier2.calloc(1, copyStack).sType$Default();
-            srcVis.get(0).srcStageMask(1024L | 4096L).srcAccessMask(256L | 8L)
-                    .dstStageMask(4096L).dstAccessMask(8L);
-            VkDependencyInfo dep1 = VkDependencyInfo.calloc(copyStack).sType$Default()
-                    .pImageMemoryBarriers(toDst).pMemoryBarriers(srcVis);
-            KHRSynchronization2.vkCmdPipelineBarrier2KHR(copyCmd, dep1);
-            // Straight (non-flipped) full-rect blit: orientation stays as-is here; the
-            // Y-flip for the display happens when the generated frames hit the swapchain.
-            VkImageBlit.Buffer region = VkImageBlit.calloc(1, copyStack);
-            region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-            region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-            region.get(0).srcOffsets(1).set(swapW, swapH, 1);
-            region.get(0).dstOffsets(1).set(swapW, swapH, 1);
-            VK10.vkCmdBlitImage(copyCmd, backbufferImage, VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    fgBackbufferCopy.image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region,
-                    VK10.VK_FILTER_NEAREST);
-            VkImageMemoryBarrier2.Buffer toGeneral = VkImageMemoryBarrier2.calloc(1, copyStack).sType$Default();
-            toGeneral.get(0).srcStageMask(4096L).srcAccessMask(4096L).dstStageMask(65536L).dstAccessMask(98304L)
-                    .oldLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).newLayout(VK10.VK_IMAGE_LAYOUT_GENERAL)
-                    .srcQueueFamilyIndex(-1).dstQueueFamilyIndex(-1).image(fgBackbufferCopy.image);
-            toGeneral.get(0).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1);
-            VkDependencyInfo dep2 = VkDependencyInfo.calloc(copyStack).sType$Default().pImageMemoryBarriers(toGeneral);
-            KHRSynchronization2.vkCmdPipelineBarrier2KHR(copyCmd, dep2);
-        }
-        if (VK10.vkEndCommandBuffer(copyCmd) != VK10.VK_SUCCESS) {
-            throw new IllegalStateException("vkEndCommandBuffer(fg backbuffer copy) failed");
-        }
-        enc.execute(copyCmd);
-    }
-
-    /** Set when the native FG pipeline failed to create; native FG is skipped for the session. */
-    private void ensureNativeFgPipeline(RtContext ctx) {
-        if (nativeFgPipeline != null || nativeFgFailed) {
-            return;
-        }
-        try {
-            nativeFgPipeline = RtNativeFrameGenPipeline.create(ctx);
-            CausticaMod.LOGGER.info("Caustica native frame generation active (motion-vector interpolation)");
-        } catch (Throwable t) {
-            nativeFgFailed = true;
-            CausticaMod.LOGGER.error("native FG pipeline creation failed; frame generation disabled", t);
-        }
-    }
-
-    /** Lazily create the SDR UI re-composite pipeline for native FG's generated frames. */
-    private void ensureFgUiComposite(RtContext ctx) {
-        if (fgUiCompositePipeline != null || fgUiCompositeFailed) {
-            return;
-        }
-        try {
-            fgUiCompositePipeline = RtFgUiCompositePipeline.create(ctx);
-        } catch (Throwable t) {
-            fgUiCompositeFailed = true;
-            CausticaMod.LOGGER.error("FG UI composite pipeline creation failed; generated frames stay HUD-less", t);
-        }
-    }
-
-    /**
-     * Whether the FG stack needs the pre-UI ("hudless") snapshot of the frame this tick: DLSS-FG
-     * consumes it as its hudless resource, and the native engine interpolates it (then stamps the
-     * UI overlay back onto every generated frame) so screen-fixed content doesn't wobble.
-     */
-    private static boolean fgHudlessNeeded() {
-        return RtDlssFg.enabled() || RtNativeFrameGen.enabled();
-    }
-
-    /** Owned previous-frame history target for the native FG interpolator (see fgPrevFrame's docs). */
-    private void ensureFgPrevFrame(RtContext ctx, int w, int h, int fmt) {
-        if (fgPrevFrame != null && fgPrevFrameW == w && fgPrevFrameH == h && fgPrevFrameFormat == fmt) {
-            return;
-        }
-        if (fgPrevFrame != null) {
-            fgPrevFrame.destroy();
-        }
-        fgPrevFrame = ctx.createStorageImage(w, h, fmt, "native FG prev frame " + w + "x" + h);
-        fgPrevFrameW = w;
-        fgPrevFrameH = h;
-        fgPrevFrameFormat = fmt;
-        fgPrevFrameValid = false; // fresh image: no history to blend against
-    }
-
-    /** Set when the sky-mask pipeline failed to create; the mask is skipped for the session. */
-    private boolean fgSkyMaskFailed;
-
-    /**
-     * Lazily create the FG sky-mask pipeline on first FG use (FG toggles at runtime, so it can't
-     * ride the resource-creation block). Failure degrades gracefully: generated frames keep the
-     * raw FG sky (the pre-mask artifact state) instead of killing FG entirely.
-     */
-    private void ensureFgSkyMask(RtContext ctx) {
-        if (fgSkyMaskPipeline != null || fgSkyMaskFailed) {
-            return;
-        }
-        try {
-            fgSkyMaskPipeline = RtFgSkyMaskPipeline.create(ctx);
-            CausticaMod.LOGGER.info("FG sky mask active (generated frames copy the real frame's sky)");
-        } catch (Throwable t) {
-            fgSkyMaskFailed = true;
-            CausticaMod.LOGGER.error("FG sky mask pipeline creation failed; generated frames keep raw FG sky", t);
-        }
-    }
 }
