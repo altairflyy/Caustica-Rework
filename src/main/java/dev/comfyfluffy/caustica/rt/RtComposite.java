@@ -65,7 +65,7 @@ import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
-import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
+import dev.comfyfluffy.caustica.rt.post.PostProcessing;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFsrFrameGen;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgSkyMaskPipeline;
@@ -76,7 +76,6 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtNrdCombinePipeline;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
-import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.scene.TerrainSceneContribution;
@@ -96,8 +95,6 @@ import dev.comfyfluffy.caustica.rt.frame.FrameContext;
 import dev.comfyfluffy.caustica.rt.frame.FramePipeline;
 import dev.comfyfluffy.caustica.rt.graph.FrameGraph;
 import dev.comfyfluffy.caustica.rt.graph.GraphExecution;
-import dev.comfyfluffy.caustica.rt.graph.PostBarrierPlan;
-import dev.comfyfluffy.caustica.rt.graph.PostImageBarriers;
 import dev.comfyfluffy.caustica.rt.graph.DenoiserBarrierPlan;
 import dev.comfyfluffy.caustica.rt.graph.DenoiserBarriers;
 import dev.comfyfluffy.caustica.rt.frame.FrameCursor;
@@ -350,7 +347,7 @@ public final class RtComposite {
     private static final int PUSH_RING = 6;
     private PushSlot[] pushRing;
     private int pushSlot;
-    private RtDisplayPipeline displayPipeline;
+    private final PostProcessing postProcessing = new PostProcessing();
     private RtImage output;
     // Packed primary -> indirect continuations. Pass A is fixed at one sample and owns two records per
     // render pixel (base + optional transmission); Pass B resamples them at the configured SPP.
@@ -359,25 +356,23 @@ public final class RtComposite {
     // only `current`, so spatial neighbour reuse never races another raygen invocation. The pair exists
     // only while the player setting is ON; live toggles idle the device before destruction/allocation.
     private final RestirSystem restirSystem = new RestirSystem();
-    private RtImage displayImage;
     // Parallel PQ-encoded ([0,1], ST.2084) HDR display image. Written alongside displayImage when HDR is
     // enabled. When the PQ swapchain is active, the combined UI overlay is composited over this image, then
     // this image is blitted straight to the swapchain.
-    private RtImage hdrDisplayImage;
-    // Set true after this frame's display dispatch wrote hdrDisplayImage (HDR enabled + RT ran); gates the
+    // Set true after this frame's display dispatch wrote postProcessing.hdrImage() (HDR enabled + RT ran); gates the
     // HDR present blit so a frame where RT did not run falls back to the vanilla SDR present.
     private boolean hdrWrittenThisFrame;
     // DLSS-FG "hudless" resource: a copy of the main render target before the combined UI overlay
     // composites back on top. Lazily allocated (only meaningful once FG + the UI overlay redirect are both
     // active), resized on demand.
     private RtImage fgHudlessImage;
-    // Same idea as fgHudlessImage but for the HDR present path: a copy of hdrDisplayImage taken in
+    // Same idea as fgHudlessImage but for the HDR present path: a copy of postProcessing.hdrImage() taken in
     // presentHdr right before its own combined-UI composite dispatch overwrites it in place (see
-    // captureFgHdrHudless). Already PQ-encoded (same as hdrDisplayImage), so this is a plain image copy, not
+    // captureFgHdrHudless). Already PQ-encoded (same as postProcessing.hdrImage()), so this is a plain image copy, not
     // a format conversion — DLSS-FG requires a display-ready EOTF-encoded [0,1] signal (its programming
     // guide explicitly disallows scRGB), and PQ is exactly that.
     private RtImage fgHdrHudlessImage;
-    // Step C.2: composites the combined UI overlay over hdrDisplayImage at paper white, just before present.
+    // Step C.2: composites the combined UI overlay over postProcessing.hdrImage() at paper white, just before present.
     private RtHdrCompositePipeline hdrCompositePipeline;
     private long hdrUiSampler;
 
@@ -476,7 +471,6 @@ public final class RtComposite {
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
-    private final RtExposure exposure = new RtExposure();
     // Experimental SHaRC (Spatially Hashed Radiance Cache). Shader-only — the host only owns the
     // persistent cache buffer and publishes its device address (no native lib, no extra binding).
     private final SharcRadianceCache sharc = SharcRadianceCache.INSTANCE;
@@ -539,7 +533,6 @@ public final class RtComposite {
     private final FrameGraph frameGraph = FrameGraph.shadow(framePipeline);
     private final GraphExecution graphExecution = new GraphExecution(frameGraph, framePipeline);
     private FrameCursor pipelineCursor;
-    private int loggedPostBarrierMode = -1;
     private int loggedDenoiserBarrierMode = -1;
     private String loggedUpscalerBarrierMode;
     private int loggedPathTraceBarrierMode = -1;
@@ -758,9 +751,7 @@ public final class RtComposite {
             return false;
         }
         try {
-            if (displayPipeline == null) {
-                displayPipeline = RtDisplayPipeline.create(ctx);
-            }
+            postProcessing.ensurePipeline(ctx);
             // A resource reload re-stitches the block atlas. We've already torn down the world pipeline
             // (onResourceReloadStart) so nothing references the old atlas, but MC's deferred free keeps the
             // old view handle live for a few frames, then swaps in the new atlas (whose GPU upload may lag,
@@ -776,8 +767,8 @@ public final class RtComposite {
             ensureOutput(ctx, width, height);
             // Cheap idempotent check every frame (not just on resize): if the exposure mode is switched
             // manual -> auto at runtime (video settings), the auto-mode histogram/state/pipeline must be
-            // allocated before recordFrame's exposure.record() below needs them, or it throws.
-            exposure.ensureResources(ctx);
+            // allocated before the post-processing exposure stage below needs them, or it throws.
+            postProcessing.ensureExposure(ctx);
             refreshPipelineShapeIfNeeded(ctx);
             RtPipeline active = ensureWorld(ctx);
             if (materialEpochTraceGate) {
@@ -1077,7 +1068,7 @@ public final class RtComposite {
         boolean nrdEnabled = !rrEnabled && nrdBackend.selected();
         boolean svgfEnabled = !rrEnabled && !nrdEnabled && CausticaConfig.Rt.Denoise.ENABLED.value();
         if (output != null && continuationQueue != null
-                && displayImage != null && hdrDisplayImage != null && rrOutput != null && exposure.ready()
+                && postProcessing.imagesReady() && rrOutput != null && postProcessing.exposureReady()
                 && displayW == width && displayH == height
                 && renderSizeRrEnabled == rrEnabled && renderSizeRrQuality == rrQuality
                 && renderSizeFsrEnabled == fsrEnabled && renderSizeFsrQuality == fsrQuality
@@ -1095,12 +1086,7 @@ public final class RtComposite {
         dlssRrBackend.releaseIfDisabled();
         // Release inactive FSR/XeSS state at the same synchronized switch-away seam.
         upscalers.releaseInactiveBackends();
-        if (displayImage != null) {
-            displayImage.destroy();
-        }
-        if (hdrDisplayImage != null) {
-            hdrDisplayImage.destroy();
-        }
+        postProcessing.releaseImagesForResize();
         if (output != null) {
             output.destroy();
         }
@@ -1152,9 +1138,7 @@ public final class RtComposite {
                 VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
                 "path continuation queue " + renderW + "x" + renderH + "x2");
         syncRestirResources(ctx);
-        displayImage = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R8G8B8A8_UNORM, "RT display image " + width + "x" + height);
-        // PQ-encoded ([0,1], ST.2084) HDR display image, written in parallel by display.comp when HDR mode is active.
-        hdrDisplayImage = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "RT HDR display image " + width + "x" + height);
+        postProcessing.createImages(ctx, width, height);
         // Guide buffers match the trace (render) resolution; DLSS-RR consumes them at render res.
         gNormal = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide normal roughness " + renderW + "x" + renderH);
         gAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide diffuse albedo " + renderW + "x" + renderH);
@@ -1195,7 +1179,7 @@ public final class RtComposite {
         }
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
-        exposure.ensureResources(ctx);
+        postProcessing.ensureExposure(ctx);
 
         broadcastTemporalReset(() -> {
             if (svgfEnabled) {
@@ -1213,7 +1197,7 @@ public final class RtComposite {
             worldPipeline.setStorageImage(output.view);
             bindGuideImages();
         }
-        displayPipeline.setImages(displayImage.view, rrOutput.view, exposure.image().view, hdrDisplayImage.view);
+        postProcessing.bind(rrOutput);
     }
 
     /**
@@ -1396,51 +1380,10 @@ public final class RtComposite {
                 || pipelineStack == null || pipelinePostPresentTarget == 0L) {
             throw new IllegalStateException("post/present pass has no active frame invocation");
         }
-        RtContext ctx = pipelineContext;
-        VkCommandBuffer cmd = pipelineCommand;
-        MemoryStack stack = pipelineStack;
-        long dstImage = pipelinePostPresentTarget;
         boolean postHdr = CausticaConfig.Rt.Hdr.enabled();
-        PostBarrierPlan postPlan;
-        // Auto-exposure meters rrOutput (the post-RR, denoised/converged image), not the raw
-        // pre-RR trace: RR has no notion of exposure (DLSS-RR Integration Guide §3.7 — ignore
-        // exposure/auto-exposure/sharpness entirely for RR), so this is purely our own metering
-        // choice, independent of RR's pipeline placement. Metering the noisy pre-RR buffer made
-        // the histogram's log-luminance average biased by Monte-Carlo noise (Jensen's inequality
-        // on the concave log()), so the computed exposure drifted with SPP; rrOutput is stable
-        // regardless of SPP, keeping exposure consistent.
-        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
-             RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
-            postPlan = exposure.record(ctx, cmd, stack, rrOutput, postHdr);
-        }
-        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.DISPLAY);
-
-        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
-             RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
-            displayPipeline.dispatch(cmd, displayW, displayH, postHdr,
-                    CausticaConfig.Rt.Hdr.paperWhiteNits(), CausticaConfig.Rt.Hdr.headroom(),
-                    CausticaConfig.Rt.Tonemapping.operatorIndex(),
-                    CausticaConfig.Rt.Tonemapping.EXPOSURE_EV.value(),
-                    CausticaConfig.Rt.Tonemapping.GAMMA.value(),
-                    CausticaConfig.Rt.Tonemapping.SATURATION.value(),
-                    CausticaConfig.Rt.Tonemapping.CONTRAST.value());
-        }
-        hdrWrittenThisFrame = postHdr;
-        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.COPY);
-
-        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "copy composite to main target");
-             RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.copyOutput")) {
-            VK10.vkCmdCopyImage(cmd, displayImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                    dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
-        }
-        PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.EXPORT);
-        int postMode = 4 | (postPlan.automaticExposure() ? 2 : 0) | (postHdr ? 1 : 0);
-        if (loggedPostBarrierMode != postMode) {
-            CausticaMod.LOGGER.info("AER-083 post barriers: path={}, exposure={}, hdr={}, scope=legacy-conservative",
-                    "generated",
-                    postPlan.automaticExposure() ? "auto" : "manual", postHdr);
-            loggedPostBarrierMode = postMode;
-        }
+        postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, rrOutput,
+                displayW, displayH, pipelinePostPresentTarget, postHdr,
+                () -> hdrWrittenThisFrame = postHdr);
     }
 
     private FrameInputs prepareFrameInputs() {
@@ -2378,14 +2321,7 @@ public final class RtComposite {
             fgUiCompositePipeline.destroy();
             fgUiCompositePipeline = null;
         }
-        if (displayImage != null) {
-            displayImage.destroy();
-            displayImage = null;
-        }
-        if (hdrDisplayImage != null) {
-            hdrDisplayImage.destroy();
-            hdrDisplayImage = null;
-        }
+        postProcessing.destroyImages();
         if (fgHudlessImage != null) {
             fgHudlessImage.destroy();
             fgHudlessImage = null;
@@ -2405,11 +2341,7 @@ public final class RtComposite {
         }
         restirSystem.destroy();
         destroyGuideImages();
-        exposure.destroy();
-        if (displayPipeline != null) {
-            displayPipeline.destroy();
-            displayPipeline = null;
-        }
+        postProcessing.destroyPipelineAndExposure();
         if (hdrCompositePipeline != null) {
             hdrCompositePipeline.destroy();
             hdrCompositePipeline = null;
@@ -2537,7 +2469,7 @@ public final class RtComposite {
     public boolean isHdrPresentActive() {
         return CausticaConfig.Rt.Hdr.enabled()
                 && hdrWrittenThisFrame
-                && hdrDisplayImage != null;
+                && postProcessing.hdrImage() != null;
     }
 
     /**
@@ -2548,11 +2480,11 @@ public final class RtComposite {
      * active this frame.
      */
     public long hdrBackbufferView() {
-        return hdrDisplayImage != null ? hdrDisplayImage.view : 0L;
+        return postProcessing.hdrImage() != null ? postProcessing.hdrImage().view : 0L;
     }
 
     public long hdrBackbufferImage() {
-        return hdrDisplayImage != null ? hdrDisplayImage.image : 0L;
+        return postProcessing.hdrImage() != null ? postProcessing.hdrImage().image : 0L;
     }
 
     /**
@@ -2564,13 +2496,13 @@ public final class RtComposite {
      * values mirror vanilla {@code blitFromTexture} exactly. Y is flipped to match the vanilla swapchain blit.
      */
     public void presentHdr(VulkanCommandEncoder enc, long swapchainImage, int swapW, int swapH, long acquireSem, long presentSem) {
-        RtImage src = hdrDisplayImage;
+        RtImage src = postProcessing.hdrImage();
         int copyW = Math.min(swapW, src.width);
         int copyH = Math.min(swapH, src.height);
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkCommandBuffer cmd = enc.allocateAndBeginTransientCommandBuffer();
 
-            // FG "hudless" capture: hdrDisplayImage right now holds the RT world before the combined
+            // FG "hudless" capture: postProcessing.hdrImage() right now holds the RT world before the combined
             // UI overlay is blended in. Snapshot it before that composite overwrites it in place, mirroring
             // captureFgHudless's SDR pattern (pre-UI copy) but reusing this frame's already-open command
             // buffer. Both DLSS-FG (hudless resource) and the native engine (interpolation source +
@@ -2592,7 +2524,7 @@ public final class RtComposite {
                     pre.get(0).srcStageMask(65536L).srcAccessMask(65536L).dstStageMask(2048L).dstAccessMask(98304L);
                     VkDependencyInfo preDep = VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(pre);
                     KHRSynchronization2.vkCmdPipelineBarrier2KHR(cmd, preDep);
-                    hdrCompositePipeline.setImages(hdrDisplayImage.view, overlayView, hdrUiSampler);
+                    hdrCompositePipeline.setImages(postProcessing.hdrImage().view, overlayView, hdrUiSampler);
                     hdrCompositePipeline.dispatch(cmd, src.width, src.height, CausticaConfig.Rt.Hdr.paperWhiteNits());
                 }
                 RtUiOverlay.markConsumed();
@@ -2812,14 +2744,14 @@ public final class RtComposite {
     }
 
     /**
-     * HDR counterpart of {@link #captureFgHudless} — copies {@code src} (this frame's {@code hdrDisplayImage},
+     * HDR counterpart of {@link #captureFgHudless} — copies {@code src} (this frame's {@code postProcessing.hdrImage()},
      * before the combined UI overlay is blended in) into {@link #fgHdrHudlessImage} for {@link
      * #fgInterpolate}'s HDR path to feed DLSSG as the "hudless" resource. A plain copy, not a format
      * conversion: both images are
      * already PQ-encoded (the display-ready EOTF-encoded [0,1] signal DLSS-FG's programming guide requires),
      * so no encode step is needed. Called from {@link #presentHdr} using its already-open {@code cmd}/
      * {@code stack}, right before that method's own combined-UI composite dispatch overwrites
-     * {@code hdrDisplayImage} in place — same "capture before the UI gets baked back in" timing as the SDR
+     * {@code postProcessing.hdrImage()} in place — same "capture before the UI gets baked back in" timing as the SDR
      * version, just within a single method instead of split across a mixin hook.
      */
     private void captureFgHdrHudless(VkCommandBuffer cmd, MemoryStack stack, RtImage src) {
@@ -2834,7 +2766,7 @@ public final class RtComposite {
             fgHdrHudlessImage = ctx.createStorageImage(src.width, src.height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     "FG HDR hudless capture (PQ) " + src.width + "x" + src.height);
         }
-        // Make composite()'s writes to hdrDisplayImage (an earlier submit this frame) visible to this copy;
+        // Make composite()'s writes to postProcessing.hdrImage() (an earlier submit this frame) visible to this copy;
         // the copy's write is then made visible to the UI-composite dispatch that follows (and to DLSSG's
         // read, in a later command buffer) by the same idiom.
         VulkanCommandEncoder.memoryBarrier(cmd, stack);
