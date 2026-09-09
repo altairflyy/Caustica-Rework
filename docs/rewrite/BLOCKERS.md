@@ -207,3 +207,30 @@ active provider before final qualification.
 
 GATE-4 may remain PASS under its canonical `DEFERRED_BASELINE_ISSUE` exception.
 This blocker must be resolved before `FINAL` can pass.
+
+### 2026-09-09 scope override
+
+The user now explicitly excludes further DH/Voxy and FSR/XeSS qualification
+from this closure attempt. BLOCKER-002 is waived for that scope only, not fixed
+or runtime-qualified. Its historical account above is retained for traceability.
+
+## BLOCKER-003 — Final integration and measurement gaps
+
+Status: OPEN. Blocks AER-093 completion and FINAL PASS.
+
+Audit at `fd7ce60`: `RtComposite.ensureOutput`, `destroy` and FG/presentation
+methods still own resource allocation/lifetime, so the strict FINAL
+orchestration-only target is not demonstrated. Narrow AER-090 acceptance covers
+already-migrated lifetimes only. `FramePipeline` also retains a test-used linear
+execution API after production switched exclusively to `GraphExecution`.
+These findings require a bounded recovery/disposition, not an incidental
+ownership change inside a DOC_ONLY report.
+
+No matched frozen-reference/final GPU average, P95/P99, VRAM or BLAS dataset is
+available in the examined evidence. Historical GATE-8 A/B measures a CPU-side
+envelope for two flags in the same intermediate JAR and cannot satisfy FINAL.
+
+An agent-operated smoke was prepared but desktop inspection failed with
+`Computer Use app approval timed out`. No route was executed. This is NOT RUN,
+not a validation PASS. Optional paths excluded by the user are not blockers
+for this attempt. See `FINAL_REPORT.md` for exact sources, hashes and recovery.
