@@ -60,19 +60,33 @@ class AccelerationStructureManagerTest {
                 "src/main/java/dev/comfyfluffy/caustica/rt/gpu/AccelerationStructureManager.java"));
         String composite = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        String worldTraceResources = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/trace/WorldTraceResources.java"));
 
         assertTrue(context.contains("new AccelerationStructureManager(deferredDeletionQueue)"));
         int build = composite.indexOf("ctx.accelerationStructures().buildTlas(");
-        int publish = composite.indexOf("active.setTlas(", build);
+        int publish = composite.indexOf(
+                "worldTraceResources.bindTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);", build);
         int record = composite.indexOf("ctx.accelerationStructures().recordTlas(", publish);
         int barrier = composite.indexOf("VulkanCommandEncoder.memoryBarrier(cmd, stack)", record);
+        int trace = composite.indexOf("pipelineCursor.executeNext();", barrier);
 
         assertTrue(build >= 0);
-        assertTrue(build < publish && publish < record && record < barrier);
+        assertTrue(build < publish && publish < record && record < barrier && barrier < trace);
+        assertTrue(composite.contains("worldTraceResources.trace("));
+        assertEquals(-1, composite.indexOf("active.setTlas("));
         assertEquals(-1, composite.indexOf("RtAccel.prepareTlas("));
         assertEquals(-1, composite.indexOf("RtAccel.recordTlasBuild("));
         assertEquals(-1, composite.indexOf("new RtAccel.TlasRing("));
         assertEquals(-1, composite.indexOf("tlasRing.destroy()"));
+        int bindMethod = worldTraceResources.indexOf("public void bindTlas(long tlas,");
+        int traceMethod = worldTraceResources.indexOf("public void trace(", bindMethod);
+        assertTrue(bindMethod >= 0 && bindMethod < traceMethod);
+        String bindBody = worldTraceResources.substring(bindMethod, traceMethod);
+        assertTrue(bindBody.contains("worldPipeline.setTlas(tlas, graphicsUse, graphicsUseWaiter);"));
+        assertFalse(worldTraceResources.contains("RtAccel"));
+        assertFalse(worldTraceResources.contains("TlasRing"));
+        assertFalse(worldTraceResources.contains("PreparedTlas"));
         assertTrue(manager.contains("private final RtAccel.TlasRing frameTlasRing"));
         assertTrue(manager.contains("frameTlasRing.destroy();"));
         assertTrue(context.contains("accelerationStructureManager.destroy();"));

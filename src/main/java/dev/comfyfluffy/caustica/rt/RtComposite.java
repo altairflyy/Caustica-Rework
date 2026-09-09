@@ -3,10 +3,8 @@ package dev.comfyfluffy.caustica.rt;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
-import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.client.CausticaJitter;
@@ -23,20 +21,15 @@ import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Int4;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.BiomeColors;
-import net.minecraft.client.renderer.texture.TextureAtlas;
-import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.ModelBakery;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.data.AtlasIds;
-import net.minecraft.resources.Identifier;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.attribute.EnvironmentAttributes;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.MoonPhase;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
@@ -61,9 +54,6 @@ import dev.comfyfluffy.caustica.rt.environment.CloudModule;
 import dev.comfyfluffy.caustica.rt.environment.EnvironmentParameters;
 import dev.comfyfluffy.caustica.rt.environment.FogModule;
 import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
-import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
-import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
-import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.post.PostProcessing;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
@@ -76,8 +66,8 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtNrdCombinePipeline;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
-import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
+import dev.comfyfluffy.caustica.rt.trace.WorldTraceResources;
 import dev.comfyfluffy.caustica.rt.scene.TerrainSceneContribution;
 import dev.comfyfluffy.caustica.rt.scene.LodSceneContribution;
 import dev.comfyfluffy.caustica.rt.scene.RtScene;
@@ -108,7 +98,6 @@ import dev.comfyfluffy.caustica.rt.frame.UpscalePass;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.LongBuffer;
 
 
 /**
@@ -284,8 +273,6 @@ public final class RtComposite {
     // Matches the viewZ cap the tracer writes for sky/miss pixels: everything beyond is passed
     // through the denoise chain raw (the sky never accumulates history).
     private static final float NRD_DENOISING_RANGE = 500000.0f;
-    private static final Identifier SUN_ID = Identifier.withDefaultNamespace("sun");
-    private static final Identifier[] MOON_IDS = createMoonIds();
     // Celestial rotation axis (the pole the sun/moon arc about): perpendicular to the east-west arc,
     // tilted by SUN_NOON_SOUTH_TILT. Pushed so the sky shader can build the sun/moon square's tangent
     // frame (right = travel direction) and wheel the starfield. = normalize(noonDir x sunriseDir).
@@ -326,27 +313,8 @@ public final class RtComposite {
         return frameCounter;
     }
 
-    private RtPipeline worldPipeline;
-    // Set at the HEAD of Minecraft.reloadResourcePacks() (mixin): a resource reload recreates the block
-    // atlas + entity textures. We tear down the world pipeline there (drops all descriptor references) and
-    // rebuild it once the NEW atlas is in place — detected by the atlas view handle changing away from
-    // boundBlockAlbedoAtlasHandle to a fresh non-zero value (MC's deferred free keeps the old handle live for a few
-    // frames, so "handle != 0" alone isn't enough to tell old from new).
-    private volatile boolean reloadRebindRequested;
-    // The block-atlas view handle currently bound into the world pipeline (set by bindWorldTextures).
-    private long boundBlockAlbedoAtlasHandle;
-    private int bindlessTextureCapacity;
-    // True after the LabPBR atlases have been resolved/bound for the currently alive world pipeline.
-    private boolean materialBindingsReady;
-    // Set when a new material epoch is published. The first composite returns to vanilla so the next
-    // client tick can apply RtTerrain's full-clear before any old-epoch primitive IDs are traced.
-    private boolean materialEpochTraceGate;
-    // World push data lives in a host-visible BDA ring; only the slot address and a small hot subset are
-    // pushed inline (the full generated structure exceeds NVIDIA's 256-byte push-constant ceiling).
-    // Exact graphics completion guards host writes; ring depth only avoids routine waits.
-    private static final int PUSH_RING = 6;
-    private PushSlot[] pushRing;
-    private int pushSlot;
+    private final WorldTraceResources worldTraceResources =
+            new WorldTraceResources(WORLD_PUSH_BUFFER_SIZE, GUIDE_COUNT);
     private final PostProcessing postProcessing = new PostProcessing();
     private RtImage output;
     // Packed primary -> indirect continuations. Pass A is fixed at one sample and owns two records per
@@ -376,14 +344,6 @@ public final class RtComposite {
     private RtHdrCompositePipeline hdrCompositePipeline;
     private long hdrUiSampler;
 
-    private static final class PushSlot {
-        final RtBuffer buffer;
-        final RtGpuExecutor.TrackedGraphicsUse graphicsUse = new RtGpuExecutor.TrackedGraphicsUse();
-
-        PushSlot(RtBuffer buffer) {
-            this.buffer = buffer;
-        }
-    }
     // Menu/non-RT present: converts the SDR main target (sRGB) to PQ-encoded at paper white so menus,
     // the title panorama and the loading screen present correctly to the PQ swapchain instead of being
     // raw-copied (misdisplayed). Lazily created; the image is sized to the swapchain.
@@ -510,7 +470,6 @@ public final class RtComposite {
     private boolean mvHasPrev;
     private float previousWaterWaveTime;
     private boolean waterWaveTimeValid;
-    private long atlasSampler;
     private boolean failed;
     private boolean loggedActive;
 
@@ -537,7 +496,6 @@ public final class RtComposite {
     private String loggedUpscalerBarrierMode;
     private int loggedPathTraceBarrierMode = -1;
     private RtContext pipelineContext;
-    private RtPipeline pipelineActive;
     private FrameInputs pipelineInputs;
     private VkCommandBuffer pipelineCommand;
     private MemoryStack pipelineStack;
@@ -549,16 +507,6 @@ public final class RtComposite {
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
-    private long celestialUvAtlasHandle;
-    private int celestialUvMoonPhase = -1;
-    private float sunU0;
-    private float sunV0;
-    private float sunU1 = 1f;
-    private float sunV1 = 1f;
-    private float moonU0;
-    private float moonV0;
-    private float moonU1 = 1f;
-    private float moonV1 = 1f;
 
     // This frame's TLAS handle, published after prepareTlas so the world-overlay pass (block outline's
     // rayQueryEXT occlusion test) can bind the exact same acceleration structure the primary trace used —
@@ -576,15 +524,6 @@ public final class RtComposite {
         return currentTlasHandle;
     }
 
-    private static Identifier[] createMoonIds() {
-        MoonPhase[] phases = MoonPhase.values();
-        Identifier[] ids = new Identifier[phases.length];
-        for (int i = 0; i < phases.length; i++) {
-            ids[i] = Identifier.withDefaultNamespace("moon/" + phases[i].getSerializedName());
-        }
-        return ids;
-    }
-
     public boolean hasFailed() {
         return this.failed;
     }
@@ -598,24 +537,7 @@ public final class RtComposite {
      * not trip {@code VanillaRenderController}'s permanent safety latch.</p>
      */
     public boolean requiresVanillaWorldFallback() {
-        // Pipeline creation publishes a new material epoch and deliberately makes composite() return
-        // false once so RtTerrain can apply the matching full clear. Keep vanilla alive for that bring-up
-        // frame; otherwise LevelRenderer is cancelled before composite() discovers it must fall back and
-        // VanillaRenderController permanently latches the resulting missing replacement frame.
-        if (worldPipeline == null || !materialBindingsReady) {
-            return true;
-        }
-        if (materialEpochTraceGate) {
-            return true;
-        }
-        if (RtEntityTextures.maxTextures() > bindlessTextureCapacity) {
-            return true;
-        }
-        if (reloadRebindRequested) {
-            long atlas = blockAlbedoAtlasView();
-            return atlas == 0L || atlas == boundBlockAlbedoAtlasHandle;
-        }
-        return false;
+        return worldTraceResources.requiresVanillaFallback();
     }
 
     /**
@@ -757,11 +679,8 @@ public final class RtComposite {
             // old view handle live for a few frames, then swaps in the new atlas (whose GPU upload may lag,
             // leaving the handle 0 transiently). Skip RT — vanilla renders — until the handle becomes a
             // fresh, non-zero value different from what we last bound; only then rebuild against it.
-            if (reloadRebindRequested) {
-                long atlas = blockAlbedoAtlasView();
-                if (atlas == 0L || atlas == boundBlockAlbedoAtlasHandle) {
-                    return false;
-                }
+            if (!worldTraceResources.reloadReady()) {
+                return false;
             }
             syncSharcResources(ctx);
             ensureOutput(ctx, width, height);
@@ -769,30 +688,26 @@ public final class RtComposite {
             // manual -> auto at runtime (video settings), the auto-mode histogram/state/pipeline must be
             // allocated before the post-processing exposure stage below needs them, or it throws.
             postProcessing.ensureExposure(ctx);
-            refreshPipelineShapeIfNeeded(ctx);
-            RtPipeline active = ensureWorld(ctx);
-            if (materialEpochTraceGate) {
-                materialEpochTraceGate = false;
+            worldTraceResources.ensureForFrame(ctx, traceFrameViews());
+            if (worldTraceResources.consumeMaterialEpochTraceGate()) {
                 return false;
             }
-            refreshMaterialBindingsIfNeeded(ctx);
+            worldTraceResources.refreshMaterialBindingsIfNeeded(ctx);
             updateMotion();
             FrameInputs inputs = prepareFrameInputs();
             frameContext = createFrameContext(inputs);
             pipelineContext = ctx;
-            pipelineActive = active;
             pipelineInputs = inputs;
             pipelineCursor = graphExecution.begin(frameContext);
             try {
                 pipelineCursor.executeNext();
-                recordFrame(ctx, active, nativeColor, inputs);
+                recordFrame(ctx, nativeColor, inputs);
                 if (!pipelineCursor.complete()) {
                     throw new IllegalStateException("frame pipeline did not execute every pass");
                 }
             } finally {
                 pipelineCursor = null;
                 pipelineContext = null;
-                pipelineActive = null;
                 pipelineInputs = null;
             }
             if (!loggedActive) {
@@ -817,117 +732,14 @@ public final class RtComposite {
      * deliberately not built at the menu — only once a world is entered.
      */
     public void ensureResourcesReady(RtContext ctx) {
-        if (failed || worldPipeline != null || reloadRebindRequested) {
-            return;
-        }
-        if (Minecraft.getInstance().level == null || blockAlbedoAtlasView() == 0L) {
+        if (failed) {
             return;
         }
         try {
-            ensureWorld(ctx);
+            worldTraceResources.ensureAheadOfFrame(ctx, traceFrameViews());
         } catch (Throwable t) {
             failed = true;
             CausticaMod.LOGGER.error("RT resource bring-up failed; reverting to vanilla path", t);
-        }
-    }
-
-    private RtPipeline ensureWorld(RtContext ctx) {
-        if (worldPipeline == null) {
-            bindlessTextureCapacity = RtEntityTextures.maxTextures();
-            worldPipeline = RtPipeline.create(ctx, new String[]{
-                            RtDeviceBringup.worldPrimaryRaygenShader(),
-                            RtDeviceBringup.worldRaygenShader()},
-                    new String[]{"world.rmiss.spv", "world_guide.rmiss.spv"},
-                    "world.rchit.spv", "world.rahit.spv",
-                    WorldPushConstantsData.BYTE_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true);
-            // Per-frame world data lives in this BDA ring; the pipeline pushes its address and hot fields.
-            if (pushRing == null) {
-                pushRing = new PushSlot[PUSH_RING];
-                for (int i = 0; i < PUSH_RING; i++) {
-                    pushRing[i] = new PushSlot(ctx.createBuffer(WORLD_PUSH_BUFFER_SIZE,
-                            VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "rt world push " + i));
-                }
-            }
-            if (output != null) {
-                worldPipeline.setStorageImage(output.view);
-                bindGuideImages();
-            }
-            bindWorldTextures(ctx);
-            reloadRebindRequested = false;
-        }
-        // The TLAS is rebuilt and bound per frame in recordFrame since dynamic entity content animates
-        // the instance set every frame.
-        return worldPipeline;
-    }
-
-    private void refreshPipelineShapeIfNeeded(RtContext ctx) {
-        if (worldPipeline == null || reloadRebindRequested) {
-            return;
-        }
-        int desiredBindlessCapacity = RtEntityTextures.maxTextures();
-        if (desiredBindlessCapacity <= bindlessTextureCapacity) {
-            return;
-        }
-        ctx.waitIdle();
-        worldPipeline.destroy();
-        worldPipeline = null;
-        bindlessTextureCapacity = 0;
-        materialBindingsReady = false;
-    }
-
-    /**
-     * Resolve + bind every world-pipeline texture: the block atlas (binding 2 + bindless fallback slot 0)
-     * and the canonical material page bundles in reserved bindless slots. Shared by first creation and
-     * the post-reload rebind. Resets the entity bindless registry, recreates material pages, builds
-     * the shared material registry, and invalidates old-epoch geometry before tracing resumes.
-     */
-    private void bindWorldTextures(RtContext ctx) {
-        long sampler = atlasSampler(ctx);
-        long atlasView = blockAlbedoAtlasView();
-        boundBlockAlbedoAtlasHandle = atlasView; // remember what we bound so a reload can detect the new atlas
-        worldPipeline.setBlockAlbedoAtlas(atlasView, sampler);
-        // Bindless slot 0 = fallback texture (the block atlas) so an entity whose texture can't be
-        // resolved samples something defined rather than an unbound (partially-bound) descriptor.
-        RtBlockMaterials.INSTANCE.reset();
-        RtMaterialOverrides materialOverrides = RtMaterialOverrides.load();
-        RtEmissionSemantics emissionSemantics = RtEmissionSemantics.analyze();
-        RtBlockMaterials.INSTANCE.prepareAll(ctx, bindlessTextureCapacity, emissionSemantics, materialOverrides);
-        RtEntityTextures.INSTANCE.reset(bindlessTextureCapacity);
-        worldPipeline.setEntityAlbedoTexture(0, atlasView, sampler);
-        RtBlockMaterials.INSTANCE.bindPages(worldPipeline, sampler);
-        RtMaterialRegistry.INSTANCE.rebuild(ctx, RtBlockMaterials.INSTANCE, materialOverrides);
-        materialBindingsReady = true;
-        // Sky rewrite: bind the vanilla celestials atlas (sun + moon phases) for world.rmiss. The view
-        // handle is stable across frames; the shader only samples it inside the sun/moon discs (sky
-        // directions), so the block-atlas fallback is never read if the celestials atlas isn't ready.
-        long celView = celestialsAtlasView();
-        if (worldPipeline.hasSkyAtlas()) {
-            worldPipeline.setSkyAtlas(celView != 0L ? celView : atlasView, sampler);
-        }
-        setCelestialUvAtlas(celView);
-        // Atlas UVs and material IDs are one resource epoch. Drop old terrain as a unit rather than
-        // incrementally displaying old UVs/IDs against the new atlas/table.
-        RtTerrain.requestFullClear();
-        materialEpochTraceGate = true;
-    }
-
-    private void refreshMaterialBindingsIfNeeded(RtContext ctx) {
-        if (worldPipeline == null || reloadRebindRequested) {
-            return;
-        }
-        if (!materialBindingsReady) {
-            bindWorldTextures(ctx);
-        }
-    }
-
-    /** Vulkan image-view of the vanilla celestials atlas (sun + moon-phase sprites), or 0 if unavailable. */
-    private static long celestialsAtlasView() {
-        try {
-            GpuTextureView view = Minecraft.getInstance().getAtlasManager()
-                    .getAtlasOrThrow(AtlasIds.CELESTIALS).getTextureView();
-            return vkImageView(view);
-        } catch (Exception e) {
-            return 0L;
         }
     }
 
@@ -944,37 +756,8 @@ public final class RtComposite {
     public void onResourceReloadStart() {
         recordTemporalReset(TemporalResetReason.RESOURCE_RELOAD);
         recordTemporalReset(TemporalResetReason.MATERIAL_GENERATION_CHANGE);
-        reloadRebindRequested = true;
-        materialBindingsReady = false;
-        setCelestialUvAtlas(0L);
-        broadcastTemporalReset(RtEntities.INSTANCE::onResourceReload);
-        RtContext ctx = RtContext.currentOrNull();
-        if (ctx != null) {
-            ctx.waitIdle();
-            if (worldPipeline != null) {
-                worldPipeline.destroy();
-                worldPipeline = null;
-                bindlessTextureCapacity = 0;
-            }
-            RtMaterialRegistry.INSTANCE.destroy();
-        }
-    }
-
-    /** Bind the guide buffers into the world pipeline's extra storage-image slots. */
-    private void bindGuideImages() {
-        if (worldPipeline == null || gNormal == null) {
-            return;
-        }
-        worldPipeline.setExtraStorageImage(0, gNormal.view);
-        worldPipeline.setExtraStorageImage(1, gAlbedo.view);
-        worldPipeline.setExtraStorageImage(2, gDepth.view);
-        worldPipeline.setExtraStorageImage(3, gMotion.view);
-        worldPipeline.setExtraStorageImage(4, gSpecAlbedo.view);
-        worldPipeline.setExtraStorageImage(5, gSpecMotion.view);
-        // NRD signals: always bound (the layout carries them); only written under FEATURE_NRD.
-        worldPipeline.setExtraStorageImage(6, gViewZ.view);
-        worldPipeline.setExtraStorageImage(7, gNrdDiff.view);
-        worldPipeline.setExtraStorageImage(8, gNrdSpec.view);
+        worldTraceResources.onResourceReload(
+                () -> broadcastTemporalReset(RtEntities.INSTANCE::onResourceReload));
     }
 
     private void destroyGuideImages() {
@@ -1035,6 +818,17 @@ public final class RtComposite {
             rrOutput.destroy();
             rrOutput = null;
         }
+    }
+
+    /** Borrowed frame-sized views used by the world descriptor owner. */
+    private WorldTraceResources.FrameViews traceFrameViews() {
+        if (output == null || gNormal == null) {
+            return null;
+        }
+        return new WorldTraceResources.FrameViews(output.view, new long[]{
+                gNormal.view, gAlbedo.view, gDepth.view, gMotion.view, gSpecAlbedo.view,
+                gSpecMotion.view, gViewZ.view, gNrdDiff.view, gNrdSpec.view
+        });
     }
 
     /**
@@ -1193,10 +987,7 @@ public final class RtComposite {
             mvHasPrev = false; // recreated images -> first MV frame is zero
             waterWaveTimeValid = false;
         });
-        if (worldPipeline != null) {
-            worldPipeline.setStorageImage(output.view);
-            bindGuideImages();
-        }
+        worldTraceResources.bindFrameViews(traceFrameViews());
         postProcessing.bind(rrOutput);
     }
 
@@ -1242,8 +1033,8 @@ public final class RtComposite {
     }
 
     private void recordPathTrace(FrameContext frame) {
-        if (frame != frameContext || pipelineContext == null || pipelineActive == null
-                || pipelineCommand == null || pipelineStack == null || pipelinePushConstants == null) {
+        if (frame != frameContext || pipelineContext == null || pipelineCommand == null
+                || pipelineStack == null || pipelinePushConstants == null) {
             throw new IllegalStateException("path-trace pass has no active frame invocation");
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarrierPlan barrierPlan =
@@ -1252,7 +1043,7 @@ public final class RtComposite {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world primary trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.tracePrimary")) {
-            pipelineActive.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 0);
+            worldTraceResources.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 0);
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
@@ -1260,7 +1051,7 @@ public final class RtComposite {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world indirect trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
-            pipelineActive.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 1);
+            worldTraceResources.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 1);
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
@@ -1427,7 +1218,7 @@ public final class RtComposite {
                 dimensionId(Minecraft.getInstance().level), FrameContext.LEGACY_SCENE_GENERATION);
     }
 
-    private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor, FrameInputs inputs) {
+    private void recordFrame(RtContext ctx, GpuTexture nativeColor, FrameInputs inputs) {
         long dstImage = vkImage(nativeColor);
         var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
         RtGpuExecutor gpuExecutor = ctx.gpuExecutor();
@@ -1470,11 +1261,7 @@ public final class RtComposite {
             RtLodTerrain.INSTANCE.frame(ctx, terrain.blockX, terrain.blockY, terrain.blockZ);
             // Select the next BDA ring slot; the generated WorldPushData serializer fills it once all
             // frame-derived values (including entity addresses and block-breaking entries) are known.
-            pushSlot = (pushSlot + 1) % PUSH_RING;
-            PushSlot selectedPushSlot = pushRing[pushSlot];
-            graphicsUseWaiter.await(selectedPushSlot.graphicsUse);
-            selectedPushSlot.graphicsUse.mark(graphicsUse);
-            RtBuffer pushBuf = selectedPushSlot.buffer;
+            RtBuffer pushBuf = worldTraceResources.acquirePushBuffer(graphicsUse, graphicsUseWaiter);
             ByteBuffer push = MemoryUtil.memByteBuffer(pushBuf.mapped, WORLD_PUSH_SIZE);
             // Exact per-section vanilla-readiness hand-off mask for world.rahit's DH/Voxy suppression.
             ByteBuffer readyMask = MemoryUtil.memByteBuffer(
@@ -1664,7 +1451,7 @@ public final class RtComposite {
             }
             pushBuf.flush(0L, flushBytes);
             // Upload any entity textures registered this frame into the bindless set before the trace.
-            RtEntityTextures.INSTANCE.uploadPending(active, atlasSampler(ctx));
+            worldTraceResources.uploadPendingEntityTextures(ctx);
             // Build the entity BLAS, the TLAS that references it and the terrain BLAS, then the trace.
             // Barriers separate each stage; the graphics-use timeline guards resource reuse.
             if (!fe.blas().isEmpty()) {
@@ -1679,7 +1466,7 @@ public final class RtComposite {
                 frameTlas = ctx.accelerationStructures().buildTlas(
                         ctx, tlasInput.baseInstances(), tlasInput.dynamicInstances(), graphicsUse);
             }
-            active.setTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
+            worldTraceResources.bindTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
             currentTlasHandle = frameTlas.accel.handle;
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.recordTlas")) {
                 ctx.accelerationStructures().recordTlas(ctx, cmd, frameTlas);
@@ -1882,8 +1669,6 @@ public final class RtComposite {
     private record ReconstructionResult(boolean rrDone, RtImage upscaleSource, boolean svgfRan) {}
 
     private record UpscaleInput(boolean rrDone, RtImage upscaleSource, boolean svgfRan, boolean nrdDone) {}
-
-    private record CelestialUv(Float4 sun, Float4 moon) {}
 
     /**
      * This frame's weather, resolved once on the CPU and pushed to the shaders.
@@ -2204,7 +1989,7 @@ public final class RtComposite {
         // Stars are behind the cloud deck during rain; the sky shader fades them out on the same ramp.
         starBrightness *= 1.0f - weather.rain();
 
-        CelestialUv uv = celestialUv(moonPhase);
+        WorldTraceResources.CelestialUv uv = worldTraceResources.celestialUv(moonPhase);
         return new EnvironmentParameters.Sky(
                 new Float4(sunX, sunY, sunZ, dayFactor),
                 new Float4(lx, ly, lz, lightRadius),
@@ -2213,51 +1998,6 @@ public final class RtComposite {
                 new Float4(0f, celestialAxisY(), celestialAxisZ(), starAngle),
                 uv.sun(),
                 uv.moon());
-    }
-
-    /**
-     * Push the celestials-atlas UV rects (u0,v0,u1,v1) for the sun sprite and the current moon-phase
-     * sprite, so world.rmiss can sample the real vanilla textures on the discs. Atlas-not-ready (early
-     * boot / no resources) leaves full-range UVs and the shader's block-atlas fallback covers it.
-     */
-    private CelestialUv celestialUv(float moonPhaseIndex) {
-        if (celestialUvAtlasHandle == 0L) {
-            setCelestialUvAtlas(celestialsAtlasView());
-        }
-        int phase = Math.clamp((int) moonPhaseIndex, 0, MOON_IDS.length - 1);
-        if (phase != celestialUvMoonPhase) {
-            refreshCelestialUvCache(phase);
-        }
-        return new CelestialUv(
-                new Float4(sunU0, sunV0, sunU1, sunV1),
-                new Float4(moonU0, moonV0, moonU1, moonV1));
-    }
-
-    private void setCelestialUvAtlas(long atlasHandle) {
-        if (celestialUvAtlasHandle == atlasHandle) {
-            return;
-        }
-        celestialUvAtlasHandle = atlasHandle;
-        celestialUvMoonPhase = -1;
-        sunU0 = 0f; sunV0 = 0f; sunU1 = 1f; sunV1 = 1f;
-        moonU0 = 0f; moonV0 = 0f; moonU1 = 1f; moonV1 = 1f;
-    }
-
-    private void refreshCelestialUvCache(int moonPhase) {
-        sunU0 = 0f; sunV0 = 0f; sunU1 = 1f; sunV1 = 1f;
-        moonU0 = 0f; moonV0 = 0f; moonU1 = 1f; moonV1 = 1f;
-        try {
-            if (celestialUvAtlasHandle != 0L) {
-                TextureAtlas atlas = Minecraft.getInstance().getAtlasManager().getAtlasOrThrow(AtlasIds.CELESTIALS);
-                TextureAtlasSprite sun = atlas.getSprite(SUN_ID);
-                sunU0 = sun.getU0(); sunV0 = sun.getV0(); sunU1 = sun.getU1(); sunV1 = sun.getV1();
-                TextureAtlasSprite moon = atlas.getSprite(MOON_IDS[moonPhase]);
-                moonU0 = moon.getU0(); moonV0 = moon.getV0(); moonU1 = moon.getU1(); moonV1 = moon.getV1();
-            }
-        } catch (Exception ignored) {
-            // celestials atlas not yet loaded — keep full-range UVs (fallback texture is the block atlas)
-        }
-        celestialUvMoonPhase = moonPhase;
     }
 
     /** Hermite smoothstep matching GLSL semantics (0 below edge0, 1 above edge1). */
@@ -2391,63 +2131,7 @@ public final class RtComposite {
         nativeFgCamValid = false;
         fgNativeLastUseFrame = -1;
         fgNativeSeededTick = false;
-        if (worldPipeline != null) {
-            worldPipeline.destroy();
-            worldPipeline = null;
-        }
-        bindlessTextureCapacity = 0;
-        materialBindingsReady = false;
-        materialEpochTraceGate = false;
-        RtMaterialRegistry.INSTANCE.destroy();
-        if (pushRing != null) {
-            for (PushSlot slot : pushRing) {
-                if (slot != null) {
-                    slot.buffer.destroy();
-                }
-            }
-            pushRing = null;
-        }
-        if (atlasSampler != 0L) {
-            RtContext ctx = RtContext.currentOrNull();
-            if (ctx != null) {
-                VK10.vkDestroySampler(ctx.vk(), atlasSampler, null);
-            }
-            atlasSampler = 0L;
-        }
-    }
-
-    private long atlasSampler(RtContext ctx) {
-        if (atlasSampler == 0L) {
-            try (MemoryStack stack = MemoryStack.stackPush()) {
-                VkSamplerCreateInfo sci = VkSamplerCreateInfo.calloc(stack).sType$Default()
-                        .magFilter(VK10.VK_FILTER_NEAREST).minFilter(VK10.VK_FILTER_NEAREST)
-                        .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_LINEAR)
-                        .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
-                        .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
-                        .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
-                        .minLod(0f).maxLod(16f);
-                LongBuffer p = stack.mallocLong(1);
-                if (VK10.vkCreateSampler(ctx.vk(), sci, null, p) != VK10.VK_SUCCESS) {
-                    throw new IllegalStateException("vkCreateSampler(block atlas) failed");
-                }
-                atlasSampler = p.get(0);
-                RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, atlasSampler, "block atlas sampler");
-            }
-        }
-        return atlasSampler;
-    }
-
-    private static long blockAlbedoAtlasView() {
-        GpuTextureView view = Minecraft.getInstance().getTextureManager()
-                .getTexture(TextureAtlas.LOCATION_BLOCKS).getTextureView();
-        return vkImageView(view);
-    }
-
-    private static long vkImageView(GpuTextureView view) {
-        if (view instanceof VulkanGpuTextureView vulkanView) {
-            return vulkanView.vkImageView();
-        }
-        throw new IllegalStateException("cannot resolve VkImageView for " + view);
+        worldTraceResources.destroy();
     }
 
     private static long vkImage(GpuTexture texture) {
