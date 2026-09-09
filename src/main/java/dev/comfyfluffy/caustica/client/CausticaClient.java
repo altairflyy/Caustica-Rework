@@ -102,6 +102,9 @@ public final class CausticaClient implements ClientModInitializer {
 		}
 		RtWorkerPool.INSTANCE.shutdown();
 		if (ctx != null) {
+			// Stop the private submission lane, wait every device queue (including Minecraft's
+			// persistent frame-tail encoder), and flush deferred destroys before any GPU owner teardown.
+			ctx.quiesceForOwnerShutdown();
 			RtEntities.INSTANCE.shutdown(ctx);
 		}
 		RtComposite.INSTANCE.destroy();

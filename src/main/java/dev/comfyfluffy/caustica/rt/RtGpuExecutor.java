@@ -56,7 +56,7 @@ public final class RtGpuExecutor {
     private final Object submissionLock = new Object();
     private final Thread thread;
     private long commandPool;
-    private volatile boolean closed;
+    private final GpuShutdownState shutdownState = new GpuShutdownState();
     private volatile Throwable executorFailure;
 
     RtGpuExecutor(RtContext ctx) {
@@ -86,9 +86,7 @@ public final class RtGpuExecutor {
     public synchronized Build submit(BooleanSupplier cancelled, Consumer<VkCommandBuffer> record,
                                      Runnable afterSuccess, BiConsumer<Build, Throwable> finished) {
         checkExecutorFailure();
-        if (closed) {
-            throw new IllegalStateException("RT GPU executor is closed");
-        }
+        shutdownState.requireSubmissionAllowed();
         long value = queueDependencies.reserveTransferBuild();
         Build build = new Build(value);
         jobs.add(new Job(cancelled, record, afterSuccess, finished, build));
@@ -155,8 +153,13 @@ public final class RtGpuExecutor {
         enqueueDestroyAfterGraphicsValue(trackedUse.value, destroy, true);
     }
 
-    private void enqueueDestroyAfterGraphicsValue(long lastUseValue, Runnable destroy, boolean published) {
+    private synchronized void enqueueDestroyAfterGraphicsValue(long lastUseValue, Runnable destroy, boolean published) {
         checkExecutorFailure();
+        if (shutdownState.isQuiesced()) {
+            destroy.run();
+            return;
+        }
+        shutdownState.requireSubmissionAllowed();
         synchronized (destroyJobs) {
             destroyJobs.add(new DestroyJob(lastUseValue, destroy, published));
         }
@@ -212,12 +215,17 @@ public final class RtGpuExecutor {
         }
     }
 
-    public synchronized void shutdown() {
-        if (closed) {
+    /**
+     * Stop the submission lane and establish device-wide quiescence before GPU resource owners tear down.
+     * Executor-owned command pools and timelines intentionally remain alive until final context destruction.
+     */
+    public synchronized void quiesceForOwnerShutdown() {
+        if (shutdownState.isQuiesced()) {
             return;
         }
-        closed = true;
-        jobs.add(STOP);
+        if (shutdownState.beginQuiescence()) {
+            jobs.add(STOP);
+        }
         try {
             thread.join();
         } catch (InterruptedException e) {
@@ -226,21 +234,28 @@ public final class RtGpuExecutor {
         }
         // Stop and join first: waiting idle before the executor stops leaves a race where it can
         // submit immediately after vkDeviceWaitIdle returns. The idle wait also makes graphics-side
-        // timeline semaphore use complete before those semaphores are destroyed below.
+        // timeline semaphore use complete before owners begin teardown.
         ctx.waitIdle();
-        Throwable failure = null;
-        try {
-            flushDestroysAfterDeviceIdle();
-        } catch (Throwable t) {
-            failure = t;
+        shutdownState.markQuiesced();
+        flushDestroysAfterDeviceIdle();
+    }
+
+    /** Destroy executor infrastructure after every GPU owner has completed idle-safe teardown. */
+    public synchronized void destroyAfterQuiescence() {
+        if (!shutdownState.shouldDestroyInfrastructure()) {
+            return;
         }
         VK10.vkDestroyCommandPool(ctx.vk(), commandPool, null);
         commandPool = 0L;
         VK10.vkDestroySemaphore(ctx.vk(), graphicsTimeline, null);
         VK10.vkDestroySemaphore(ctx.vk(), buildTimeline, null);
-        if (failure != null) {
-            throw new IllegalStateException("RT GPU executor shutdown failed", failure);
-        }
+        shutdownState.markDestroyed();
+    }
+
+    /** Convenience composed shutdown for callers that do not require a two-phase owner teardown. */
+    public void shutdown() {
+        quiesceForOwnerShutdown();
+        destroyAfterQuiescence();
     }
 
     private void run() {

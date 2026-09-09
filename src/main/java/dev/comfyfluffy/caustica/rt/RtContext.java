@@ -539,8 +539,13 @@ public final class RtContext {
         }
     }
 
+    /** Stop GPU producers and prove global device quiescence before resource-owner teardown. */
+    public void quiesceForOwnerShutdown() {
+        gpuExecutor.quiesceForOwnerShutdown();
+    }
+
     public void destroy() {
-        gpuExecutor.shutdown();
+        gpuExecutor.destroyAfterQuiescence();
         accelerationStructureManager.destroy();
         if (commandPool != 0L) {
             VK10.vkDestroyCommandPool(vk, commandPool, null);
