@@ -29,6 +29,10 @@ class GraphExecutionTest {
         assertFalse(source.contains("RewriteGates"));
         assertFalse(source.contains("legacy.begin("));
         assertTrue(source.contains("return new Cursor(frame);"));
+        assertEquals(List.of(), java.util.Arrays.stream(FramePipeline.class.getDeclaredMethods())
+                .map(java.lang.reflect.Method::getName)
+                .filter(name -> name.equals("begin") || name.equals("execute")).toList());
+        assertEquals(0, FramePipeline.class.getDeclaredClasses().length);
     }
 
     private List<String> run(int failure) {
@@ -53,7 +57,6 @@ class GraphExecutionTest {
                     new UpscalePass(callbacks.get(3)), new PostPresentPass(callbacks.get(4)));
             GraphExecution execution = new GraphExecution(FrameGraph.shadow(pipeline), pipeline);
             FrameCursor cursor = execution.begin(frame);
-            assertFalse(cursor instanceof FramePipeline.Cursor);
             for (int i = 0; i < 5; i++) {
                 assertFalse(cursor.complete());
                 events.add("before" + i);

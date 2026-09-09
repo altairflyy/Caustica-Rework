@@ -4,8 +4,8 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Small ordered frame-pass runner. This is intentionally a linear seam, not a
- * render graph: pass ownership and GPU resources remain with the legacy path.
+ * Immutable ordered callback bindings consumed by the frame graph.
+ * Execution belongs exclusively to GraphExecution; this container owns no resources.
  */
 public final class FramePipeline {
     private final List<FramePass> passes;
@@ -19,17 +19,6 @@ public final class FramePipeline {
         this.passes.forEach(pass -> Objects.requireNonNull(pass, "pass"));
     }
 
-    public void execute(FrameContext frame) {
-        Cursor cursor = begin(frame);
-        while (!cursor.complete()) {
-            cursor.executeNext();
-        }
-    }
-
-    public Cursor begin(FrameContext frame) {
-        return new Cursor(Objects.requireNonNull(frame, "frame"));
-    }
-
     public int passCount() {
         return passes.size();
     }
@@ -39,29 +28,9 @@ public final class FramePipeline {
         return passes;
     }
 
-    /** Stable debug description used by the shadow render graph. */
+    /** Stable names used to bind and validate the frame graph. */
     public List<String> declaredPassNames() {
         return passes.stream().map(pass -> pass.getClass().getSimpleName()).toList();
     }
 
-    /** Executes this pipeline incrementally while preserving its declared order. */
-    public final class Cursor implements FrameCursor {
-        private final FrameContext frame;
-        private int nextPass;
-
-        private Cursor(FrameContext frame) {
-            this.frame = frame;
-        }
-
-        public void executeNext() {
-            if (complete()) {
-                throw new IllegalStateException("frame pipeline is already complete");
-            }
-            passes.get(nextPass++).execute(frame);
-        }
-
-        public boolean complete() {
-            return nextPass == passes.size();
-        }
-    }
 }

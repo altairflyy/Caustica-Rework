@@ -2,6 +2,8 @@ package dev.comfyfluffy.caustica.rt.frame;
 
 import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
+import dev.comfyfluffy.caustica.rt.graph.FrameGraph;
+import dev.comfyfluffy.caustica.rt.graph.GraphExecution;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -20,13 +22,14 @@ class FramePipelineTest {
         List<FrameContext> received = new ArrayList<>();
 
         FramePipeline pipeline = new FramePipeline(
-                pass("prepare", order, received),
-                pass("pathTrace", order, received),
-                pass("reconstruction", order, received),
-                pass("upscale", order, received),
-                pass("postPresent", order, received));
+                new PrepareFramePass(context -> pass("prepare", order, received).execute(context)),
+                new PathTracePass(context -> pass("pathTrace", order, received).execute(context)),
+                new ReconstructionPass(context -> pass("reconstruction", order, received).execute(context)),
+                new UpscalePass(context -> pass("upscale", order, received).execute(context)),
+                new PostPresentPass(context -> pass("postPresent", order, received).execute(context)));
 
-        pipeline.execute(frame);
+        FrameCursor cursor = new GraphExecution(FrameGraph.shadow(pipeline), pipeline).begin(frame);
+        while (!cursor.complete()) cursor.executeNext();
 
         assertEquals(5, pipeline.passCount());
         assertEquals(List.of("prepare", "pathTrace", "reconstruction", "upscale", "postPresent"), order);
@@ -83,14 +86,23 @@ class FramePipelineTest {
         FrameContext frame = frame(16L);
         List<String> order = new ArrayList<>();
         FramePipeline pipeline = new FramePipeline(
-                context -> order.add("first"), context -> order.add("second"));
-        FramePipeline.Cursor cursor = pipeline.begin(frame);
+                new PrepareFramePass(context -> order.add("first")),
+                new PathTracePass(context -> order.add("second")),
+                new ReconstructionPass(context -> order.add("third")),
+                new UpscalePass(context -> order.add("fourth")),
+                new PostPresentPass(context -> order.add("fifth")));
+        FrameCursor cursor = new GraphExecution(FrameGraph.shadow(pipeline), pipeline).begin(frame);
 
         cursor.executeNext();
         assertEquals(List.of("first"), order);
         cursor.executeNext();
 
         assertEquals(List.of("first", "second"), order);
+        assertEquals(false, cursor.complete());
+        cursor.executeNext();
+        cursor.executeNext();
+        cursor.executeNext();
+        assertEquals(List.of("first", "second", "third", "fourth", "fifth"), order);
         assertEquals(true, cursor.complete());
     }
 
