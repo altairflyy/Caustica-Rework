@@ -67,6 +67,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.trace.WorldTraceResources;
+import dev.comfyfluffy.caustica.rt.trace.TraceFrameResources;
 import dev.comfyfluffy.caustica.rt.scene.TerrainSceneContribution;
 import dev.comfyfluffy.caustica.rt.scene.LodSceneContribution;
 import dev.comfyfluffy.caustica.rt.scene.RtScene;
@@ -194,7 +195,7 @@ public final class RtComposite {
     // Per-lobe NRD signal capture: only the NRD path needs it (it costs an extra shadow ray for the
     // lobe split), so it is a feature bit rather than something the tracer always pays for.
     private static final int FEATURE_NRD = 64;
-    // gViewZ capture. Every denoised non-DLSS path needs it (SVGF's reprojection validation and
+    // frameViews().viewZ() capture. Every denoised non-DLSS path needs it (SVGF's reprojection validation and
     // sky cutoff, NRD's IN_VIEWZ), so it is set for both denoisers.
     private static final int FEATURE_VIEWZ = 128;
     private static final int FEATURE_SHARC = 256;
@@ -247,7 +248,7 @@ public final class RtComposite {
                 flags |= FEATURE_NRD;
                 flags |= FEATURE_VIEWZ;
             } else if (CausticaConfig.Rt.Denoise.ENABLED.value() && debugView() == 0) {
-                // SVGF needs gViewZ for its geometry-validated reprojection and its sky cutoff.
+                // SVGF needs frameViews().viewZ() for its geometry-validated reprojection and its sky cutoff.
                 flags |= FEATURE_VIEWZ;
             }
         }
@@ -313,11 +314,8 @@ public final class RtComposite {
 
     private final WorldTraceResources worldTraceResources =
             new WorldTraceResources(WORLD_PUSH_BUFFER_SIZE, GUIDE_COUNT);
+    private final TraceFrameResources traceFrameResources = new TraceFrameResources(PATH_RECORD_BYTES);
     private final PostProcessing postProcessing = new PostProcessing();
-    private RtImage output;
-    // Packed primary -> indirect continuations. Pass A is fixed at one sample and owns two records per
-    // render pixel (base + optional transmission); Pass B resamples them at the configured SPP.
-    private RtBuffer continuationQueue;
     // ReSTIR DI/GI history is a strict two-buffer ping-pong: a dispatch reads only `previous` and writes
     // only `current`, so spatial neighbour reuse never races another raygen invocation. The pair exists
     // only while the player setting is ON; live toggles idle the device before destruction/allocation.
@@ -391,20 +389,6 @@ public final class RtComposite {
     // same sub-pixel offset the camera rays used; captured in recordFrame, read at present time.
     private float fgJitterX;
     private float fgJitterY;
-    // Guide buffers (first-hit attributes for DLSS-RR): normal+roughness, albedo, depth, motion,
-    // specular albedo, and reflection motion.
-    private RtImage gNormal;
-    private RtImage gAlbedo;
-    private RtImage gDepth;
-    private RtImage gMotion;
-    private RtImage gSpecAlbedo;
-    private RtImage gSpecMotion;
-    // Primary-hit linear view depth (the denoisers' sky cutoff + NRD's IN_VIEWZ), plus the tracer's
-    // per-lobe NRD signals (demodulated YCoCg radiance + normalized hit distance). The lobe images
-    // are written only under FEATURE_NRD, but their bindings always exist in the pipeline layout.
-    private RtImage gViewZ;
-    private RtImage gNrdDiff;
-    private RtImage gNrdSpec;
     // ---- SVGF (the renderer's own denoiser for every non-DLSS path).
     //
     // colour/history ping-pong (rgb = colour, a = accumulated frame count), the luminance-moment
@@ -417,39 +401,12 @@ public final class RtComposite {
     private final UpscalerRuntime upscalers = UpscalerRuntime.INSTANCE;
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
-    private boolean renderSizeSvgfEnabled;
-    // NRD/REBLUR: the denoiser's own input/output pair + the combined (decoded + summed) radiance
-    // the upscale stage consumes, plus the validation overlay target.
-    private RtImage nrdDiffOut;
-    private RtImage nrdSpecOut;
-    private RtImage nrdCombined;
-    private RtImage nrdValidation;
-    private boolean renderSizeNrdEnabled;
-    // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
-    // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
-    private RtImage rrOutput;
     // Experimental SHaRC (Spatially Hashed Radiance Cache). Shader-only — the host only owns the
     // persistent cache buffer and publishes its device address (no native lib, no extra binding).
     private final SharcRadianceCache sharc = SharcRadianceCache.INSTANCE;
     private final CloudModule cloudModule = CloudModule.INSTANCE;
     private final FogModule fogModule = FogModule.INSTANCE;
 
-    // Trace + guide buffers run at render res; composite (display-mapping) runs at display res.
-    private int displayW = -1;
-    private int displayH = -1;
-    private int renderW = -1;
-    private int renderH = -1;
-    // What ensureOutput last sized the render/guide images for, so a quality change (or RR being
-    // toggled) at a fixed window size is noticed even though displayW/displayH didn't change.
-    private boolean renderSizeRrEnabled;
-    private int renderSizeRrQuality = Integer.MIN_VALUE;
-    // FSR 3 occupies the same upscale slot as RR (never both): its state joins the render-size key
-    // so switching upscaler or FSR quality rebuilds the trace targets exactly like RR does.
-    private boolean renderSizeFsrEnabled;
-    private int renderSizeFsrQuality = Integer.MIN_VALUE;
-    // XeSS shares that same slot (never with RR nor FSR): same keying contract.
-    private boolean renderSizeXessEnabled;
-    private int renderSizeXessQuality = Integer.MIN_VALUE;
 
     // Motion-vector reprojection state: the previous frame's camera-relative view-projection and
     // camera position, read into the push constant each frame then advanced at frame end.
@@ -757,74 +714,20 @@ public final class RtComposite {
                 () -> broadcastTemporalReset(RtEntities.INSTANCE::onResourceReload));
     }
 
-    private void destroyGuideImages() {
-        if (gNormal != null) {
-            gNormal.destroy();
-            gNormal = null;
-        }
-        if (gAlbedo != null) {
-            gAlbedo.destroy();
-            gAlbedo = null;
-        }
-        if (gDepth != null) {
-            gDepth.destroy();
-            gDepth = null;
-        }
-        if (gMotion != null) {
-            gMotion.destroy();
-            gMotion = null;
-        }
-        if (gSpecAlbedo != null) {
-            gSpecAlbedo.destroy();
-            gSpecAlbedo = null;
-        }
-        if (gSpecMotion != null) {
-            gSpecMotion.destroy();
-            gSpecMotion = null;
-        }
-        if (gViewZ != null) {
-            gViewZ.destroy();
-            gViewZ = null;
-        }
-        if (gNrdDiff != null) {
-            gNrdDiff.destroy();
-            gNrdDiff = null;
-        }
-        if (gNrdSpec != null) {
-            gNrdSpec.destroy();
-            gNrdSpec = null;
-        }
-        svgfBackend.releaseResources();
-        if (nrdDiffOut != null) {
-            nrdDiffOut.destroy();
-            nrdDiffOut = null;
-        }
-        if (nrdSpecOut != null) {
-            nrdSpecOut.destroy();
-            nrdSpecOut = null;
-        }
-        if (nrdCombined != null) {
-            nrdCombined.destroy();
-            nrdCombined = null;
-        }
-        if (nrdValidation != null) {
-            nrdValidation.destroy();
-            nrdValidation = null;
-        }
-        if (rrOutput != null) {
-            rrOutput.destroy();
-            rrOutput = null;
-        }
+    /** Borrowed frame-sized views used by the world descriptor owner. */
+    private TraceFrameResources.TraceFrameViews frameViews() {
+        return traceFrameResources.views();
     }
 
-    /** Borrowed frame-sized views used by the world descriptor owner. */
     private WorldTraceResources.FrameViews traceFrameViews() {
-        if (output == null || gNormal == null) {
+        TraceFrameResources.TraceFrameViews views = traceFrameResources.views();
+        if (views == null || views.output() == null || views.normal() == null) {
             return null;
         }
-        return new WorldTraceResources.FrameViews(output.view, new long[]{
-                gNormal.view, gAlbedo.view, gDepth.view, gMotion.view, gSpecAlbedo.view,
-                gSpecMotion.view, gViewZ.view, gNrdDiff.view, gNrdSpec.view
+        return new WorldTraceResources.FrameViews(views.output().view, new long[]{
+                views.normal().view, views.albedo().view, views.depth().view, views.motion().view,
+                views.specularAlbedo().view, views.specularMotion().view, views.viewZ().view,
+                views.nrdDiffuseInput().view, views.nrdSpecularInput().view
         });
     }
 
@@ -835,7 +738,8 @@ public final class RtComposite {
      * OFF releases the VRAM (rather than merely hiding it), and ON can never observe stale reservoirs.
      */
     private void syncRestirResources(RtContext ctx) {
-        restirSystem.sync(ctx, renderW, renderH);
+        TraceFrameResources.TraceFrameViews views = traceFrameResources.views();
+        restirSystem.sync(ctx, views.renderWidth(), views.renderHeight());
     }
 
     private void ensureOutput(RtContext ctx, int width, int height) {
@@ -858,14 +762,11 @@ public final class RtComposite {
         // boundary prevents configuration or native-library availability from claiming the slot.
         boolean nrdEnabled = !rrEnabled && nrdBackend.selected();
         boolean svgfEnabled = !rrEnabled && !nrdEnabled && CausticaConfig.Rt.Denoise.ENABLED.value();
-        if (output != null && continuationQueue != null
-                && postProcessing.imagesReady() && rrOutput != null && postProcessing.exposureReady()
-                && displayW == width && displayH == height
-                && renderSizeRrEnabled == rrEnabled && renderSizeRrQuality == rrQuality
-                && renderSizeFsrEnabled == fsrEnabled && renderSizeFsrQuality == fsrQuality
-                && renderSizeXessEnabled == xessEnabled && renderSizeXessQuality == xessQuality
-                && renderSizeSvgfEnabled == svgfEnabled
-                && renderSizeNrdEnabled == nrdEnabled) {
+        TraceFrameResources.Configuration configuration = new TraceFrameResources.Configuration(
+                new FrameContext.Extent(width, height), rrEnabled, rrQuality, fsrEnabled, fsrQuality,
+                xessEnabled, xessQuality, svgfEnabled, nrdEnabled);
+        if (traceFrameResources.matches(configuration)
+                && postProcessing.imagesReady() && postProcessing.exposureReady()) {
             syncRestirResources(ctx);
             return;
         }
@@ -878,18 +779,12 @@ public final class RtComposite {
         // Release inactive FSR/XeSS state at the same synchronized switch-away seam.
         upscalers.releaseInactiveBackends();
         postProcessing.releaseImagesForResize();
-        if (output != null) {
-            output.destroy();
-        }
-        if (continuationQueue != null) {
-            continuationQueue.destroy();
-            continuationQueue = null;
-        }
+        traceFrameResources.releasePrimaryAfterIdle();
         restirSystem.destroy();
-        destroyGuideImages();
+        traceFrameResources.releaseGuidesAfterIdle();
+        svgfBackend.releaseResources();
+        traceFrameResources.releaseReconstructionOutputsAfterIdle();
 
-        displayW = width;
-        displayH = height;
         // The path tracer + its guide buffers run at render res; the active upscaler — DLSS-RR
         // (denoise + upscale) or FSR 3 (upscale only) — or a fallback blit brings the image to
         // display res. With neither active there is no reconstruction pass, so trace at 1:1 for a
@@ -907,65 +802,27 @@ public final class RtComposite {
         } else {
             optimal = upscalers.nativeBackend().recommendedRenderExtent(width, height);
         }
-        renderW = optimal.width();
-        renderH = optimal.height();
-        renderSizeRrEnabled = rrEnabled;
-        renderSizeRrQuality = rrQuality;
-        renderSizeFsrEnabled = fsrEnabled;
-        renderSizeFsrQuality = fsrQuality;
-        renderSizeXessEnabled = xessEnabled;
-        renderSizeXessQuality = xessQuality;
-        renderSizeSvgfEnabled = svgfEnabled;
-        renderSizeNrdEnabled = nrdEnabled;
-
-        // RT traces into an HDR (R16G16B16A16_SFLOAT) target so radiance > 1 survives to the display
-        // mapping seam. displayImage stays R8G8B8A8 to match the main target it is copied into
-        // (vkCmdCopyImage requires texel-size-compatible formats).
-        output = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "trace color " + renderW + "x" + renderH);
-        long pixelRecords = Math.multiplyExact((long) renderW, (long) renderH);
-        long continuationBytes = Math.multiplyExact(
-                Math.multiplyExact(pixelRecords, 2L), PATH_RECORD_BYTES);
-        continuationQueue = ctx.createBuffer(continuationBytes,
-                VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
-                "path continuation queue " + renderW + "x" + renderH + "x2");
+        TraceFrameResources.TraceFrameViews views = traceFrameResources.createPrimary(ctx, configuration, optimal);
         syncRestirResources(ctx);
         postProcessing.createImages(ctx, width, height);
-        // Guide buffers match the trace (render) resolution; DLSS-RR consumes them at render res.
-        gNormal = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide normal roughness " + renderW + "x" + renderH);
-        gAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide diffuse albedo " + renderW + "x" + renderH);
-        gDepth = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "guide linear depth " + renderW + "x" + renderH);
-        gMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide motion " + renderW + "x" + renderH);
-        gSpecAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo " + renderW + "x" + renderH);
-        gSpecMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion " + renderW + "x" + renderH);
-        // gViewZ is live on every denoised path (SVGF's sky cutoff and NRD's IN_VIEWZ). The per-lobe
-        // signal images are bound unconditionally because the world pipeline's descriptor layout
-        // carries their bindings, but the tracer only writes them under FEATURE_NRD.
-        gViewZ = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "nrd viewZ " + renderW + "x" + renderH);
-        gNrdDiff = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "nrd diffuse radiance+hitdist " + renderW + "x" + renderH);
-        gNrdSpec = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "nrd specular radiance+hitdist " + renderW + "x" + renderH);
+        views = traceFrameResources.createGuides(ctx);
         // SVGF working set: colour/frame-count history, luminance moments, and the à-trous
         // ping-pong (whose alpha carries variance), plus copies of last frame's depth/normal guides
         // so the reprojection can validate history against the geometry it came from.
         if (svgfEnabled) {
-            svgfBackend.ensureResources(ctx, renderW, renderH);
+            svgfBackend.ensureResources(ctx, views.renderWidth(), views.renderHeight());
         }
+        views = traceFrameResources.createReconstructionOutputs(ctx);
         // Denoiser outputs + the decoded/summed image the upscale stage consumes exist only while
         // NRD actually runs; the combine pipeline is created lazily with them.
         if (nrdEnabled) {
-            nrdDiffOut = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "nrd denoised diffuse " + renderW + "x" + renderH);
-            nrdSpecOut = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "nrd denoised specular " + renderW + "x" + renderH);
-            nrdCombined = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "nrd combined radiance " + renderW + "x" + renderH);
-            // Allocated unconditionally (cheap RGBA8) so toggling nrdValidation live needs no rebuild;
-            // REBLUR only writes it when the validation flag is set.
-            nrdValidation = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R8G8B8A8_UNORM, "nrd validation overlay " + renderW + "x" + renderH);
             // Re-modulation reads the same guides the tracer demodulated with (see nrd_combine.comp),
             // and the raw trace supplies the sky, which REBLUR does not denoise.
             nrdBackend.bindCombine(ctx, new ExperimentalNrdBackend.NrdFrameViews(
-                    nrdDiffOut.view, nrdSpecOut.view, nrdCombined.view,
-                    output.view, gAlbedo.view, gViewZ.view, gSpecAlbedo.view, gNormal.view));
+                    views.nrdDiffuseOutput().view, views.nrdSpecularOutput().view,
+                    views.nrdCombined().view, views.output().view, views.albedo().view,
+                    views.viewZ().view, views.specularAlbedo().view, views.normal().view));
         }
-        // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
-        rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
         postProcessing.ensureExposure(ctx);
 
         broadcastTemporalReset(() -> {
@@ -981,7 +838,7 @@ public final class RtComposite {
             waterWaveTimeValid = false;
         });
         worldTraceResources.bindFrameViews(traceFrameViews());
-        postProcessing.bind(rrOutput);
+        postProcessing.bind(views.rrOutput());
     }
 
     /**
@@ -1036,7 +893,7 @@ public final class RtComposite {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world primary trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.tracePrimary")) {
-            worldTraceResources.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 0);
+            worldTraceResources.trace(pipelineCommand, frameViews().renderWidth(), frameViews().renderHeight(), pipelinePushConstants, 0);
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
@@ -1044,7 +901,7 @@ public final class RtComposite {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world indirect trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
-            worldTraceResources.trace(pipelineCommand, renderW, renderH, pipelinePushConstants, 1);
+            worldTraceResources.trace(pipelineCommand, frameViews().renderWidth(), frameViews().renderHeight(), pipelinePushConstants, 1);
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
@@ -1067,13 +924,13 @@ public final class RtComposite {
         MemoryStack stack = pipelineStack;
         boolean rrDone = false;
         RtImage upscaleSource = pipelineReconstructionInput.denoisedSource() != null
-                ? pipelineReconstructionInput.denoisedSource() : output;
+                ? pipelineReconstructionInput.denoisedSource() : frameViews().output();
 
         if (pipelineInputs.rrPath()) {
             dev.comfyfluffy.caustica.rt.reconstruction.ReconstructionResult result = dlssRrBackend.execute(
-                    new DlssRrReconstructionBackend.Request(ctx, cmd, output, gDepth, gMotion, gAlbedo,
-                            gSpecAlbedo, gNormal, gSpecMotion, rrOutput,
-                            renderW, renderH, displayW, displayH,
+                    new DlssRrReconstructionBackend.Request(ctx, cmd, frameViews().output(), frameViews().depth(), frameViews().motion(), frameViews().albedo(),
+                            frameViews().specularAlbedo(), frameViews().normal(), frameViews().specularMotion(), frameViews().rrOutput(),
+                            frameViews().renderWidth(), frameViews().renderHeight(), frameViews().displayWidth(), frameViews().displayHeight(),
                             -frame.jitter().x(), -frame.jitter().y(), frameViewRotation, frameProjection));
             rrDone = result.executed();
             if (rrDone) {
@@ -1085,10 +942,10 @@ public final class RtComposite {
         boolean svgfDebugView = SvgfReconstructionBackend.isDebugView(pipelineReconstructionInput.debugView());
         if (pipelineInputs.svgfPath() && !pipelineReconstructionInput.nrdDone()
                 && !pipelineReconstructionInput.nrdValidationOn()
-                && svgfBackend.available() && gViewZ != null) {
+                && svgfBackend.available() && frameViews().viewZ() != null) {
             dev.comfyfluffy.caustica.rt.reconstruction.ReconstructionResult result = svgfBackend.execute(
                     new SvgfReconstructionBackend.Request(ctx, cmd, stack, upscaleSource,
-                            gMotion, gViewZ, gNormal, gAlbedo, renderW, renderH,
+                            frameViews().motion(), frameViews().viewZ(), frameViews().normal(), frameViews().albedo(), frameViews().renderWidth(), frameViews().renderHeight(),
                             svgfDebugView ? pipelineReconstructionInput.debugView() : 0,
                             frameViewRotation, camX, camY, camZ));
             upscaleSource = result.output();
@@ -1118,8 +975,8 @@ public final class RtComposite {
         if (!rrDone && fsrPath) {
             float fovY = (float) (2.0 * Math.atan(1.0 / Math.abs(frameProjection.m11())));
             dev.comfyfluffy.caustica.rt.upscale.UpscaleResult result = upscalers.fsr().execute(
-                    new FsrUpscalerBackend.Request(ctx, cmd, upscaleSource, gDepth, gMotion, rrOutput,
-                            renderW, renderH, displayW, displayH, -jitterX, -jitterY, fovY,
+                    new FsrUpscalerBackend.Request(ctx, cmd, upscaleSource, frameViews().depth(), frameViews().motion(), frameViews().rrOutput(),
+                            frameViews().renderWidth(), frameViews().renderHeight(), frameViews().displayWidth(), frameViews().displayHeight(), -jitterX, -jitterY, fovY,
                             camX, camY, camZ, () -> {
                                 recordTemporalReset(TemporalResetReason.TELEPORT);
                                 broadcastTemporalReset(upscalers.fsr()::requestReset);
@@ -1129,12 +986,12 @@ public final class RtComposite {
         }
 
         // Intel XeSS occupies the slot when neither RR nor FSR is running: same inputs as FSR
-        // (denoised-or-raw color + depth + motion vectors), output straight into rrOutput. The
+        // (denoised-or-raw color + depth + motion vectors), output straight into frameViews().rrOutput(). The
         // ML reconstruction replaces FSR's analytic pass — same upscale slot, same consumers.
         if (!rrDone && xessPath) {
             dev.comfyfluffy.caustica.rt.upscale.UpscaleResult result = upscalers.xess().execute(
-                    new XessUpscalerBackend.Request(ctx, cmd, upscaleSource, gDepth, gMotion, rrOutput,
-                            renderW, renderH, displayW, displayH, jitterX, jitterY,
+                    new XessUpscalerBackend.Request(ctx, cmd, upscaleSource, frameViews().depth(), frameViews().motion(), frameViews().rrOutput(),
+                            frameViews().renderWidth(), frameViews().renderHeight(), frameViews().displayWidth(), frameViews().displayHeight(), jitterX, jitterY,
                             svgfRan || nrdDone, camX, camY, camZ, () -> {
                                 recordTemporalReset(TemporalResetReason.TELEPORT);
                                 broadcastTemporalReset(upscalers.xess()::requestReset);
@@ -1148,7 +1005,7 @@ public final class RtComposite {
         // always has a display-res RT image. With no upscaler render == display, so this is a 1:1 copy.
         if (!rrDone) {
             upscalers.nativeBackend().execute(
-                    new NativeUpscalerBackend.Request(ctx, cmd, stack, upscaleSource, rrOutput));
+                    new NativeUpscalerBackend.Request(ctx, cmd, stack, upscaleSource, frameViews().rrOutput()));
             barrierBackend = dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.NATIVE;
         }
         dev.comfyfluffy.caustica.rt.graph.UpscalerBarriers.before(cmd, stack, barrierBackend, "export");
@@ -1165,8 +1022,8 @@ public final class RtComposite {
             throw new IllegalStateException("post/present pass has no active frame invocation");
         }
         boolean postHdr = CausticaConfig.Rt.Hdr.enabled();
-        postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, rrOutput,
-                displayW, displayH, pipelinePostPresentTarget, postHdr,
+        postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, frameViews().rrOutput(),
+                frameViews().displayWidth(), frameViews().displayHeight(), pipelinePostPresentTarget, postHdr,
                 () -> hdrWrittenThisFrame = postHdr);
     }
 
@@ -1182,11 +1039,11 @@ public final class RtComposite {
         float jitterX = 0f;
         float jitterY = 0f;
         if (rrPath) {
-            CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW);
+            CausticaJitter.INSTANCE.prepare(frameViews().renderWidth(), frameViews().renderHeight(), frameViews().displayWidth());
             jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
             jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
         } else if (fsrPath) {
-            CausticaJitter.INSTANCE.prepareFsr(renderW, displayW);
+            CausticaJitter.INSTANCE.prepareFsr(frameViews().renderWidth(), frameViews().displayWidth());
             jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
             jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
         } else if (xessPath) {
@@ -1194,7 +1051,7 @@ public final class RtComposite {
             jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
             jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
         } else if (nrdPath || svgfPath) {
-            CausticaJitter.INSTANCE.prepareFsr(renderW, displayW);
+            CausticaJitter.INSTANCE.prepareFsr(frameViews().renderWidth(), frameViews().displayWidth());
             jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
             jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
         }
@@ -1204,7 +1061,7 @@ public final class RtComposite {
     private FrameContext createFrameContext(FrameInputs inputs) {
         return new FrameContext(frameCounter,
                 Minecraft.getInstance().getDeltaTracker().getRealtimeDeltaTicks() * 0.05f,
-                new FrameContext.Extent(displayW, displayH), new FrameContext.Extent(renderW, renderH),
+                new FrameContext.Extent(frameViews().displayWidth(), frameViews().displayHeight()), new FrameContext.Extent(frameViews().renderWidth(), frameViews().renderHeight()),
                 new FrameContext.Camera(camX, camY, camZ, mvCurProjView),
                 new FrameContext.Camera(previousFrameCamX, previousFrameCamY, previousFrameCamZ, mvPushMatrix),
                 new FrameContext.Jitter(inputs.jitterX(), inputs.jitterY()), Minecraft.getInstance().level,
@@ -1477,7 +1334,7 @@ public final class RtComposite {
                     RtMaterialRegistry.INSTANCE.tableAddress(),
                     terrain.lightBufferAddress(), terrain.lightAliasBufferAddress(),
                     terrain.lightLocalAliasBufferAddress(), terrain.lightGridCellBufferAddress(),
-                    terrain.lightGridSpanBufferAddress(), continuationQueue.deviceAddress,
+                    terrain.lightGridSpanBufferAddress(), frameViews().continuationQueue().deviceAddress,
                     restirBindings.previousAddress(), restirBindings.currentAddress(),
                     // The SVGF debug ids are consumed by the denoiser, not the tracer: forwarding
                     // them would make the raygen paint a guide overlay over the very image we are
@@ -1516,11 +1373,11 @@ public final class RtComposite {
 
             // ---- NRD / REBLUR (opt-in). Consumes the tracer's demodulated per-lobe signals plus
             // the guides at render res; the combine pass re-modulates and sums the denoised pair
-            // into nrdCombined. When it runs it owns the denoise slot: SVGF steps aside below,
+            // into frameViews().nrdCombined(). When it runs it owns the denoise slot: SVGF steps aside below,
             // because two temporal denoisers in series fight over the same history.
             boolean nrdDone = false;
             RtImage denoisedSource = null;
-            if (nrdPath && gViewZ != null && nrdDiffOut != null) {
+            if (nrdPath && frameViews().viewZ() != null && frameViews().nrdDiffuseOutput() != null) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "NRD denoise");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrd")) {
                     // The camera goes in as ABSOLUTE world coordinates plus the terrain anchor the
@@ -1529,9 +1386,9 @@ public final class RtComposite {
                     // only anchor-relative coordinates, so every rebase silently invalidated
                     // REBLUR's history mid-motion. No FOV-driven restart is passed: the motion
                     // vectors already carry a zoom as screen displacement (see the SVGF path).
-                    nrdDone = nrdBackend.denoise(cmd.address(), renderW, renderH,
-                            gMotion, gNormal, gViewZ, gNrdDiff, gNrdSpec, nrdDiffOut, nrdSpecOut,
-                            nrdValidation,
+                    nrdDone = nrdBackend.denoise(cmd.address(), frameViews().renderWidth(), frameViews().renderHeight(),
+                            frameViews().motion(), frameViews().normal(), frameViews().viewZ(), frameViews().nrdDiffuseInput(), frameViews().nrdSpecularInput(), frameViews().nrdDiffuseOutput(), frameViews().nrdSpecularOutput(),
+                            frameViews().nrdValidation(),
                             frameProjection, frameViewRotation,
                             camX, camY, camZ,
                             terrain.blockX, terrain.blockY, terrain.blockZ,
@@ -1542,7 +1399,7 @@ public final class RtComposite {
                     DenoiserBarriers.before(cmd, stack, nrdBarrierPlan,
                             DenoiserBarrierPlan.NRD_COMBINE);
                     try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrdCombine")) {
-                        nrdBackend.combine(cmd, renderW, renderH);
+                        nrdBackend.combine(cmd, frameViews().renderWidth(), frameViews().renderHeight());
                     }
                     DenoiserBarriers.before(cmd, stack, nrdBarrierPlan,
                             DenoiserBarrierPlan.NRD_EXPORT);
@@ -1552,7 +1409,7 @@ public final class RtComposite {
                                 "generated");
                         loggedDenoiserBarrierMode = denoiserMode;
                     }
-                    denoisedSource = nrdCombined;
+                    denoisedSource = frameViews().nrdCombined();
                 }
             }
 
@@ -1560,7 +1417,7 @@ public final class RtComposite {
             // upscaler to Off for a crisp readout). Nothing downstream may filter the overlay.
             boolean nrdValidationOn = nrdDone && CausticaConfig.Rt.Nrd.VALIDATION.value();
             if (nrdValidationOn) {
-                denoisedSource = nrdValidation;
+                denoisedSource = frameViews().nrdValidation();
             }
 
             pipelineCommand = cmd;
@@ -2038,8 +1895,7 @@ public final class RtComposite {
         // have been turned off after a feature was already created. destroy() is a no-op when nothing
         // was ever allocated, so asking it every time is what guarantees the feature is released.
         dlssRrBackend.destroy();
-        // Tear down the NRD integration (wraps the Vulkan device via NRI) only after its images are
-        // released below; destroyGuideImages runs after this in the teardown sequence.
+        // Tear down the NRD integration (wraps the Vulkan device via NRI) before its borrowed images.
         nrdBackend.destroy();
         svgfBackend.destroy();
         if (fgSkyMaskPipeline != null) {
@@ -2060,16 +1916,8 @@ public final class RtComposite {
             fgHdrHudlessImage = null;
         }
         RtWorldOverlay.INSTANCE.destroy(); // overlay features/pipelines/scratch live on the same device lifetime
-        if (output != null) {
-            output.destroy();
-            output = null;
-        }
-        if (continuationQueue != null) {
-            continuationQueue.destroy();
-            continuationQueue = null;
-        }
+        traceFrameResources.release();
         restirSystem.destroy();
-        destroyGuideImages();
         postProcessing.destroyPipelineAndExposure();
         if (hdrCompositePipeline != null) {
             hdrCompositePipeline.destroy();
@@ -2450,7 +2298,7 @@ public final class RtComposite {
 
     /**
      * DLSS Frame Generation: record the DLSSG evaluate for generated frame {@code index} of {@code count}
-     * (backbuffer = the final frame; HW depth = {@code gDepth}; motion = {@code gMotion}) into Minecraft's
+     * (backbuffer = the final frame; HW depth = {@code frameViews().depth()}; motion = {@code frameViews().motion()}) into Minecraft's
      * command encoder, returning the interpolated output image (backbuffer size) for {@link RtFramePresenter}
      * to blit into a generated swapchain image. On {@code index == 1} it ensures the feature (created in its
      * own synchronous submit), the per-index output images, and the jitter-free reprojection matrices.
@@ -2497,7 +2345,8 @@ public final class RtComposite {
 
     public RtImage fgInterpolate(VulkanCommandEncoder enc, long backbufferView, long backbufferImage,
             int swapW, int swapH, int index, int count, boolean hdrBackbuffer) {
-        if (failed || gDepth == null || gMotion == null || !frameCaptured) {
+        TraceFrameResources.TraceFrameViews views = frameViews();
+        if (failed || views == null || views.depth() == null || views.motion() == null || !frameCaptured) {
             return null;
         }
         RtContext ctx = RtContext.currentOrNull();
@@ -2512,7 +2361,7 @@ public final class RtComposite {
             return fgInterpolateFsr(ctx, enc, backbufferImage, swapW, swapH, index, count, hdrBackbuffer, fmt);
         }
         if (index == 1) {
-            if (!ensureFgFeature(ctx, swapW, swapH, renderW, renderH, fmt)) {
+            if (!ensureFgFeature(ctx, swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), fmt)) {
                 throw new IllegalStateException("DLSSG feature not ready (ensureFgFeature failed)");
             }
             ensureFgInterp(ctx, count, swapW, swapH, fmt);
@@ -2543,12 +2392,12 @@ public final class RtComposite {
         VkCommandBuffer cmd = enc.allocateAndBeginTransientCommandBuffer();
         boolean ok = RtDlssFg.INSTANCE.evaluate(cmd.address(),
                 backbufferView, backbufferImage, fmt,
-                gDepth.view, gDepth.image, VK10.VK_FORMAT_R32_SFLOAT,
-                gMotion.view, gMotion.image, VK10.VK_FORMAT_R16G16_SFLOAT,
+                frameViews().depth().view, frameViews().depth().image, VK10.VK_FORMAT_R32_SFLOAT,
+                frameViews().motion().view, frameViews().motion().image, VK10.VK_FORMAT_R16G16_SFLOAT,
                 hudlessView, hudlessImg, hudlessReady ? hudlessFmt : 0,
                 uiView, uiImg, uiReady ? VK10.VK_FORMAT_R8G8B8A8_UNORM : 0,
                 out.view, out.image, fmt,
-                swapW, swapH, renderW, renderH, count, index, 1.0f, 1.0f,
+                swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), count, index, 1.0f, 1.0f,
                 true /* depthInverted (reversed-Z) */, hdrBackbuffer /* colorBuffersHDR */,
                 true /* cameraMotionIncluded (in mvecs) */, fgReset,
                 fgClipToPrev, fgPrevToClip);
@@ -2574,7 +2423,7 @@ public final class RtComposite {
     private RtImage fgInterpolateFsr(RtContext ctx, VulkanCommandEncoder enc, long backbufferImage,
             int swapW, int swapH, int index, int count, boolean hdrBackbuffer, int fmt) {
         if (index == 1) {
-            if (!RtFsrFrameGen.INSTANCE.ensureFeature(swapW, swapH, renderW, renderH, fmt)) {
+            if (!RtFsrFrameGen.INSTANCE.ensureFeature(swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), fmt)) {
                 throw new IllegalStateException("FSR FG feature not ready (ensureFeature failed)");
             }
             ensureFgInterp(ctx, count, swapW, swapH, fmt);
@@ -2608,7 +2457,7 @@ public final class RtComposite {
             VkCommandBuffer cmd = enc.allocateAndBeginTransientCommandBuffer();
             // Same jitter sign convention as the FSR upscale dispatch (negated).
             boolean ok = RtFsrFrameGen.INSTANCE.prepareAndGenerate(cmd.address(),
-                    gDepth.image, gMotion.image, renderW, renderH,
+                    frameViews().depth().image, frameViews().motion().image, frameViews().renderWidth(), frameViews().renderHeight(),
                     -fgJitterX, -fgJitterY, fovY,
                     camPosF, camUpF, camRightF, camForwardF,
                     presentImage, presentFmt, outputs, count, swapW, swapH, hdrBackbuffer);
@@ -2624,8 +2473,8 @@ public final class RtComposite {
                     VulkanCommandEncoder.memoryBarrier(cmd, maskStack);
                     long maskPresentView = hdrBackbuffer ? hdrBackbufferView() : fgBackbufferCopy.view;
                     for (int i = 0; i < count; i++) {
-                        fgSkyMaskPipeline.dispatch(cmd, fgInterp[i].view, maskPresentView, gDepth.view,
-                                swapW, swapH, renderW, renderH, hdrBackbuffer);
+                        fgSkyMaskPipeline.dispatch(cmd, fgInterp[i].view, maskPresentView, frameViews().depth().view,
+                                swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), hdrBackbuffer);
                     }
                 }
             }
@@ -2725,8 +2574,8 @@ public final class RtComposite {
                     VulkanCommandEncoder.memoryBarrier(cmd, stack);
                     for (int k = 0; k < count; k++) {
                         float t = (k + 1.0f) / (count + 1.0f);
-                        nativeFgPipeline.dispatch(cmd, fgInterp[k].view, curView, fgPrevFrame.view, gMotion.view,
-                                swapW, swapH, renderW, renderH, t, hdrBackbuffer);
+                        nativeFgPipeline.dispatch(cmd, fgInterp[k].view, curView, fgPrevFrame.view, frameViews().motion().view,
+                                swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), t, hdrBackbuffer);
                     }
                     // Sky mask on the generated frames (same protection as the FSR path): sky pixels
                     // copy the real frame's sky instead of trusting the blend at the horizon/sun edge.
@@ -2734,8 +2583,8 @@ public final class RtComposite {
                     if (fgSkyMaskPipeline != null) {
                         VulkanCommandEncoder.memoryBarrier(cmd, stack);
                         for (int k = 0; k < count; k++) {
-                            fgSkyMaskPipeline.dispatch(cmd, fgInterp[k].view, curView, gDepth.view,
-                                    swapW, swapH, renderW, renderH, hdrBackbuffer);
+                            fgSkyMaskPipeline.dispatch(cmd, fgInterp[k].view, curView, frameViews().depth().view,
+                                    swapW, swapH, frameViews().renderWidth(), frameViews().renderHeight(), hdrBackbuffer);
                         }
                     }
                     // UI re-composite (hudless path only): stamp this tick's overlay — hand, GUI,

@@ -10,19 +10,36 @@ class PostProcessingOwnershipTest {
 
     @Test void productionUsesOnePostOwnerAndPreservesSplitLifecycle() throws Exception {
         String source = Files.readString(ROOT.resolve("RtComposite.java"));
+        String traceFrames = Files.readString(ROOT.resolve("trace/TraceFrameResources.java"));
         assertTrue(source.contains("private final PostProcessing postProcessing = new PostProcessing()"));
+        assertTrue(source.contains("private final TraceFrameResources traceFrameResources = new TraceFrameResources("));
         for (String field : new String[]{"private RtDisplayPipeline displayPipeline",
                 "private RtImage displayImage", "private RtImage hdrDisplayImage", "new RtExposure()"}) {
             assertFalse(source.contains(field), field);
         }
         ordered(source.substring(source.indexOf("private void ensureOutput(")),
-                "ctx.waitIdle()", "postProcessing.releaseImagesForResize()", "output.destroy()",
-                "postProcessing.createImages(ctx, width, height)", "postProcessing.ensureExposure(ctx)",
-                "broadcastTemporalReset", "postProcessing.bind(rrOutput)");
+                "ctx.waitIdle()", "postProcessing.releaseImagesForResize()",
+                "traceFrameResources.releasePrimaryAfterIdle()", "restirSystem.destroy()",
+                "traceFrameResources.releaseGuidesAfterIdle()", "svgfBackend.releaseResources()",
+                "traceFrameResources.releaseReconstructionOutputsAfterIdle()",
+                "traceFrameResources.createPrimary(ctx, configuration, optimal)", "syncRestirResources(ctx)",
+                "postProcessing.createImages(ctx, width, height)", "traceFrameResources.createGuides(ctx)",
+                "svgfBackend.ensureResources(ctx", "traceFrameResources.createReconstructionOutputs(ctx)",
+                "nrdBackend.bindCombine(ctx", "postProcessing.ensureExposure(ctx)",
+                "broadcastTemporalReset", "worldTraceResources.bindFrameViews(traceFrameViews())",
+                "postProcessing.bind(views.rrOutput())");
         ordered(source.substring(source.indexOf("public void destroy()")),
                 "postProcessing.destroyImages()", "RtWorldOverlay.INSTANCE.destroy()",
-                "output.destroy()", "destroyGuideImages()", "postProcessing.destroyPipelineAndExposure()");
-        assertTrue(source.contains("postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, rrOutput"));
+                "traceFrameResources.release()", "restirSystem.destroy()",
+                "postProcessing.destroyPipelineAndExposure()");
+        for (String field : new String[]{"private RtImage output", "private RtBuffer continuationQueue",
+                "private RtImage gNormal", "private RtImage nrdDiffOut", "private RtImage rrOutput"}) {
+            assertFalse(source.contains(field), field);
+            assertTrue(traceFrames.contains(field), field);
+        }
+        assertFalse(source.contains("output.destroy()"));
+        assertFalse(source.contains("destroyGuideImages()"));
+        assertTrue(source.contains("postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, frameViews().rrOutput()"));
         assertTrue(source.contains("() -> hdrWrittenThisFrame = postHdr"));
     }
 
