@@ -10,6 +10,7 @@ The rewrite was undertaken to replace monolithic GPU resource ownership with str
 
 ## Links
 
+- [GitHub Releases (Download)](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.0)
 - [Original Upstream Repository (ComfyFluffy/Caustica)](https://github.com/ComfyFluffy/Caustica)
 - [Development Base Repository (xysgottaken2/Caustica)](https://github.com/xysgottaken2/Caustica)
 - [Discord](https://discord.gg/SeWCjyKu2)
@@ -73,39 +74,66 @@ Full architectural analyses, gate criteria, and task verification records are ma
 - [`BLOCKERS.md`](docs/rewrite/BLOCKERS.md): Historical record of technical blockers and their architectural resolutions.
 - [`docs/rewrite/tasks/`](docs/rewrite/tasks/): Detailed engineering reports for individual AER tasks, remediation milestones, and A/B barrier validations.
 
-## Build & DLSS SDK Configuration
+## Install
 
-NVIDIA DLSS / NGX runtime binaries (`nvngx_dlss.dll`, `nvngx_dlssd.dll`) are proprietary and are **not stored** in this public source repository.
-
-To build release artifacts with DLSS support:
-1. Download or clone the official [NVIDIA DLSS SDK](https://github.com/NVIDIA/DLSS).
-2. Set the `DLSS_SDK` environment variable pointing to your local SDK root:
-   ```powershell
-   $env:DLSS_SDK = "C:\path\to\DLSS_SDK"
-   ```
-3. The Gradle task `bundleNgxNatives` automatically validates and copies the required vendor libraries into the build outputs:
-   ```bash
-   ./gradlew build
-   ```
-
-Building without `DLSS_SDK` set will compile the open-source mod and native shims, excluding proprietary vendor DLLs.
+1. **Minecraft & Java Environment**: Ensure you have Minecraft `26.2` installed with Java `25` or newer.
+2. **Install Dependencies**: Install [Fabric Loader](https://fabricmc.net/) (`>=0.19.3`) and [Fabric API](https://modrinth.com/mod/fabric-api) (`>=0.145.4+26.2`).
+3. **Download Caustica Rework**: Download `caustica-0.1.0.jar` from the [GitHub Releases](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.0) page.
+4. **Place JAR**: Place `caustica-0.1.0.jar` directly into your Minecraft instance's `.minecraft/mods` directory.
+5. **Launch with Vulkan**: Start Minecraft with the Vulkan graphics backend enabled.
+6. **Configure Renderer**: Open **Video Settings** in-game to configure Caustica's ray tracing, denoiser, and presentation settings.
 
 ## Requirements
 
-- **Vulkan graphics backend enabled**
-- A GPU and driver with Vulkan ray tracing support (`VK_KHR_ray_tracing_pipeline`)
-- NVIDIA RTX GPU and supported driver for DLSS features
-- HDR-capable display and OS HDR mode for HDR output
-- On Linux, an HDR-capable Wayland compositor and a native Wayland session for HDR output
-- Install a LabPBR resource pack like [SPBR](https://modrinth.com/resourcepack/spbr) for enhanced materials
+### Required
+- **Minecraft**: `26.2`
+- **Java**: `25` or newer
+- **Fabric Loader**: `>=0.19.3`
+- **Fabric API**: Supported Fabric API build for Minecraft 26.2 (e.g. `>=0.145.4+26.2`)
+- **Vulkan Ray Tracing GPU**: A dedicated graphics card supporting Vulkan 1.2+ and hardware ray tracing via the `VK_KHR_ray_tracing_pipeline` extension:
+  - NVIDIA: GeForce RTX 20 series or newer
+  - AMD: Radeon RX 6000 series (RDNA 2) or newer
+  - Intel: Arc A-Series or newer
+- **Operating System**: Windows 10/11 x64 (official release JAR bundles Windows x64 native shims and libraries). Linux x64 is supported when building from source.
 
-## Installation
+### Optional / Feature-Specific
+- **NVIDIA DLSS Ray Reconstruction (DLSS-RR)**: Requires an NVIDIA RTX GPU and modern Game Ready or Studio driver.
+- **HDR Presentation**: Requires an HDR10-capable display, OS HDR mode enabled (Windows HDR or a native HDR-capable Wayland compositor session on Linux), and an active HDR swapchain.
+- **PBR Materials**: Requires a LabPBR 1.3 resource pack (such as [SPBR](https://modrinth.com/resourcepack/spbr)) for metallic, roughness, normal maps, and subsurface scattering.
+- **Native Denoiser (SVGF)**: Available out-of-the-box on all supported Vulkan RT hardware as a vendor-agnostic fallback when DLSS is not used.
 
-1. Install Fabric Loader for Minecraft `26.2`.
-2. Install Fabric API.
-3. Put the Caustica jar in your Minecraft `mods` folder.
-4. Launch the game with the Vulkan graphics backend.
-5. Open Video Settings to adjust Caustica's renderer options.
+## Building from source
+
+Developers building Caustica Rework from source require:
+- **Java**: JDK 25 or newer
+- **Vulkan SDK**: 1.3+ or 1.4+ (providing `glslangValidator`, `slangc`, and `spirv-val` in `PATH` or `VULKAN_SDK`)
+- **C/C++ Compiler & CMake**: CMake 3.20+ and MSVC C++ toolchain (Visual Studio / Build Tools)
+- **NVIDIA DLSS SDK (Optional)**: Required if bundling proprietary DLSS vendor libraries (`nvngx_dlssd.dll`, `nvngx_dlssg.dll`). Proprietary vendor DLLs are not tracked in Git.
+
+### Build Steps (PowerShell / Windows)
+
+```powershell
+# 1. Clone the repository
+git clone https://github.com/altairflyy/Caustica-Rework.git
+cd Caustica-Rework
+
+# 2. (Optional) Set DLSS_SDK to package DLSS runtime libraries
+$env:DLSS_SDK = "C:\path\to\DLSS_SDK"
+
+# 3. Build the mod JAR
+.\gradlew.bat build -x test -PngxShimConfig=release -PngxVendorConfig=rel
+```
+
+The resulting mod JAR will be located at `build/libs/caustica-0.1.0.jar`.
+
+## Known limitations
+
+The rework maintains strict transparency regarding technical boundaries, historical baselines, and scope:
+
+- **NRD Scope (Out of Target)**: NVIDIA Real-Time Denoisers (NRD) integration remains experimental, quarantined behind `rt/reconstruction/experimental/nrd/`, and is **OUT OF TARGET / NOT REQUIRED** for production.
+- **Integration Waivers (DH, Voxy, FSR 3, XeSS)**: Code integration for Distant Horizons (DH), Voxy LOD, AMD FSR 3, and Intel XeSS is present where applicable, but runtime qualification of these paths is covered under authorized project waivers and excluded from the production qualification baseline.
+- **Full-Frame GPU Benchmark (Out of Scope)**: A comprehensive end-to-end full-frame GPU benchmark suite is **OUT OF SCOPE / NOT REQUIRED** for this functional baseline release.
+- **Canonical Baseline Test Failures**: The 4 failing tests in `RtParallaxShaderRegressionTest` and `RtWaterWaveShaderRegressionTest` represent pre-existing historical upstream baseline behaviors and are not unexpected regressions introduced by the rework.
 
 ## Usage Notes
 
