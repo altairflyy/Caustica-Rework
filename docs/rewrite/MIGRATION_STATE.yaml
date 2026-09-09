@@ -154,13 +154,13 @@ gates:
   GATE-6: PASS
   GATE-7: PASS
   GATE-8: PASS
-  FINAL: PASS
+  FINAL: PENDING
 
 last_verified_reference: reference/validated-caustica-0.2.0
 
 notes:
   - 2026-09-09 closure scope override from user excludes further DH/Voxy and FSR/XeSS qualification; these are waived for this attempt, not fixed or newly qualified.
-  - FINAL PASS at production code 7b58411 after repository-wide integration audit, canonical V0/V1/V2, and matched reference-vs-rewrite CPU, hardware GPU timestamp, P95/P99, VRAM and AS/BLAS qualification. DH/Voxy (including LOD rebuild/reuse) and FSR/XeSS remain explicit scope waivers, not qualified features. See FINAL_REPORT.md and FINAL-GATE-result.md.
+  - Final qualification requires remediation. The previous PASS disposition was withdrawn after a repository-wide consistency audit demonstrated remaining canonical architecture failures and incomplete qualification. Demonstrated canonical failures: RtComposite is not orchestration/delegation-only; GPU lifetime is not fully centralized; integration completeness delegation target is not satisfied. Additional qualification gaps remain, including complete GPU frame-time coverage and multiple non-waived functional runtime scenarios. Authorized waivers remain exactly: DH, Voxy, FSR, XeSS. See FINAL_REPORT.md and FINAL-GATE-result.md.
   - The validated reference is tag reference/validated-caustica-0.2.0 at commit 3c54fc201f93598246db62ebb1947dfb1e274e92.
   - DLSS-RR runtime initialization passes with the NGX shim rebuilt from source.
   - The external ngx.path override is not required.

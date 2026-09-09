@@ -2,12 +2,13 @@
 
 ## Disposition
 
-`PASS WITH EXPLICIT SCOPE WAIVERS` at production code `7b58411`.
+Canonical FINAL disposition: `FAIL`.
+User-qualified FINAL disposition: `FAIL`.
 
-DH/Voxy (including provider-dependent LOD rebuild/reuse metrics) and FSR/XeSS
-remain unresolved user-authorized waivers. HDR was accepted by the user without
-a dedicated final run. This result does not relabel any waived path as runtime
-qualified.
+DH/Voxy and FSR/XeSS remain the exact user-authorized waivers. HDR, NRD,
+SHaRC, SVGF direct dispatch, water/glass, LabPBR and ReSTIR runtime
+qualification remain NOT TESTED. This result does not relabel any untested or
+waived path as runtime qualified.
 
 ## Repository-wide integration audit
 
@@ -18,13 +19,15 @@ qualified.
 | Mandatory APIs are present | PASS | Gate result documents plus production/tests cover FrameContext, temporal coordination, neutral LOD, explicit pipeline, GPU/AS boundaries, backend contracts, scene assembly, environment modules and render graph. |
 | Development gates removed | PASS | No `RewriteGates` or `engine.*V2` reference exists in `src/main`. |
 | Legacy execution unreachable | PASS | `GraphExecution` is the sole cursor authority; `FramePipeline` exposes immutable callbacks only; barrier emitters have no legacy fallback. |
-| Composite target | PASS | `RtComposite` coordinates graph execution and delegates every ownership domain migrated by the roadmap. Residual trace/guide/frame-generation working resources do not duplicate another owner. |
-| Owners are univocal | PASS | `RtContext` owns GPU deletion/AS managers; domain owners cover temporal, scene, pipeline, graph, reconstruction/upscale and POST. |
+| Composite target | FAIL | `RtComposite` still directly creates, destroys and recreates significant guide, trace, continuation, Frame Generation and presentation resources. The canonical target requires orchestration/delegation only. |
+| Owners are univocal | FAIL | Domain-specific migrated owners remain valid, but significant GPU create/destroy/recreate ownership is still split with `RtComposite`; deferred retirement centralization does not make all GPU ownership univocal. |
 | Report matches committed code | PASS | `FINAL_REPORT.md` was updated after POST recovery, runner removal, canonical validation and matched benchmark capture. |
 
-The audit also found no new shader math/layout change and no new hot-path
-`waitIdle`. The one shader delta from the frozen reference is the already-known
-`MaterialHeader` zero-initialization compiler-compatibility fix.
+The audit found no new shader math/layout change and no new hot-path `waitIdle`.
+The one shader delta from the frozen reference is the known `MaterialHeader`
+zero-initialization compiler-compatibility fix. GPU lifetime is not fully
+centralized: deferred retirement is centralized, but significant resource
+create/destroy/recreate ownership remains in `RtComposite`.
 
 ## Targeted integration validation
 
@@ -51,15 +54,23 @@ render distance 12 and the same disabled optional backends.
 | P99 CPU envelope | 11.415 ms | 11.166 ms | -2.18% | Informational | PASS |
 
 Hardware GPU values use the last 600 of 1088 symmetric Vulkan timestamp samples
-per variant around the composite command buffer. Temporary probes were removed
-after capture. Live AS/BLAS deltas over 300 steady frames are bounded: median AS
+per variant around the composite command buffer. The resulting metric is
+composite command-buffer GPU duration, not complete frame GPU time. It includes
+ray/path tracing, ReSTIR work recorded in the composite, denoiser, upscaler and
+composite post work. UI/HUD, presentation/blit, other command buffers, separate
+async/build/SDK submissions and Frame Generation are not demonstrated inside
+the interval. Temporary probes were removed after capture. Live AS/BLAS deltas over 300 steady frames are bounded: median AS
 `+0.45%`, P95 AS `+0.53%`, median BLAS bytes `+0.07%`, P95 BLAS bytes `+0.15%`.
+
+**Composite GPU duration comparison: VERIFIED.**
+**Canonical complete GPU frame-time Average/P95/P99: BLOCKED.**
 
 ## Functional and safety evidence
 
-- Prior gate qualification covers Overworld, Nether, End, rain, snow, terrain,
-  entities, DLSS-RR, ReSTIR, SVGF and SDR; the user also reported a successful
-  current-candidate playthrough and accepted closure without a separate HDR run.
+- Tested: Overworld, Nether, End, entities, particles/weather, DLSS-RR and SDR.
+- Not tested for canonical qualification: water/glass, LabPBR, ReSTIR runtime,
+  SHaRC full qualification, SVGF directly proven dispatch, HDR and NRD.
+- Waived only: DH, Voxy, FSR and XeSS.
 - Canonical four-failure shader baseline and characterization remain exact.
 - No new device loss, known UAF, stale cross-dimension geometry or hot-path
   `waitIdle` was introduced by final recovery.
@@ -72,5 +83,29 @@ after capture. Live AS/BLAS deltas over 300 steady frames are bounded: median AS
 - V1: 248 tests, exact 4/4 canonical failures and characterization 7/7 PASS.
 - V2: Gradle build PASS; NGX shim present at 83,968 bytes.
 - `git diff --check`: PASS.
+- Gate-8 same-candidate A/B validation: supporting evidence only.
+- Matched frozen-reference-vs-rewrite validation: NOT AVAILABLE; this is not a
+  separate canonical FINAL requirement row.
 - Forbidden-change audit: no executable code, shader/math, ownership,
   synchronization, tuning or `waitIdle` change in the gate-closure diff.
+
+## Final qualification status
+
+Demonstrated FAIL:
+
+- `RtComposite` orchestration-only;
+- GPU lifetime centralized;
+- `RtComposite` delegation-only integration target.
+
+Blocked:
+
+- complete canonical GPU frame-time Average/P95/P99 coverage.
+
+NOT TESTED:
+
+- water/glass, LabPBR, ReSTIR runtime, SHaRC full qualification, SVGF direct
+  dispatch qualification, HDR and NRD.
+
+WAIVED:
+
+- DH, Voxy, FSR, XeSS.

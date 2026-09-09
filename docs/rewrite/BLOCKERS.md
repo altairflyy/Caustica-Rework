@@ -213,13 +213,13 @@ unwaived all-provider qualification can pass.
 
 The user now explicitly excludes further DH/Voxy and FSR/XeSS qualification
 from this closure attempt. BLOCKER-002 is waived for that scope only, not fixed
-or runtime-qualified. LOD rebuild/reuse measurement is included because it
-requires an active DH/Voxy provider. Its historical account above is retained
-for traceability.
+or runtime-qualified. LOD rebuild/reuse remains an unmeasured AER-093 evidence
+field; it is not an additional explicit waiver or standalone FINAL criterion.
+Its historical account above is retained for traceability.
 
-## BLOCKER-003 — Final integration and measurement gaps
+## BLOCKER-003 — Final integration and qualification gaps
 
-Status: CLOSED.
+Status: OPEN. Blocks FINAL qualification.
 
 Audit at `fd7ce60`: `RtComposite.ensureOutput`, `destroy` and FG/presentation
 methods still own resource allocation/lifetime, so the strict FINAL
@@ -238,15 +238,43 @@ An agent-operated smoke was prepared but desktop inspection failed with
 not a validation PASS. Optional paths excluded by the user are not blockers
 for this attempt. See `FINAL_REPORT.md` for exact sources, hashes and recovery.
 
-### Resolution
+### Current disposition
 
-The inactive `FramePipeline` runner was removed in `8204626`. POST image,
-pipeline and exposure ownership moved out of `RtComposite` in `eda7606`, and
-the recovery passed canonical V0/V1/V2 at `7b58411`.
+The inactive `FramePipeline` runner was removed in `8204626` and POST image,
+pipeline and exposure ownership moved out of `RtComposite` in `eda7606`.
+Those bounded migrations remain valid, but the forensic audit demonstrates
+that significant guide, trace, continuation, Frame Generation and presentation
+resources are still created, destroyed and recreated directly by
+`RtComposite`. Therefore the canonical orchestration/delegation-only and full
+GPU-lifetime-centralization targets are not satisfied.
 
-A repository-wide audit found all required rewrite components referenced by
-production, no duplicate migrated authority, no development gates and no
-reachable legacy graph runner. Matched isolated reference/rewrite runs now
-provide CPU, hardware Vulkan timestamp average/P95/P99, VRAM and AS/BLAS data;
-all default performance thresholds pass. See `FINAL_REPORT.md` and
-`FINAL-GATE-result.md`.
+Demonstrated canonical failures:
+
+- `RtComposite` is not orchestration/delegation-only;
+- GPU lifetime is not fully centralized;
+- the `RtComposite` delegation-only integration target is not satisfied.
+
+Qualification blockers:
+
+- canonical complete GPU frame-time Average/P95/P99 coverage is blocked because
+  the retained timestamp interval covers only the composite command buffer;
+- matched frozen-reference-vs-rewrite Vulkan validation is unavailable as
+  qualification evidence, but is not a separate FINAL requirement row.
+
+Runtime not-tested areas:
+
+- water/glass, LabPBR, ReSTIR runtime, full SHaRC qualification, direct SVGF
+  dispatch qualification, HDR and NRD.
+
+Authorized waivers, exactly:
+
+- DH;
+- Voxy;
+- FSR;
+- XeSS.
+
+Non-canonical known limitations:
+
+- inherited ReSTIR boiling/flickering;
+- inherited exceptional resize/unwind risk;
+- known DH/Voxy provider bug.

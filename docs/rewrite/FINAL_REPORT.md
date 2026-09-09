@@ -5,7 +5,7 @@
 - **Task classification:** AER-093 (`DOC_ONLY` final architecture and benchmark evidence report).
 - **Frozen reference commit:** `3c54fc201f93598246db62ebb1947dfb1e274e92` (`reference/validated-caustica-0.2.0`).
 - **Production code audited at:** `7b58411511a29c32e94bfdd73eff2b4464d5bd0b` on branch `rewrite/aer`; the final closure changes only documentation and the stale `FrameGraph` Javadoc.
-- **Status of this report:** Final repository-wide integration and matched-reference qualification report. `FINAL: PASS` applies to the explicitly user-approved scope; DH/Voxy and FSR/XeSS remain waivers, not newly qualified features.
+- **Status of this report:** Final repository-wide consistency report. The previous `FINAL: PASS` disposition is withdrawn; canonical qualification remains pending remediation. DH/Voxy and FSR/XeSS remain the only authorized waivers, not newly qualified features.
 
 ---
 
@@ -18,11 +18,11 @@
 | **Development gates** | Obsolete `RewriteGates` class and all 11 `engine.*V2` keys removed. | **VERIFIED**. Deleted in commit `fd7ce60`. Zero `engine.*V2` or `RewriteGates` references remain in `src/main`. |
 | **Synchronization authority** | Four generated barrier plans: POST, Denoiser, Upscaler, PathTrace. | **VERIFIED**. Zero manual barrier fallback paths remain in emitter classes (`DenoiserBarriers`, `UpscalerBarriers`, `PostImageBarriers`, `PathTraceBarriers`). |
 | **Cross-queue synchronization** | `QueueDependencyScheduler` centralizes timeline schedules (AER-084). | **VERIFIED**. `RtGpuExecutor.java:54` instantiates and delegates timeline scheduling to `queueDependencies`. |
-| **Post-processing ownership** | `PostProcessing` owns display images, auto-exposure, tonemapping pipeline. | **VERIFIED**. Extracted in commit `eda7606` (AER-090). `RtComposite` no longer owns display images or tonemapping dispatch. |
+| **Post-processing ownership** | `PostProcessing` owns the resources extracted by AER-090. | **VERIFIED WITH BOUNDARY**. The AER-090 extraction remains valid; separate presentation resources still remain in `RtComposite`. |
 | **Legacy execution authority** | No duplicate legacy execution authority was identified in the audited runtime paths. | **VERIFIED**. AER-091 audit demonstrated single canonical authority across all 7 canonical domains. |
-| **RtComposite target** | Coordinates the graph and delegates every ownership domain migrated by the roadmap. | **VERIFIED**. ReSTIR/SVGF history, LOD lifecycle, AS lifetime, upscaler lifetime and POST lifetime each have one external owner. Remaining trace/guide/frame-generation working resources were never migrated by an AER and do not duplicate another authority. |
+| **RtComposite target** | Orchestration/delegation only; not the universal GPU-resource owner. | **FAIL**. `RtComposite` still directly creates, destroys and recreates significant guide, trace, continuation, Frame Generation and presentation resources. The FINAL target does not permit retaining ownership merely because a prior AER did not migrate it. |
 | **Required rewrite components** | Every architecture component introduced under `src/main` has a production consumer. | **VERIFIED**. Repository-wide class/reference audit found no required main-source scaffold referenced only by tests. |
-| **GPU/AS/temporal/scene owners** | One authority per migrated domain. | **VERIFIED**. `RtContext` owns the deletion queue/AS manager; `TemporalState`, `RestirSystem`, `SharcRadianceCache`, `SvgfReconstructionBackend`, `UpscalerRuntime`, `SceneAssembler`, `GraphExecution` and `PostProcessing` have no parallel owner in `RtComposite`. |
+| **AS/temporal/scene/pipeline/render-graph owners** | One authority per migrated non-GPU domain. | **VERIFIED FOR MIGRATED DOMAINS**. `AccelerationStructureManager`, `TemporalState`, `RestirSystem`, `SharcRadianceCache`, `SvgfReconstructionBackend`, `UpscalerRuntime`, `SceneAssembler` and `GraphExecution` retain their supported domain-specific roles. This does not establish centralized ownership of all GPU resources. |
 
 ---
 
@@ -30,20 +30,24 @@
 
 | Feature | Implementation | Runtime qualification | Status | Evidence / note |
 | --- | --- | --- | --- | --- |
-| **Vulkan RT core** | `RtContext`, `RtPipeline`, `RtAccel` | Exercised in Nether smoke run | **RUNTIME VERIFIED** | Nether smoke `B-655481cb...`: ray tracing active, TLAS rebuilt, valid frame presentation. |
-| **DLSS Ray Reconstruction** | `DlssRrReconstructionBackend` | Exercised in Nether smoke run | **RUNTIME VERIFIED** | Nether smoke `B-655481cb...`: NGX DLSS-RR denoises and upscales to display resolution. |
-| **ReSTIR GI / DI** | `RestirSystem`, `RestirHistory` | Exercised in Nether smoke run | **RUNTIME EXERCISED / QUALITATIVE PARITY NOT DEMONSTRATED** | Nether smoke: primary/indirect traces exchange reservoir ping-pong buffers (`restirCurrent`/`restirPrevious`). Pre-existing temporal boiling / flickering remains visible under low SPP. |
-| **Scene / TLAS** | `SceneAssembler`, `RtEntities` | Exercised in Nether smoke run | **RUNTIME VERIFIED** | Nether smoke: dynamic entity BLAS and static terrain instances merged via `SceneAssembler.tlasInput`. |
-| **Auto-Exposure / Tonemap** | `PostProcessing`, `RtExposure` | Exercised in Nether smoke run | **IMPLEMENTED / RUNTIME PATH VERIFIED** | Nether smoke: histogram generation, resolve dispatch, tonemap dispatch executed every frame. Adaptation dynamics were not specifically measured. |
-| **SDR Output Presentation** | `PostProcessing`, `RtFramePresenter` | Exercised in Nether smoke run | **RUNTIME VERIFIED** | Nether smoke: SDR presentation blit to swapchain executed cleanly. |
-| **SHaRC Radiance Cache** | `SharcRadianceCache` | Structural/math qualification | **PRESERVED / OPTIONAL RUNTIME NOT REPEATED** | Owner, reset, binding and parameter tests pass; the experimental feature remained disabled in the matched benchmark. |
-| **SVGF Denoiser** | `SvgfReconstructionBackend` | Same-JAR A/B in AER-083 | **RUNTIME VERIFIED** | Legacy/generated denoiser-barrier pair passed with synchronization validation and identical feature selection. |
-| **HDR Presentation** | `PostProcessing`, `RtComposite` | User-accepted without a dedicated HDR run | **ACCEPTED / NOT INSTRUMENTED** | HDR capability and path remain present; the user explicitly accepted closure without repeating HDR qualification. Matched performance runs used SDR. |
-| **NRD Denoiser** | `NrdReconstructionBackend` | Not exercised in final smoke | **IMPLEMENTED / RUNTIME NOT VERIFIED** | NRD seam present in code; native runtime DLL not supplied. |
-| **LOD (Distant Horizons)** | `RtLodTerrain`, `LodBuildSession` | Excluded from qualification | **WAIVED / OUT OF QUALIFICATION SCOPE** | Known pre-existing crash bug; excluded by user directive. |
-| **LOD (Voxy Bridge)** | `RtLodTerrain`, `LodProviderSelector` | Excluded from qualification | **WAIVED / OUT OF QUALIFICATION SCOPE** | Untested in runtime smoke; excluded by user directive. |
-| **AMD FSR 3.1 Upscaler** | `FsrUpscalerBackend` | Excluded from qualification | **WAIVED / OUT OF QUALIFICATION SCOPE** | Optional native SDK not supplied; excluded by user directive. |
-| **Intel XeSS Upscaler** | `XessUpscalerBackend` | Excluded from qualification | **WAIVED / OUT OF QUALIFICATION SCOPE** | Optional native SDK not supplied; excluded by user directive. |
+| **Overworld** | `RtComposite`, terrain runtime | Current-candidate playthrough | **TESTED** | GATE-7 playthrough and RT activation. |
+| **Nether** | `RtComposite`, RT scene | Matched benchmark and smoke | **TESTED** | Fixed Nether scenario with active RT/DLSS-RR path. |
+| **End** | `RtComposite`, world transitions | Current-candidate playthrough | **TESTED** | GATE-7 transition and visual confirmation. |
+| **entities** | `RtEntities`, `SceneAssembler` | Nether smoke/benchmark | **TESTED** | Entity capture and BLAS/TLAS statistics recorded. |
+| **particles/weather** | `RtWeatherCapture`, particle path | Rain/snow playthrough | **TESTED** | Rain and snow observations plus particle counters. |
+| **water/glass** | Water/parallax shader paths | No runtime scenario retained | **NOT TESTED** | Existing characterization is not runtime qualification. |
+| **LabPBR** | Material registry/atlas path | No dedicated runtime scenario retained | **NOT TESTED** | Static material support does not prove feature parity. |
+| **LOD DH** | `RtLodTerrain`, DH adapter | Provider qualification excluded | **WAIVED / OUT OF QUALIFICATION SCOPE** | Known provider bug; no runtime correctness claim. |
+| **LOD Voxy bridge** | `RtLodTerrain`, Voxy adapter | Provider qualification excluded | **WAIVED / OUT OF QUALIFICATION SCOPE** | No runtime correctness claim. |
+| **ReSTIR** | `RestirSystem`, `RestirHistory` | Structural/math tests; no dedicated runtime qualification | **NOT TESTED FOR CANONICAL RUNTIME QUALIFICATION** | Structural/math tests pass; known boiling remains unchanged. |
+| **SHaRC** | `SharcRadianceCache` | Matched benchmark initialization observed | **NOT TESTED FOR FULL CANONICAL QUALIFICATION** | Allocation, enable and reset are logged; no dedicated behavior qualification. |
+| **SVGF** | `SvgfReconstructionBackend` | AER-083 same-JAR barrier A/B | **NOT TESTED FOR DIRECTLY PROVEN DISPATCH QUALIFICATION** | SVGF selection marker observed; direct dispatch evidence is absent. |
+| **DLSS-RR** | `DlssRrReconstructionBackend` | Nether smoke and AER-083 A/B | **TESTED** | DLSS-RR feature creation and runtime path observed. |
+| **HDR** | `PostProcessing`, HDR presentation | No dedicated HDR run | **NOT TESTED** | Matched benchmark used SDR; no waiver is applied. |
+| **SDR** | `PostProcessing`, `RtFramePresenter` | Nether smoke/benchmark | **TESTED** | SDR presentation path exercised. |
+| **NRD** | `NrdReconstructionBackend` | Native backend unavailable | **NOT TESTED** | No native runtime qualification. |
+| **FSR** | `FsrUpscalerBackend` | Native backend unavailable | **WAIVED / OUT OF QUALIFICATION SCOPE** | Authorized waiver. |
+| **XeSS** | `XessUpscalerBackend` | Native backend unavailable | **WAIVED / OUT OF QUALIFICATION SCOPE** | Authorized waiver. |
 
 ---
 
@@ -60,6 +64,8 @@
 - **Unexpected failures:** 0
 - **Characterization tests:** 7/7 PASS (`dev.comfyfluffy.caustica.rt.RtRewriteCharacterizationTest`)
 - **V2 Build:** PASS (`caustica-0.2.0.jar` built, NGX shim present at 83,968 bytes).
+- **Gate-8 same-candidate A/B validation:** SUPPORTING EVIDENCE only.
+- **Matched frozen-reference-vs-rewrite validation:** NOT AVAILABLE.
 - **Cardinality note:** Current suite is not cardinality-identical to the frozen-reference suite (contains new structural and ownership qualification tests added during the rewrite).
 
 ---
@@ -82,6 +88,17 @@ The following metrics were captured during Gate-8 qualification using the same d
 
 ### Canonical reference vs rewrite matched benchmark
 
+Provenance: **FROZEN REFERENCE 0.2.0 + DOCUMENTED COMPILER-COMPATIBILITY PATCH + SYMMETRIC TEMPORARY PROFILING INSTRUMENTATION**.
+
+The compiler compatibility patch was:
+
+```text
+MaterialHeader materialHeader;
+->
+MaterialHeader materialHeader = {};
+```
+
+The temporary profiling instrumentation was not present in production HEAD.
 Both variants used Minecraft 26.2/Fabric 0.19.3, the same isolated copy of the
 same Nether world and position, 2560x1440, render distance 12, SDR, DLSS-RR,
 no frame generation and no DH/Voxy/FSR/XeSS/NRD. The reference source required
@@ -103,9 +120,9 @@ and 99.80%, respectively.
 
 ## 6. GPU, VRAM, and BLAS evidence
 
-Hardware GPU duration was measured with symmetric `vkCmdWriteTimestamp`
-TOP/BOTTOM queries around the composite command buffer. Each CSV contains 1088
-samples; the last 600 steady-state samples were compared.
+The metric is **Composite command-buffer GPU duration**, measured with symmetric
+`vkCmdWriteTimestamp` TOP/BOTTOM queries around the composite command buffer.
+Each CSV contains 1088 samples; the last 600 steady-state samples were compared.
 
 | Hardware GPU duration | Reference | Rewrite | Delta | Threshold |
 | --- | ---: | ---: | ---: | ---: |
@@ -129,6 +146,16 @@ production worktree.
 | Median live BLAS bytes | 246,280,192 | 246,449,536 | **+0.07%** |
 | P95 live BLAS bytes | 246,504,960 | 246,873,344 | **+0.15%** |
 
+Included within the timestamp interval: ray/path tracing, ReSTIR work recorded
+in the composite, denoiser, upscaler and composite post work.
+
+Not demonstrated within the interval: UI/HUD, presentation/blit, other command
+buffers, separate async/build submissions, and separate SDK submissions. Frame
+Generation uses separate command buffers and was inactive in this benchmark.
+
+**Composite GPU duration comparison: VERIFIED.**
+**Canonical complete GPU frame-time Average/P95/P99: BLOCKED.**
+
 VRAM remains inside the +10% limit and the AS/BLAS population is
 baseline-equivalent for the matched scene.
 
@@ -136,9 +163,11 @@ baseline-equivalent for the matched scene.
 
 ## 7. LOD rebuild / reuse
 
-- **LOD rebuild / reuse metrics:** **WAIVED WITH THE PROVIDER RUNTIME SCOPE**.
-- **Evidence status:** These counters exist only when the DH or Voxy provider path is active. Running them would contradict the user's explicit instruction not to spend further closure work on the known provider bug.
-- **Boundary:** Static lifecycle, retention, coverage and publication tests remain PASS; no claim of DH/Voxy runtime correctness is made.
+- **AER-093 evidence field:** **NOT MEASURED**.
+- **Explicit FINAL criterion:** **NO**.
+- **Explicit waiver:** **NO**.
+- This is not an autonomous FINAL performance blocker. It must not be represented as waived.
+- Static lifecycle, retention, coverage and publication tests remain separate from runtime rebuild/reuse measurement.
 
 ---
 
@@ -205,22 +234,25 @@ The following four features are formally classified as waived from the current q
 > [!IMPORTANT]
 > **Waiver boundary definition:**
 > These requirements remain canonical requirements in `ROADMAP.md`. The waiver adjusts the user-qualified closure scope for this audit attempt; it does NOT convert the requirements to `PASS`, does NOT satisfy them, and does NOT alter `ROADMAP.md`.
-> LOD rebuild/reuse measurement is inseparable from the waived DH/Voxy runtime path and is included in that waiver. GPU performance, CPU latency, VRAM and BLAS evidence are not waived and were measured.
+> LOD rebuild/reuse is not part of the four authorized waiver entries. GPU performance, CPU latency, VRAM and BLAS evidence are not waived.
 
 ---
 
 ## 14. Remaining qualification boundaries
 
-1. DH and Voxy runtime correctness plus their LOD rebuild/reuse efficiency remain explicitly waived and unresolved.
+1. DH and Voxy runtime correctness remain explicitly waived and unresolved.
 2. FSR and XeSS runtime paths remain explicitly waived and unresolved because their native runtimes were not supplied.
-3. HDR was accepted by the user without a dedicated final run; the matched benchmark is SDR.
+3. HDR remains NOT TESTED; the matched benchmark is SDR and this is not a waiver.
 4. NRD remains experimental and unavailable without its native runtime.
 5. The exceptional resize/unwind risk remains inherited and unproven, as recorded above.
+6. Complete canonical GPU frame-time coverage remains blocked because the timestamp interval does not cover presentation/UI and other command buffers.
 
 ---
 
 ## 15. AER-093 conclusion
 
 - **AER-093 report status:** **DONE**.
-- **Assessment:** Repository-wide integration audit, canonical validation and matched CPU/GPU/VRAM/BLAS qualification are complete. No dead required component, duplicate migrated authority or reachable legacy runner was found.
-- **FINAL GATE disposition:** **PASS WITH EXPLICIT SCOPE WAIVERS** for DH/Voxy and FSR/XeSS. Waived features remain follow-up work and are not represented as qualified.
+- **Assessment:** AER-093 documentation is complete. The audit demonstrates remaining canonical architecture failures and incomplete qualification.
+- **Demonstrated failures:** `RtComposite` is not orchestration/delegation-only; GPU lifetime is not fully centralized; the integration delegation target is not satisfied.
+- **Canonical blocked evidence:** complete GPU frame-time Average/P95/P99 coverage.
+- **FINAL GATE disposition:** **FAIL**.
