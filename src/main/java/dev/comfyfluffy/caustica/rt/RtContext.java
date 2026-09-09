@@ -39,6 +39,8 @@ import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.gpu.AccelerationStructureManager;
 import dev.comfyfluffy.caustica.rt.gpu.DeferredDeletionQueue;
+import dev.comfyfluffy.caustica.rt.gpu.FrameTailRetirement;
+import dev.comfyfluffy.caustica.rt.gpu.VulkanFrameTailRetirement;
 
 import java.nio.LongBuffer;
 import java.util.function.Consumer;
@@ -64,6 +66,7 @@ public final class RtContext {
     private final Object deviceQueueHostLock = new Object();
     private final RtGpuExecutor gpuExecutor;
     private final DeferredDeletionQueue deferredDeletionQueue;
+    private final FrameTailRetirement frameTailRetirement;
     private final AccelerationStructureManager accelerationStructureManager;
     private final int shaderGroupHandleSize;
     private final int shaderGroupBaseAlignment;
@@ -89,6 +92,7 @@ public final class RtContext {
         this.updateAfterBindCombinedImageSamplerLimit = updateAfterBindCombinedImageSamplerLimit;
         this.gpuExecutor = new RtGpuExecutor(this);
         this.deferredDeletionQueue = new DeferredDeletionQueue(gpuExecutor);
+        this.frameTailRetirement = new VulkanFrameTailRetirement(device.createCommandEncoder());
         this.accelerationStructureManager = new AccelerationStructureManager(deferredDeletionQueue);
     }
 
@@ -200,6 +204,10 @@ public final class RtContext {
 
     public DeferredDeletionQueue deferredDeletionQueue() {
         return deferredDeletionQueue;
+    }
+
+    public FrameTailRetirement frameTailRetirement() {
+        return frameTailRetirement;
     }
 
     public AccelerationStructureManager accelerationStructures() {
