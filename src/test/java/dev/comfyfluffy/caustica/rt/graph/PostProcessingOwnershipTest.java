@@ -10,12 +10,17 @@ class PostProcessingOwnershipTest {
 
     @Test void productionUsesOnePostOwnerAndPreservesSplitLifecycle() throws Exception {
         String source = Files.readString(ROOT.resolve("RtComposite.java"));
+        String owner = Files.readString(ROOT.resolve("post/PostProcessing.java"));
         String traceFrames = Files.readString(ROOT.resolve("trace/TraceFrameResources.java"));
-        assertTrue(source.contains("private final PostProcessing postProcessing = new PostProcessing()"));
+        assertTrue(source.contains("private final PostProcessing postProcessing = new PostProcessing("));
         assertTrue(source.contains("private final TraceFrameResources traceFrameResources = new TraceFrameResources("));
         for (String field : new String[]{"private RtDisplayPipeline displayPipeline",
-                "private RtImage displayImage", "private RtImage hdrDisplayImage", "new RtExposure()"}) {
+                "private RtImage displayImage", "private RtImage hdrDisplayImage", "new RtExposure()",
+                "private RtHdrCompositePipeline hdrCompositePipeline", "private long hdrUiSampler",
+                "private RtSdrPresentPipeline sdrPresentPipeline", "private RtImage sdrPresentImage",
+                "private boolean hdrWrittenThisFrame"}) {
             assertFalse(source.contains(field), field);
+            assertTrue(owner.contains(field), field);
         }
         ordered(source.substring(source.indexOf("private void ensureOutput(")),
                 "ctx.waitIdle()", "postProcessing.releaseImagesForResize()",
@@ -40,7 +45,10 @@ class PostProcessingOwnershipTest {
         assertFalse(source.contains("output.destroy()"));
         assertFalse(source.contains("destroyGuideImages()"));
         assertTrue(source.contains("postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, frameViews().rrOutput()"));
-        assertTrue(source.contains("() -> hdrWrittenThisFrame = postHdr"));
+        assertFalse(source.contains("hdrWrittenThisFrame = postHdr"));
+        assertTrue(owner.contains("implements GeneratedFrameUiComposer"));
+        assertTrue(owner.contains("retirement.retire(old::destroy)"));
+        assertFalse(owner.contains("FrameGenerationResources"));
     }
 
     @Test void postOwnerPreservesExposureDispatchBarrierAndCompletionOrder() throws Exception {
@@ -48,7 +56,7 @@ class PostProcessingOwnershipTest {
         ordered(owner.substring(owner.indexOf("public void record(")),
                 "exposure.record(ctx, cmd, stack, rrOutput, postHdr)", "PostBarrierPlan.DISPLAY",
                 "displayPipeline.dispatch(cmd, displayW, displayH, postHdr",
-                "displayWritten.run()", "PostBarrierPlan.COPY", "VK10.vkCmdCopyImage",
+                "hdrWrittenThisFrame = postHdr", "PostBarrierPlan.COPY", "VK10.vkCmdCopyImage",
                 "PostBarrierPlan.EXPORT");
         ordered(owner.substring(owner.indexOf("public void createImages(")),
                 "VK10.VK_FORMAT_R8G8B8A8_UNORM", "VK10.VK_FORMAT_R16G16B16A16_SFLOAT");
@@ -59,6 +67,21 @@ class PostProcessingOwnershipTest {
         assertFalse(owner.contains("VulkanCommandEncoder.memoryBarrier("));
         assertTrue(owner.contains("copyRegion(stack, displayW, displayH)"));
         assertTrue(owner.contains("region.get(0).extent().set(width, height, 1)"));
+    }
+
+    @Test void presentationOwnerPreservesCaptureBarrierBlitAndSemaphoreOrder() throws Exception {
+        String owner = Files.readString(ROOT.resolve("post/PostProcessing.java"));
+        ordered(owner.substring(owner.indexOf("public void presentHdr(")),
+                "allocateAndBeginTransientCommandBuffer()", "capture.capture(",
+                "RtUiOverlay.populatedThisFrame()", "composeHdrGenerated(",
+                "RtUiOverlay.markConsumed()", "recordPresentBlit(");
+        ordered(owner.substring(owner.indexOf("private static void recordPresentBlit(")),
+                "vkCmdPipelineBarrier2KHR", "vkCmdBlitImage", "vkCmdPipelineBarrier2KHR",
+                "vkEndCommandBuffer", "waitSemaphore", "execute(command)", "signalSemaphore");
+        ordered(owner.substring(owner.indexOf("public boolean presentSdrToPq(")),
+                "RtSdrPresentPipeline.create(ctx)", "ctx.createStorageImage(",
+                "retirement.retire(old::destroy)", "sdrPresentPipeline.setImages(",
+                "sdrPresentPipeline.dispatch(", "recordPresentBlit(");
     }
 
     private static void ordered(String source, String... tokens) {

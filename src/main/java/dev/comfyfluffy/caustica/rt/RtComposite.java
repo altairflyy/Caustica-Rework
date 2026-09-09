@@ -36,15 +36,8 @@ import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
-import org.lwjgl.vulkan.KHRSynchronization2;
 import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkCommandBuffer;
-import org.lwjgl.vulkan.VkDependencyInfo;
-import org.lwjgl.vulkan.VkImageBlit;
-import org.lwjgl.vulkan.VkImageCopy;
-import org.lwjgl.vulkan.VkImageMemoryBarrier2;
-import org.lwjgl.vulkan.VkMemoryBarrier2;
-import org.lwjgl.vulkan.VkSamplerCreateInfo;
 
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
@@ -57,10 +50,7 @@ import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.post.PostProcessing;
 import dev.comfyfluffy.caustica.rt.framegen.FrameGenerationResources;
-import dev.comfyfluffy.caustica.rt.framegen.GeneratedFrameUiComposer;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
-import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
-import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import dev.comfyfluffy.caustica.rt.trace.WorldTraceResources;
 import dev.comfyfluffy.caustica.rt.trace.TraceFrameResources;
@@ -311,45 +301,14 @@ public final class RtComposite {
     private final WorldTraceResources worldTraceResources =
             new WorldTraceResources(WORLD_PUSH_BUFFER_SIZE, GUIDE_COUNT);
     private final TraceFrameResources traceFrameResources = new TraceFrameResources(PATH_RECORD_BYTES);
-    private final PostProcessing postProcessing = new PostProcessing();
+    private final PostProcessing postProcessing = new PostProcessing(
+            destruction -> RtContext.get().frameTailRetirement().retire(destruction));
     private final FrameGenerationResources frameGenerationResources = new FrameGenerationResources(
             destruction -> RtContext.get().frameTailRetirement().retire(destruction));
-    private final GeneratedFrameUiComposer generatedFrameUiComposer = new GeneratedFrameUiComposer() {
-        @Override
-        public long uiSampler(RtContext ctx) {
-            return ensureUiSampler(ctx) ? hdrUiSampler : 0L;
-        }
-
-        @Override
-        public void composeHdrGenerated(VkCommandBuffer command, RtImage target, long overlayView,
-                                        int width, int height) {
-            ensureHdrUiResources();
-            if (hdrCompositePipeline != null) {
-                hdrCompositePipeline.setImages(target.view, overlayView, hdrUiSampler);
-                hdrCompositePipeline.dispatch(command, width, height,
-                        CausticaConfig.Rt.Hdr.paperWhiteNits());
-            }
-        }
-    };
     // ReSTIR DI/GI history is a strict two-buffer ping-pong: a dispatch reads only `previous` and writes
     // only `current`, so spatial neighbour reuse never races another raygen invocation. The pair exists
     // only while the player setting is ON; live toggles idle the device before destruction/allocation.
     private final RestirSystem restirSystem = new RestirSystem();
-    // Parallel PQ-encoded ([0,1], ST.2084) HDR display image. Written alongside displayImage when HDR is
-    // enabled. When the PQ swapchain is active, the combined UI overlay is composited over this image, then
-    // this image is blitted straight to the swapchain.
-    // Set true after this frame's display dispatch wrote postProcessing.hdrImage() (HDR enabled + RT ran); gates the
-    // HDR present blit so a frame where RT did not run falls back to the vanilla SDR present.
-    private boolean hdrWrittenThisFrame;
-    // Step C.2: composites the combined UI overlay over postProcessing.hdrImage() at paper white, just before present.
-    private RtHdrCompositePipeline hdrCompositePipeline;
-    private long hdrUiSampler;
-
-    // Menu/non-RT present: converts the SDR main target (sRGB) to PQ-encoded at paper white so menus,
-    // the title panorama and the loading screen present correctly to the PQ swapchain instead of being
-    // raw-copied (misdisplayed). Lazily created; the image is sized to the swapchain.
-    private RtSdrPresentPipeline sdrPresentPipeline;
-    private RtImage sdrPresentImage;
     // ---- SVGF (the renderer's own denoiser for every non-DLSS path).
     //
     // colour/history ping-pong (rgb = colour, a = accumulated frame count), the luminance-moment
@@ -527,7 +486,7 @@ public final class RtComposite {
         if (ctx != null) {
             ctx.accelerationStructures().recordDiagnostics(RtFrameStats.FRAME);
         }
-        hdrWrittenThisFrame = false;
+        postProcessing.beginFrame();
     }
 
     /** This frame's completion token, valid until {@link #finishGraphicsUse()} signals it. */
@@ -559,7 +518,7 @@ public final class RtComposite {
     public boolean composite(GpuTexture nativeColor, int width, int height) {
         frameCounter++; // global frame serial used by remaining per-frame/entity rings and diagnostics
         VulkanDiagnostics.setInFlight("graphics-latest", "frame=" + frameCounter + " size=" + width + "x" + height);
-        hdrWrittenThisFrame = false; // set true again below once this frame's HDR display image is written
+        postProcessing.beginFrame(); // set true again once this frame's HDR display image is written
         if (failed) {
             return false;
         }
@@ -981,8 +940,7 @@ public final class RtComposite {
         }
         boolean postHdr = CausticaConfig.Rt.Hdr.enabled();
         postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, frameViews().rrOutput(),
-                frameViews().displayWidth(), frameViews().displayHeight(), pipelinePostPresentTarget, postHdr,
-                () -> hdrWrittenThisFrame = postHdr);
+                frameViews().displayWidth(), frameViews().displayHeight(), pipelinePostPresentTarget, postHdr);
     }
 
     private FrameInputs prepareFrameInputs() {
@@ -1862,25 +1820,7 @@ public final class RtComposite {
         traceFrameResources.release();
         restirSystem.destroy();
         postProcessing.destroyPipelineAndExposure();
-        if (hdrCompositePipeline != null) {
-            hdrCompositePipeline.destroy();
-            hdrCompositePipeline = null;
-        }
-        if (hdrUiSampler != 0L) {
-            RtContext hdrCtx = RtContext.currentOrNull();
-            if (hdrCtx != null) {
-                VK10.vkDestroySampler(hdrCtx.vk(), hdrUiSampler, null);
-            }
-            hdrUiSampler = 0L;
-        }
-        if (sdrPresentPipeline != null) {
-            sdrPresentPipeline.destroy();
-            sdrPresentPipeline = null;
-        }
-        if (sdrPresentImage != null) {
-            sdrPresentImage.destroy();
-            sdrPresentImage = null;
-        }
+        postProcessing.destroyPresentationAfterDeviceIdle();
         worldTraceResources.destroy();
     }
 
@@ -1891,243 +1831,34 @@ public final class RtComposite {
         throw new IllegalStateException("cannot resolve VkImage for " + texture);
     }
 
-    private static VkImageCopy.Buffer copyRegion(MemoryStack stack, int width, int height) {
-        VkImageCopy.Buffer region = VkImageCopy.calloc(1, stack);
-        region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-        region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-        region.get(0).extent().set(width, height, 1);
-        return region;
-    }
-
-    /** Whether the HDR present path (HDR image + combined UI -> PQ swapchain) should replace the vanilla SDR blit. */
     public boolean isHdrPresentActive() {
-        return CausticaConfig.Rt.Hdr.enabled()
-                && hdrWrittenThisFrame
-                && postProcessing.hdrImage() != null;
+        return postProcessing.isHdrPresentActive();
     }
 
-    /**
-     * DLSS-FG: the PQ-encoded HDR backbuffer (view/image), valid only right after {@link #presentHdr} has run
-     * this frame (it's the same image {@code presentHdr} just composited UI into and blitted to the
-     * swapchain) — used as the interpolation source for HDR frame generation instead of the SDR main target.
-     * Already display-ready PQ, so it's fed to DLSSG directly with no extra encode step. 0 if HDR isn't
-     * active this frame.
-     */
     public long hdrBackbufferView() {
-        return postProcessing.hdrImage() != null ? postProcessing.hdrImage().view : 0L;
+        return postProcessing.hdrBackbufferView();
     }
 
     public long hdrBackbufferImage() {
-        return postProcessing.hdrImage() != null ? postProcessing.hdrImage().image : 0L;
+        return postProcessing.hdrBackbufferImage();
     }
 
-    /**
-     * Blit this frame's PQ-encoded HDR image straight into the swapchain image, replacing Minecraft's SDR
-     * blit. Replicates {@code VulkanGpuSurface.blitFromTexture}'s barrier + acquire-wait/present-signal
-     * sequence with the HDR {@link RtImage} as the (GENERAL-layout) source; an added memory barrier makes the
-     * display-compute writes visible to the blit read. The SDR main target is bypassed; the combined UI image
-     * is blended over the HDR image here at paper white before the swapchain blit. The magic stage/access
-     * values mirror vanilla {@code blitFromTexture} exactly. Y is flipped to match the vanilla swapchain blit.
-     */
-    public void presentHdr(VulkanCommandEncoder enc, long swapchainImage, int swapW, int swapH, long acquireSem, long presentSem) {
-        RtImage src = postProcessing.hdrImage();
-        int copyW = Math.min(swapW, src.width);
-        int copyH = Math.min(swapH, src.height);
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkCommandBuffer cmd = enc.allocateAndBeginTransientCommandBuffer();
-
-            // FG "hudless" capture: postProcessing.hdrImage() right now holds the RT world before the combined
-            // UI overlay is blended in. Snapshot it before that composite overwrites it in place, mirroring
-            // captureFgHudless's SDR pattern (pre-UI copy) but reusing this frame's already-open command
-            // buffer. Both DLSS-FG (hudless resource) and the native engine (interpolation source +
-            // UI re-composite) consume it.
-            if (FrameGenerationResources.hudlessNeeded()) {
-                frameGenerationResources.captureHdrHudless(RtContext.get(), cmd, stack, src);
-            }
-
-            // Step C.2: composite the combined UI overlay over the HDR world image (in place) at paper white,
-            // before the swapchain blit. The overlay is an MC render target kept in GENERAL layout, sampled by
-            // the compute pass. A memory barrier first makes the overlay writes + the world HDR writes visible
-            // to the compute; the dep1 barrier below (ALL writes -> transfer read) then covers the compute's
-            // HDR write for the blit.
-            long overlayView = RtUiOverlay.populatedThisFrame() ? RtUiOverlay.overlayColorView() : 0L;
-            if (overlayView != 0L) {
-                ensureHdrUiResources();
-                if (hdrCompositePipeline != null) {
-                    VkMemoryBarrier2.Buffer pre = VkMemoryBarrier2.calloc(1, stack).sType$Default();
-                    pre.get(0).srcStageMask(65536L).srcAccessMask(65536L).dstStageMask(2048L).dstAccessMask(98304L);
-                    VkDependencyInfo preDep = VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(pre);
-                    KHRSynchronization2.vkCmdPipelineBarrier2KHR(cmd, preDep);
-                    hdrCompositePipeline.setImages(postProcessing.hdrImage().view, overlayView, hdrUiSampler);
-                    hdrCompositePipeline.dispatch(cmd, src.width, src.height, CausticaConfig.Rt.Hdr.paperWhiteNits());
-                }
-                RtUiOverlay.markConsumed();
-            }
-            // Swapchain UNDEFINED -> TRANSFER_DST, plus make the HDR compute writes visible to the blit read.
-            VkImageMemoryBarrier2.Buffer toDst = VkImageMemoryBarrier2.calloc(1, stack).sType$Default();
-            toDst.get(0).srcStageMask(0L).srcAccessMask(0L).dstStageMask(4096L).dstAccessMask(4096L)
-                    .oldLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-                    .srcQueueFamilyIndex(-1).dstQueueFamilyIndex(-1).image(swapchainImage);
-            toDst.get(0).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1);
-            VkMemoryBarrier2.Buffer srcVis = VkMemoryBarrier2.calloc(1, stack).sType$Default();
-            srcVis.get(0).srcStageMask(65536L).srcAccessMask(65536L).dstStageMask(4096L).dstAccessMask(2048L);
-            VkDependencyInfo dep1 = VkDependencyInfo.calloc(stack).sType$Default().pImageMemoryBarriers(toDst).pMemoryBarriers(srcVis);
-            KHRSynchronization2.vkCmdPipelineBarrier2KHR(cmd, dep1);
-
-            // Blit HDR (GENERAL) -> swapchain (TRANSFER_DST), Y-flipped like vanilla.
-            VkImageBlit.Buffer region = VkImageBlit.calloc(1, stack);
-            region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-            region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-            region.get(0).srcOffsets(1).set(copyW, copyH, 1); // srcOffsets[0] = (0,0,0) from calloc
-            region.get(0).dstOffsets(0).set(0, copyH, 0);
-            region.get(0).dstOffsets(1).set(copyW, 0, 1);
-            VK10.vkCmdBlitImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL, swapchainImage,
-                    VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region, VK10.VK_FILTER_NEAREST);
-
-            // Swapchain TRANSFER_DST -> PRESENT_SRC_KHR (1000001002).
-            VkImageMemoryBarrier2.Buffer toPresent = VkImageMemoryBarrier2.calloc(1, stack).sType$Default();
-            toPresent.get(0).srcStageMask(4096L).srcAccessMask(4096L).dstStageMask(65536L).dstAccessMask(0L)
-                    .oldLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).newLayout(1000001002)
-                    .srcQueueFamilyIndex(-1).dstQueueFamilyIndex(-1).image(swapchainImage);
-            toPresent.get(0).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1);
-            VkMemoryBarrier2.Buffer mem2 = VkMemoryBarrier2.calloc(1, stack).sType$Default();
-            mem2.get(0).srcStageMask(4096L).srcAccessMask(2048L).dstStageMask(65536L).dstAccessMask(98304L);
-            VkDependencyInfo dep2 = VkDependencyInfo.calloc(stack).sType$Default().pImageMemoryBarriers(toPresent).pMemoryBarriers(mem2);
-            KHRSynchronization2.vkCmdPipelineBarrier2KHR(cmd, dep2);
-
-            if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-                throw new IllegalStateException("vkEndCommandBuffer(hdr present) failed");
-            }
-            enc.waitSemaphore(acquireSem, 0L, 65536L);
-            enc.execute(cmd);
-            enc.signalSemaphore(presentSem, 0L, 4096L);
-        }
+    public void presentHdr(VulkanCommandEncoder encoder, long swapchainImage, int swapW, int swapH,
+                           long acquireSemaphore, long presentSemaphore) {
+        postProcessing.presentHdr(encoder, swapchainImage, swapW, swapH, acquireSemaphore, presentSemaphore,
+                FrameGenerationResources.hudlessNeeded()
+                        ? frameGenerationResources::captureHdrHudless
+                        : (ctx, command, stack, source) -> { });
     }
 
-    /** Lazily create the HDR UI-composite compute pipeline + its nearest/clamp sampler (first HDR present). */
-    private void ensureHdrUiResources() {
-        if (hdrCompositePipeline != null) {
-            return;
-        }
-        RtContext ctx = RtContext.get();
-        if (ctx == null || !ensureUiSampler(ctx)) {
-            return;
-        }
-        hdrCompositePipeline = RtHdrCompositePipeline.create(ctx);
-    }
-
-    /** Ensure the shared nearest/clamp sampler used to sample SDR/overlay targets in the present compute. */
-    private boolean ensureUiSampler(RtContext ctx) {
-        if (hdrUiSampler != 0L) {
-            return true;
-        }
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkSamplerCreateInfo sci = VkSamplerCreateInfo.calloc(stack).sType$Default()
-                    .magFilter(VK10.VK_FILTER_NEAREST).minFilter(VK10.VK_FILTER_NEAREST)
-                    .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_NEAREST)
-                    .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                    .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                    .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-            var p = stack.mallocLong(1);
-            if (VK10.vkCreateSampler(ctx.vk(), sci, null, p) != VK10.VK_SUCCESS) {
-                return false;
-            }
-            hdrUiSampler = p.get(0);
-        }
-        return true;
-    }
-
-    /**
-     * Whether a non-RT frame (menu, title panorama, loading screen) should be SDR-&gt;PQ converted for
-     * present instead of vanilla's raw SDR blit. True when the PQ swapchain is active but this frame did
-     * not produce an HDR image ({@link #isHdrPresentActive()} false).
-     */
     public boolean isPqSdrPresentActive() {
-        return CausticaConfig.Rt.Hdr.enabled()
-                && !isHdrPresentActive();
+        return postProcessing.isPqSdrPresentActive();
     }
 
-    /**
-     * Present a non-RT (menu/loading) frame to the PQ swapchain: convert the SDR main target (sRGB-encoded
-     * rgba8, GENERAL layout, already holding the composited panorama + UI) to PQ-encoded at paper white via
-     * a compute pass into {@link #sdrPresentImage}, then blit that into the swapchain. Mirrors
-     * {@link #presentHdr} barrier-for-barrier; returns false (keep vanilla SDR blit) if resources are
-     * unavailable.
-     */
-    public boolean presentSdrToPq(VulkanCommandEncoder enc, long swapchainImage, int swapW, int swapH,
-            long sdrMainView, long acquireSem, long presentSem) {
-        if (sdrMainView == 0L || failed) {
-            return false;
-        }
-        RtContext ctx = RtContext.get();
-        if (ctx == null || !ensureUiSampler(ctx)) {
-            return false;
-        }
-        if (sdrPresentPipeline == null) {
-            sdrPresentPipeline = RtSdrPresentPipeline.create(ctx);
-        }
-        if (sdrPresentImage == null || sdrPresentImage.width != swapW || sdrPresentImage.height != swapH) {
-            if (sdrPresentImage != null) {
-                sdrPresentImage.destroy();
-            }
-            sdrPresentImage = ctx.createStorageImage(swapW, swapH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    "RT SDR->PQ present image " + swapW + "x" + swapH);
-        }
-        RtImage dst = sdrPresentImage;
-        int copyW = Math.min(swapW, dst.width);
-        int copyH = Math.min(swapH, dst.height);
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkCommandBuffer cmd = enc.allocateAndBeginTransientCommandBuffer();
-
-            // Make the prior GUI/overlay writes to the SDR main target visible to the compute sample.
-            VkMemoryBarrier2.Buffer pre = VkMemoryBarrier2.calloc(1, stack).sType$Default();
-            pre.get(0).srcStageMask(65536L).srcAccessMask(65536L).dstStageMask(2048L).dstAccessMask(98304L);
-            VkDependencyInfo preDep = VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(pre);
-            KHRSynchronization2.vkCmdPipelineBarrier2KHR(cmd, preDep);
-
-            sdrPresentPipeline.setImages(dst.view, sdrMainView, hdrUiSampler);
-            sdrPresentPipeline.dispatch(cmd, dst.width, dst.height, CausticaConfig.Rt.Hdr.paperWhiteNits());
-
-            // Swapchain UNDEFINED -> TRANSFER_DST, plus make the compute write visible to the blit read.
-            VkImageMemoryBarrier2.Buffer toDst = VkImageMemoryBarrier2.calloc(1, stack).sType$Default();
-            toDst.get(0).srcStageMask(0L).srcAccessMask(0L).dstStageMask(4096L).dstAccessMask(4096L)
-                    .oldLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-                    .srcQueueFamilyIndex(-1).dstQueueFamilyIndex(-1).image(swapchainImage);
-            toDst.get(0).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1);
-            VkMemoryBarrier2.Buffer srcVis = VkMemoryBarrier2.calloc(1, stack).sType$Default();
-            srcVis.get(0).srcStageMask(65536L).srcAccessMask(65536L).dstStageMask(4096L).dstAccessMask(2048L);
-            VkDependencyInfo dep1 = VkDependencyInfo.calloc(stack).sType$Default().pImageMemoryBarriers(toDst).pMemoryBarriers(srcVis);
-            KHRSynchronization2.vkCmdPipelineBarrier2KHR(cmd, dep1);
-
-            // Blit converted PQ image (GENERAL) -> swapchain (TRANSFER_DST), Y-flipped like vanilla.
-            VkImageBlit.Buffer region = VkImageBlit.calloc(1, stack);
-            region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-            region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-            region.get(0).srcOffsets(1).set(copyW, copyH, 1); // srcOffsets[0] = (0,0,0) from calloc
-            region.get(0).dstOffsets(0).set(0, copyH, 0);
-            region.get(0).dstOffsets(1).set(copyW, 0, 1);
-            VK10.vkCmdBlitImage(cmd, dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, swapchainImage,
-                    VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region, VK10.VK_FILTER_NEAREST);
-
-            // Swapchain TRANSFER_DST -> PRESENT_SRC_KHR (1000001002).
-            VkImageMemoryBarrier2.Buffer toPresent = VkImageMemoryBarrier2.calloc(1, stack).sType$Default();
-            toPresent.get(0).srcStageMask(4096L).srcAccessMask(4096L).dstStageMask(65536L).dstAccessMask(0L)
-                    .oldLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).newLayout(1000001002)
-                    .srcQueueFamilyIndex(-1).dstQueueFamilyIndex(-1).image(swapchainImage);
-            toPresent.get(0).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1);
-            VkMemoryBarrier2.Buffer mem2 = VkMemoryBarrier2.calloc(1, stack).sType$Default();
-            mem2.get(0).srcStageMask(4096L).srcAccessMask(2048L).dstStageMask(65536L).dstAccessMask(98304L);
-            VkDependencyInfo dep2 = VkDependencyInfo.calloc(stack).sType$Default().pImageMemoryBarriers(toPresent).pMemoryBarriers(mem2);
-            KHRSynchronization2.vkCmdPipelineBarrier2KHR(cmd, dep2);
-
-            if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-                throw new IllegalStateException("vkEndCommandBuffer(sdr present) failed");
-            }
-            enc.waitSemaphore(acquireSem, 0L, 65536L);
-            enc.execute(cmd);
-            enc.signalSemaphore(presentSem, 0L, 4096L);
-        }
-        return true;
+    public boolean presentSdrToPq(VulkanCommandEncoder encoder, long swapchainImage, int swapW, int swapH,
+                                  long sdrMainView, long acquireSemaphore, long presentSemaphore) {
+        return postProcessing.presentSdrToPq(encoder, swapchainImage, swapW, swapH, sdrMainView,
+                acquireSemaphore, presentSemaphore, failed);
     }
 
     /** Capture the pre-UI SDR frame at the existing renderer seam. */
@@ -2147,7 +1878,7 @@ public final class RtComposite {
                 new FrameGenerationResources.FrameData(
                         frameViews(), mvCurProjView, mvPrevProjView, frameProjection, frameViewRotation,
                         camX, camY, camZ, frameCounter, !failed && frameCaptured),
-                generatedFrameUiComposer);
+                postProcessing);
     }
 
 }
