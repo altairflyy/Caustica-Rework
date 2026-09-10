@@ -1,12 +1,5 @@
 $ErrorActionPreference = "Stop"
 
-$ExpectedFailures = @(
-    "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::sideWallsReplaceTheMappedNormalOnBothHitPaths",
-    "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::blockSpritesTileWhileEntityAtlasesStopAtTheirIsland",
-    "dev.comfyfluffy.caustica.rt.RtWaterWaveShaderRegressionTest::continuationOriginsStayOffTheRestPlaneMesh",
-    "dev.comfyfluffy.caustica.rt.RtWaterWaveShaderRegressionTest::animatedWaterIntersectsTheHeightFieldAlongTheViewRay"
-)
-
 function Fail-Validation {
     param(
         [Parameter(Mandatory = $true)]
@@ -86,7 +79,7 @@ function Ensure-NgxShim {
     Write-Host "[validate-build] NGX shim rebuilt: $($shim.Length) bytes"
 }
 
-function Invoke-BaselineAwareTests {
+function Invoke-Tests {
     param(
         [Parameter(Mandatory = $true)]
         [string]$RepoRoot
@@ -96,7 +89,7 @@ function Invoke-BaselineAwareTests {
 
     Remove-Item $results -Recurse -Force -ErrorAction SilentlyContinue
 
-    Write-Host "[validate-build] V1: Gradle test + baseline comparison"
+    Write-Host "[validate-build] V1: Gradle tests"
 
     & .\gradlew.bat test --rerun-tasks `
         -PngxShimConfig=release `
@@ -153,33 +146,19 @@ function Invoke-BaselineAwareTests {
         Fail-Validation "RtRewriteCharacterizationTest is not 7/7 PASS"
     }
 
-    $expected = @($ExpectedFailures | Sort-Object)
-    $actual   = @($actualFailures | Sort-Object)
-
-    $unexpected = @($actual | Where-Object { $_ -notin $expected })
-    $missing    = @($expected | Where-Object { $_ -notin $actual })
-
-    if ($unexpected.Count -gt 0) {
-        Write-Host "[validate-build] Unexpected failures:" -ForegroundColor Red
-        $unexpected | ForEach-Object { Write-Host "  + $_" }
+    if ($actualFailures.Count -gt 0) {
+        Write-Host "[validate-build] Test failures:" -ForegroundColor Red
+        $actualFailures | Sort-Object | ForEach-Object { Write-Host "  + $_" }
     }
 
-    if ($missing.Count -gt 0) {
-        Write-Host "[validate-build] Expected baseline failures missing:" -ForegroundColor Red
-        $missing | ForEach-Object { Write-Host "  - $_" }
-    }
-
-    if (
-        $actual.Count -ne $expected.Count -or
-        $unexpected.Count -gt 0 -or
-        $missing.Count -gt 0
-    ) {
-        Fail-Validation "test failure set differs from the frozen 4-test baseline"
+    if ($gradleExit -ne 0 -or $actualFailures.Count -ne 0) {
+        Fail-Validation "Gradle tests did not complete with zero failures"
     }
 
     Write-Host "[validate-build] Characterization: 7/7 PASS"
-    Write-Host "[validate-build] Baseline failures: exact 4/4 match (BASELINE-EQUIVALENT)"
-    Write-Host "[validate-build] Gradle test exit code $gradleExit accepted because only frozen baseline failures remain"
+    Write-Host "[validate-build] Expected failures: 0"
+    Write-Host "[validate-build] Unexpected failures: 0"
+    Write-Host "[validate-build] Gradle test exit code $gradleExit"
 }
 
 $repoRoot = (& git rev-parse --show-toplevel 2>$null)
@@ -202,9 +181,9 @@ try {
 
     Ensure-NgxShim -RepoRoot $repoRoot
 
-    Invoke-BaselineAwareTests -RepoRoot $repoRoot
+    Invoke-Tests -RepoRoot $repoRoot
 
-    Write-Host "[validate-build] V2: Gradle build (tests already baseline-validated)"
+    Write-Host "[validate-build] V2: Gradle build (tests already validated)"
 
     & .\gradlew.bat build -x test `
         -PngxShimConfig=release `

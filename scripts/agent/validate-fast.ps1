@@ -1,12 +1,5 @@
 $ErrorActionPreference = "Stop"
 
-$ExpectedFailures = @(
-    "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::sideWallsReplaceTheMappedNormalOnBothHitPaths",
-    "dev.comfyfluffy.caustica.rt.RtParallaxShaderRegressionTest::blockSpritesTileWhileEntityAtlasesStopAtTheirIsland",
-    "dev.comfyfluffy.caustica.rt.RtWaterWaveShaderRegressionTest::continuationOriginsStayOffTheRestPlaneMesh",
-    "dev.comfyfluffy.caustica.rt.RtWaterWaveShaderRegressionTest::animatedWaterIntersectsTheHeightFieldAlongTheViewRay"
-)
-
 function Fail {
     param([string]$Message)
 
@@ -32,7 +25,7 @@ try {
         Fail "git diff --check failed"
     }
 
-    Write-Host "[validate-fast] V1: Gradle tests + frozen baseline comparison"
+    Write-Host "[validate-fast] V1: Gradle tests"
 
     Remove-Item ".\build\test-results\test" `
         -Recurse -Force -ErrorAction SilentlyContinue
@@ -84,42 +77,21 @@ try {
         Fail "RtRewriteCharacterizationTest is not 7/7 PASS"
     }
 
-    $expected = @($ExpectedFailures | Sort-Object)
-    $actual   = @($actualFailures | Sort-Object)
-
-    $unexpected = @(
-        $actual | Where-Object { $_ -notin $expected }
-    )
-
-    $missing = @(
-        $expected | Where-Object { $_ -notin $actual }
-    )
-
-    if ($unexpected.Count -gt 0) {
-        Write-Host "[validate-fast] Unexpected failures:" -ForegroundColor Red
-        $unexpected | ForEach-Object {
+    if ($actualFailures.Count -gt 0) {
+        Write-Host "[validate-fast] Test failures:" -ForegroundColor Red
+        $actualFailures | Sort-Object | ForEach-Object {
             Write-Host "  + $_"
         }
     }
 
-    if ($missing.Count -gt 0) {
-        Write-Host "[validate-fast] Missing baseline failures:" -ForegroundColor Red
-        $missing | ForEach-Object {
-            Write-Host "  - $_"
-        }
-    }
-
-    if (
-        $actual.Count -ne 4 -or
-        $unexpected.Count -ne 0 -or
-        $missing.Count -ne 0
-    ) {
-        Fail "failure set differs from frozen baseline"
+    if ($gradleExit -ne 0 -or $actualFailures.Count -ne 0) {
+        Fail "Gradle tests did not complete with zero failures"
     }
 
     Write-Host "[validate-fast] Characterization: 7/7 PASS"
-    Write-Host "[validate-fast] Baseline failures: exact 4/4 match (BASELINE-EQUIVALENT)"
-    Write-Host "[validate-fast] Gradle exit code $gradleExit accepted"
+    Write-Host "[validate-fast] Expected failures: 0"
+    Write-Host "[validate-fast] Unexpected failures: 0"
+    Write-Host "[validate-fast] Gradle exit code $gradleExit"
     Write-Host "[validate-fast] PASS" -ForegroundColor Green
 }
 finally {

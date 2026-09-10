@@ -66,7 +66,7 @@ final class RtParallaxShaderRegressionTest {
 
     @Test
     void blockSpritesTileWhileEntityAtlasesStopAtTheirIsland() throws IOException {
-        String source = Files.readString(WORLD_RCHIT);
+        String source = normalizeSource(Files.readString(WORLD_RCHIT));
 
         assertTrue(source.contains("terrainParallax = parallaxTrace(materialHeader, uv, blockLod, n, tp0, tp1, tp2,\n"
                         + "                uv0, uv1, uv2, vdir, true);"),
@@ -84,7 +84,7 @@ final class RtParallaxShaderRegressionTest {
 
     @Test
     void sideWallsReplaceTheMappedNormalOnBothHitPaths() throws IOException {
-        String source = Files.readString(WORLD_RCHIT);
+        String source = normalizeSource(Files.readString(WORLD_RCHIT));
 
         assertTrue(source.contains("n = entityParallax.wall ? entityParallax.normal : surface.normal;"),
                 "an entity wall hit must shade with the wall, not with the face's normal map");
@@ -145,12 +145,16 @@ final class RtParallaxShaderRegressionTest {
     }
 
     private static String slice(String source, String startNeedle, String endNeedle) {
-        source = source.replace("\r\n", "\n").replace('\r', '\n');
+        source = normalizeSource(source);
         int start = source.indexOf(startNeedle);
         assertTrue(start >= 0, "missing snippet start: " + startNeedle);
         int end = source.indexOf(endNeedle, start);
         assertTrue(end > start, "missing snippet end: " + endNeedle);
         return source.substring(start, end);
+    }
+
+    private static String normalizeSource(String source) {
+        return source.replace("\r\n", "\n").replace('\r', '\n');
     }
 
     private static void assertInOrder(String source, String... needles) {

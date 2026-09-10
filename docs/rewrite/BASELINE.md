@@ -122,7 +122,7 @@ The five EOL-dependent observations were:
 1. `continuationOriginsStayOffTheRestPlaneMesh`
 2. `animatedWaterIntersectsTheHeightFieldAlongTheViewRay`
 
-The remaining four genuine failures are:
+The four failures retained during rewrite qualification were:
 
 ### RtParallaxShaderRegressionTest
 
@@ -134,13 +134,17 @@ The remaining four genuine failures are:
 1. `continuationOriginsStayOffTheRestPlaneMesh`
 2. `animatedWaterIntersectsTheHeightFieldAlongTheViewRay`
 
-The canonical baseline from the characterization-harness correction is the
-exact four-test set above. The correction changed only the test helper's EOL
-handling; no production Java, shader, or rendering behavior was modified.
+Historical: the exact four-test set above was the canonical baseline retained
+during rewrite qualification.
+
+Current: all four are resolved as CRLF-sensitive test-harness false negatives.
+The harness now normalizes shader source before newline-sensitive assertions;
+no production Java, shader, or rendering behavior was modified. Expected
+failures: 0.
 
 The historical nine failures were observed before architectural refactoring
-and have now been characterized. The canonical four-failure set above is the
-baseline used by the validation scripts.
+and have now been characterized. The validation scripts now require zero test
+failures.
 
 Production shaders must not be changed merely to make these tests green until it is determined whether:
 

@@ -64,12 +64,14 @@ Remaining required runtime NOT TESTED: **NONE**.
 ## Validation candidate
 
 - `validate-build.ps1`: **PASS**.
-- Total: **266**; passed: **262**.
-- Canonical expected failures: **exact 4/4**; unexpected failures: **0**.
+- Total: **266**; passed: **266**.
+- Expected failures: **0**; unexpected failures: **0**.
 - `RtRewriteCharacterizationTest`: **7/7 PASS**.
 - V2 Gradle build: **PASS**; NGX shim present at 83,968 bytes.
 
-The four canonical failures remain the frozen parallax/water shader baseline. Final remediation changed no shader behavior.
+Historical: four canonical failures were retained during rewrite qualification. Current: they are
+resolved as CRLF-sensitive test-harness false negatives; production shader behavior is unchanged and
+the expected failure count is zero.
 
 ## Performance evidence
 

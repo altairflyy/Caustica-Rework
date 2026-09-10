@@ -145,7 +145,7 @@ The rework maintains strict transparency regarding technical boundaries, histori
 - **NRD Scope (Out of Target)**: NVIDIA Real-Time Denoisers (NRD) integration remains experimental, quarantined behind `rt/reconstruction/experimental/nrd/`, and is **OUT OF TARGET / NOT REQUIRED** for production.
 - **Integration Waivers (DH, Voxy, FSR 3, XeSS)**: Code integration for Distant Horizons (DH), Voxy LOD, AMD FSR 3, and Intel XeSS is present where applicable, but runtime qualification of these paths is covered under authorized project waivers and excluded from the production qualification baseline.
 - **Full-Frame GPU Benchmark (Out of Scope)**: A comprehensive end-to-end full-frame GPU benchmark suite is **OUT OF SCOPE / NOT REQUIRED** for this functional baseline release.
-- **Canonical Baseline Test Failures**: The 4 failing tests in `RtParallaxShaderRegressionTest` and `RtWaterWaveShaderRegressionTest` represent pre-existing historical upstream baseline behaviors and are not unexpected regressions introduced by the rework.
+- **Historical Canonical Baseline**: Four parallax/water failures were retained during rewrite qualification. They are now resolved as CRLF-sensitive test-harness false negatives; production shader behavior is unchanged and the current expected failure count is zero.
 
 ## Usage Notes
 

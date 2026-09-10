@@ -72,12 +72,15 @@ artifacts caused by `slice()` assuming LF on a Windows CRLF checkout:
 The five EOL-dependent failures are resolved as:
 `RESOLVED — characterization harness / EOL artifact`.
 
-The canonical baseline retains only these four genuine failures:
+Historical: the canonical baseline retained these four failures during rewrite qualification:
 
 - `sideWallsReplaceTheMappedNormalOnBothHitPaths`
 - `blockSpritesTileWhileEntityAtlasesStopAtTheirIsland`
 - `continuationOriginsStayOffTheRestPlaneMesh`
 - `animatedWaterIntersectsTheHeightFieldAlongTheViewRay`
+
+Current: all four are resolved as CRLF-sensitive test-harness false negatives.
+Production shader behavior is unchanged and expected failures are 0.
 
 The harness correction changed no renderer or shader behavior.
 
