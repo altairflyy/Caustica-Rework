@@ -95,25 +95,31 @@ public PathSegment tracePrimary(PathSegment seg,
         // This hit is consumed in pass A, so carry its travelled-medium absorption and cone growth into
         // the record for the next trace. The terminal hit above is deliberately not consumed here.
         // Only the physical dielectric extinction below applies, and it stays path-local.
-        if (any(medium.current.extinction > 0.0)) {
-            throughput *= exp(-medium.current.extinction * payload.hitT);
-        }
-        rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0),
-                           RAY_CONE_MIN_WIDTH);
-
         bool isWater = material == MATERIAL_WATER;
         bool entering = payloadDielectricEntering();
         float3 geometricNormal = n;
         float3 previousNormal = n;
         WaterWaves waterSurf = flatWaterWaves(hitPos, payload.hitT, geometricNormal);
         if (isWater && waterWaves) {
-            float waterFootprint = rayConeWidth / max(abs(dot(-rd, geometricNormal)), 0.2);
+            float waterFootprint = (rayConeWidth + rayConeSpread * max(payload.hitT, 0.0))
+                    / max(abs(dot(-rd, geometricNormal)), 0.2);
             waterSurf = evaluateWaterWaves(ro, rd, payload.hitT, geometricNormal,
                     worldPush.waterParams.w, worldPush.waterAnchor.z, waterFootprint);
             n = waterSurf.normal;
             previousNormal = waterSurf.previousNormal;
             hitPos = waterSurf.position;
         }
+
+        float effectiveHitT = (isWater && waterWaves) ? waterSurf.hitT : payload.hitT;
+
+        // This hit is consumed in pass A, so carry its travelled-medium absorption and cone growth into
+        // the record for the next trace. The terminal hit above is deliberately not consumed here.
+        // Only the physical dielectric extinction below applies, and it stays path-local.
+        if (any(medium.current.extinction > 0.0)) {
+            throughput *= exp(-medium.current.extinction * effectiveHitT);
+        }
+        rayConeWidth = max(rayConeWidth + rayConeSpread * max(effectiveHitT, 0.0),
+                           RAY_CONE_MIN_WIDTH);
 
         float transmission = clamp(payloadTransmission(), 0.0, 1.0);
         Medium entered = makeDielectricMedium(isWater, max(payloadIor(), 1.0),
@@ -133,7 +139,9 @@ public PathSegment tracePrimary(PathSegment seg,
             gv_motionObjDisp = isWater ? waterSurf.motionPrev : payload.motionPrev;
             gv_spec = makeSpecSurface(gv_hitCamRel, n, previousNormal, geometricNormal,
                                       isWater ? waterSurf.motionPrev : float3(payload.motionPrev),
-                                      gv_rough, float3(F, F, F));
+                                      gv_rough, float3(F, F, F),
+                                      (isWater && waterWaves ? waterSurf.planePos : hitPos) - worldPush.camOffset,
+                                      isWater && waterWaves);
             if (dot(transmittedDir, transmittedDir) > 0.0) {
                 MediumStack guideMedium = medium;
                 if (entering) {
@@ -148,7 +156,7 @@ public PathSegment tracePrimary(PathSegment seg,
                 // albedo ends up carrying the exact attenuation the colour it explains carries —
                 // see resolveTransmissionGuide. The glass entry tint is NOT seeded here anymore;
                 // the medium stack carries it as extinction and the walk applies it physically.
-                float3 guideFilter = max(exp(-min(medium.current.extinction * payload.hitT,
+                float3 guideFilter = max(exp(-min(medium.current.extinction * effectiveHitT,
                         float3(32.0, 32.0, 32.0))), float3(GUIDE_TRANSMITTANCE_MIN));
                 float3 guideDir = normalize(transmittedDir);
                 float3 guideOrigin = isWater && waterWaves
@@ -196,7 +204,9 @@ public PathSegment tracePrimary(PathSegment seg,
         if (!hasTransmission || F >= 1.0) {
             float3 reflectedDir = reflect(rd, n);
             continuation = makePathSegment(
-                    offsetSurfaceOrigin(hitPos, geometricNormal, reflectedDir, SURF_BIAS),
+                    isWater && waterWaves
+                            ? waterWaveContinueOrigin(waterSurf, reflectedDir, SURF_BIAS)
+                            : offsetSurfaceOrigin(hitPos, geometricNormal, reflectedDir, SURF_BIAS),
                     reflectedDir, throughput * F, medium,
                     rayConeWidth, rayConeSpread, seed, bounce + 1,
                     true);
@@ -208,7 +218,9 @@ public PathSegment tracePrimary(PathSegment seg,
                 mediumPop(medium);
             }
             continuation = makePathSegment(
-                    offsetSurfaceOrigin(hitPos, geometricNormal, deferredDir, transmitBias),
+                    isWater && waterWaves
+                            ? waterWaveContinueOrigin(waterSurf, deferredDir, transmitBias)
+                            : offsetSurfaceOrigin(hitPos, geometricNormal, deferredDir, transmitBias),
                     deferredDir, throughput * (1.0 - F), medium,
                     rayConeWidth, rayConeSpread, seed, bounce + 1,
                     true);

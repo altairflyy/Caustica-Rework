@@ -76,6 +76,46 @@ final class RtWaterWaveShaderRegressionTest {
                 "transmissions must start inside the volume even from a crest above the mesh");
     }
 
+    @Test
+    void waveHeightSearchBoundScalesWithStrength() throws IOException {
+        String water = Files.readString(WATER);
+        String eval = slice(water, "public WaterWaves evaluateWaterWaves(", "\n}\n");
+
+        assertTrue(eval.contains("waterWaveStrengthScale()") || eval.contains("waterWaveMaxHeight()"),
+                "Newton search bound must scale with wave strength to prevent root clipping at wave height > 1");
+    }
+
+    @Test
+    void allPrimaryContinuationBranchesUseWaveAwareOrigin() throws IOException {
+        String primary = Files.readString(PRIMARY);
+        String cont = slice(primary, "if (!hasTransmission || F >= 1.0) {", "return continuation;\n    }");
+
+        assertTrue(cont.contains("waterWaveContinueOrigin") || cont.contains("waterContinueOrigin"),
+                "TIR and non-split reflection must use wave-aware continuation origin");
+    }
+
+    @Test
+    void specularGuideProbeUsesWaveAwareContinuationOrigin() throws IOException {
+        String guides = Files.readString(GUIDES);
+        String spec = slice(guides, "public float2 resolveSpecularGuides(", "if (payload.hitT > 0.0) {");
+
+        assertTrue(spec.contains("waveContinueOrigin") || spec.contains("waterWaveContinueOrigin") || spec.contains("waterContinueOrigin"),
+                "Specular guide probe must use wave-aware continuation origin on animated water");
+    }
+
+    @Test
+    void physicalTravelledQuantitiesUseEffectiveHitT() throws IOException {
+        String primary = Files.readString(PRIMARY);
+        String world = Files.readString(WORLD);
+
+        assertTrue(primary.contains("effectiveHitT"),
+                "Primary raygen must define and use effectiveHitT for physical path distances");
+        assertTrue(world.contains("fogSegment(worldPush, ro, rd, effectiveHitT, seed, showCelestial);"),
+                "World raygen must integrate atmospheric fog up to effectiveHitT so water displacement bounds media");
+        assertTrue(world.contains("effectiveHitT, cloudSkyAmbient(worldPush),"),
+                "World raygen must bound clouds by effectiveHitT so water displacement bounds media");
+    }
+
     private static String slice(String source, String startNeedle, String endNeedle) {
         source = source.replace("\r\n", "\n").replace('\r', '\n');
         int start = source.indexOf(startNeedle);

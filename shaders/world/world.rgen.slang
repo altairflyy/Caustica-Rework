@@ -174,15 +174,6 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // First-bounce hit distance capture: the trace we just ran is the continuation hop whose
         // distance REBLUR wants for the lobe that spawned it. A miss leaves the distance at 0 —
         // REBLUR's "no data" value, which it treats as a skipped lobe rather than zero distance.
-        if (pendingHitChannel != 0 && payload.hitT >= 0.0) {
-            if (pendingHitChannel == 1) {
-                hitDiff = payload.hitT;
-            } else {
-                hitSpec = payload.hitT;
-            }
-            pendingHitChannel = 0;
-        }
-
         if (payload.hitT < 0.0) {
             // world.rmiss writes sky radiance (gradient + sun/moon disc + stars) into payload.albedo. The
             // packed show-celestial flag decides whether this path segment may see the bright disc.
@@ -214,12 +205,40 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             break;
         }
 
+        uint material = payloadMaterial();
+        bool isWater = material == MATERIAL_WATER;
+        float3 geometricNormal = payload.normal; // oriented toward the incoming ray by the closest-hit
+        float3 n = geometricNormal;
+        float3 hitPos = ro + rd * payload.hitT;
+        WaterWaves waterSurf = flatWaterWaves(hitPos, payload.hitT, geometricNormal);
+        if (isWater && waterWaves) {
+            float waterFootprint = (rayConeWidth + rayConeSpread * max(payload.hitT, 0.0))
+                    / max(abs(dot(-rd, geometricNormal)), 0.2);
+            waterSurf = evaluateWaterWaves(ro, rd, payload.hitT, geometricNormal,
+                    worldPush.waterParams.w, worldPush.waterParams.w, waterFootprint);
+            n = waterSurf.normal;
+            hitPos = waterSurf.position;
+        }
+        float effectiveHitT = (isWater && waterWaves) ? waterSurf.hitT : payload.hitT;
+
+        // First-bounce hit distance capture: the trace we just ran is the continuation hop whose
+        // distance REBLUR wants for the lobe that spawned it. A miss leaves the distance at 0 —
+        // REBLUR's "no data" value, which it treats as a skipped lobe rather than zero distance.
+        if (pendingHitChannel != 0) {
+            if (pendingHitChannel == 1) {
+                hitDiff = effectiveHitT;
+            } else {
+                hitSpec = effectiveHitT;
+            }
+            pendingHitChannel = 0;
+        }
+
         // Beer–Lambert: attenuate along the segment just travelled by the medium it lay inside. Applies
         // to every hit reached while inside a volume dielectric (its own exit face, or whatever content
         // lies within it), shifting the transmitted radiance with distance. Air's extinction is zero, so
         // the ordinary case costs one comparison.
         if (any(medium.current.extinction > 0.0)) {
-            throughput *= exp(-medium.current.extinction * payload.hitT);
+            throughput *= exp(-medium.current.extinction * effectiveHitT);
         }
 
         // ---- Volumetric fog crossed on the way to this hit (see fog.slang).
@@ -236,7 +255,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // light sample only exists then) and must not silently pick up this segment's fog T.
         float3 fogSegThroughput = throughput;
         if (fogEnabled(worldPush) && fogAppliesHere(medium)) {
-            FogVolume segFog = fogSegment(worldPush, ro, rd, payload.hitT, seed, showCelestial);
+            FogVolume segFog = fogSegment(worldPush, ro, rd, effectiveHitT, seed, showCelestial);
             L += throughput * segFog.scatter;
             if (channel == 2) {
                 Lspec += throughput * segFog.scatter;
@@ -250,7 +269,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // ends on GEOMETRY can still pass through cloud before it gets there — looking down at the
         // ground from above the deck is exactly that case, and it is the one that was broken: clouds
         // were composited only in the miss shader, which a terrain hit never reaches, so the world
-        // showed straight through them. Bounded by payload.hitT, so cloud in front of the surface is
+        // showed straight through them. Bounded by effectiveHitT, so cloud in front of the surface is
         // drawn and cloud behind it is rejected.
         //
         // Expressed as the same in-scatter/transmittance pair the medium extinction above uses, because
@@ -261,7 +280,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             // showCelestial marks the rays whose clouds are seen directly (camera + specular bounces),
             // so it selects the full march; diffuse continuations take the cheap one — see cloudSegment.
             CloudVolume segCloud = cloudSegment(worldPush, ro - worldPush.camOffset, rd,
-                                                payload.hitT, cloudSkyAmbient(worldPush),
+                                                effectiveHitT, cloudSkyAmbient(worldPush),
                                                 showCelestial);
             L += throughput * segCloud.scatter;
             if (channel == 2) {
@@ -272,10 +291,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             throughput *= segCloud.transmittance;
         }
 
-        float3 n = payload.normal; // oriented toward the incoming ray by the closest-hit
-        float3 hitPos = ro + rd * payload.hitT;
-        rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0), RAY_CONE_MIN_WIDTH);
-        uint material = payloadMaterial();
+        rayConeWidth = max(rayConeWidth + rayConeSpread * max(effectiveHitT, 0.0), RAY_CONE_MIN_WIDTH);
         int hitDepth = indirectDepth++;
 
         // ---- Dielectric interface: water, stained glass, ice. ONE handler and one behaviour — every
@@ -294,24 +310,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             if (bounce >= maxBounces) {
                 break;
             }
-            bool isWater = material == MATERIAL_WATER;
             bool entering = payloadDielectricEntering();
             float3 tint = payload.albedo;
             float transmission = clamp(payloadTransmission(), 0.0, 1.0);
-
-            // Lift the (near-flat) rest-plane hit onto the wave height field before any Fresnel use →
-            // real crests/troughs, glints, broken reflections, wobbling refraction. The wave domain is
-            // world-stable: rebased hit XZ plus the pushed anchor (terrain origin mod 4096) survives
-            // the per-move terrain rebase.
-            float3 geometricNormal = n; // unrippled; ray origins offset along this
-            WaterWaves waterSurf = flatWaterWaves(hitPos, payload.hitT, geometricNormal);
-            if (isWater && waterWaves) {
-                float waterFootprint = rayConeWidth / max(abs(dot(-rd, geometricNormal)), 0.2);
-                waterSurf = evaluateWaterWaves(ro, rd, payload.hitT, geometricNormal,
-                        worldPush.waterParams.w, worldPush.waterParams.w, waterFootprint);
-                n = waterSurf.normal;
-                hitPos = waterSurf.position;
-            }
 
             // The medium this face opens into, and the one it returns to on the way out — which is what
             // the stack remembers.

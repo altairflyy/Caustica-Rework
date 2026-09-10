@@ -18,6 +18,7 @@
 
 import world_common;
 import world_core;
+import trace;
 
 public static const float WATER_WAVE_STRENGTH = 0.9;  // slope + height scale (higher = taller, choppier waves)
 public static const float WAVE_SPEED = 0.8;           // global time scale; dispersion keeps relative speeds physical
@@ -41,6 +42,7 @@ public static const float WAVE_Q[WAVE_COUNT] = { 0.050, 0.058, 0.055, 0.048, 0.0
 public float waterWaveStrengthScale() { return clamp(worldPush.waterOpacity.y, 0.0, 4.0); }
 public float waterWaveSpeedScale() { return clamp(worldPush.waterOpacity.z, 0.0, 4.0); }
 public int waterWaveCount() { return clamp(int(worldPush.waterOpacity.w + 0.5), 1, WAVE_COUNT); }
+public float waterWaveMaxHeight() { return WAVE_MAX_HEIGHT * waterWaveStrengthScale(); }
 
 public float waterWaveLodWeight(float wavelength, float footprint) {
     float cyclesPerPixel = max(footprint, 0.0) / max(wavelength, 1.0e-4);
@@ -205,8 +207,9 @@ public WaterWaves evaluateWaterWaves(float3 ro, float3 rd, float hitT, float3 nG
     float2 domain0 = planePos.xz + worldPush.waterAnchor.xy;
     float invNy = 1.0 / nGeo.y;
     float absRdY = max(abs(rd.y), 0.05);
-    float tMin = max(hitT - WAVE_MAX_HEIGHT / absRdY, 0.0);
-    float tMax = hitT + WAVE_MAX_HEIGHT / absRdY;
+    float maxHeight = waterWaveMaxHeight();
+    float tMin = max(hitT - maxHeight / absRdY, 0.0);
+    float tMax = hitT + maxHeight / absRdY;
     float t = hitT;
     float height = 0.0;
     float2 grad = float2(0.0, 0.0);
@@ -261,6 +264,19 @@ public float3 waterWaveContinueOrigin(WaterWaves waves, float3 rd, float bias) {
         if (planeSide > -bias) origin -= waves.geometricNormal * (planeSide + bias);
     }
     return origin;
+}
+
+public float3 waterWaveContinueOriginPos(float3 position, float3 planePos, float3 geometricNormal, float3 rd, float bias) {
+    WaterWaves w;
+    w.position = position;
+    w.planePos = planePos;
+    w.geometricNormal = geometricNormal;
+    return waterWaveContinueOrigin(w, rd, bias);
+}
+
+public float3 waterContinueOrigin(WaterWaves waves, float3 rd, float bias, bool hasWaves) {
+    return hasWaves ? waterWaveContinueOrigin(waves, rd, bias)
+                    : offsetSurfaceOrigin(waves.position, waves.geometricNormal, rd, bias);
 }
 
 // ---- Water caustics. Sunlight refracting through the waved surface converges/diverges before it
