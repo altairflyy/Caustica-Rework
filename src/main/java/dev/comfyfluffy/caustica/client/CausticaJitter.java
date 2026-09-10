@@ -20,6 +20,23 @@ public final class CausticaJitter {
 	private float pixelsY;
 
 	private CausticaJitter() {
+		this(0);
+	}
+
+	CausticaJitter(int initialFrameIndex) {
+		this.frameIndex = initialFrameIndex;
+	}
+
+	void setFrameIndex(int frameIndex) {
+		this.frameIndex = frameIndex;
+	}
+
+	int frameIndex() {
+		return this.frameIndex;
+	}
+
+	static int computeIndex(int frameIndex, int phaseCount) {
+		return Math.floorMod(frameIndex, phaseCount) + 1;
 	}
 
 	/** Advance one frame on the DLSS phase-count rule. Call once per frame before the level
@@ -41,7 +58,7 @@ public final class CausticaJitter {
 	}
 
 	private void prepareWithPhaseCount(int phaseCount) {
-		int index = (this.frameIndex++ % phaseCount) + 1; // Halton(0) is degenerate
+		int index = computeIndex(this.frameIndex++, phaseCount);
 		this.pixelsX = halton(index, 2) - 0.5f;
 		this.pixelsY = halton(index, 3) - 0.5f;
 	}

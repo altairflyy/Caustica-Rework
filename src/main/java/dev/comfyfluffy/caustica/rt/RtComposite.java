@@ -1732,7 +1732,7 @@ public final class RtComposite {
             // is warm amber, silver once high (or zero while it is below the horizon).
             atmosphereTransmittance(moonX, moonY, moonZ, trans);
             float moonStrength = smoothstep(0.04f, 0.22f, -sunY);
-            float litFraction = 1.0f - Math.abs(moonPhase - 4.0f) / 4.0f; // 0 new .. 1 full
+            float litFraction = moonLitFraction(moonPhase); // 0 new .. 1 full
             float moonPeak = 0.20f * (0.15f + 0.85f * litFraction);
             lx = moonX; ly = moonY; lz = moonZ;
             rr = 0.30f * moonPeak * moonStrength * trans[0];
@@ -1771,6 +1771,14 @@ public final class RtComposite {
         float t = Math.clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
         return t * t * (3f - 2f * t);
     }
+
+    /**
+     * Minecraft moon phase index to illuminated fraction: phase 0 (full moon) -> 1.0, phase 4 (new moon) -> 0.0.
+     */
+    static float moonLitFraction(float moonPhase) {
+        return Math.abs(moonPhase - 4.0f) / 4.0f;
+    }
+
 
     /**
      * RGB transmittance from the camera to space along {@code dir} — a verbatim port of

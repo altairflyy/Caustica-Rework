@@ -269,7 +269,7 @@ final class RtLightHierarchy {
                 | (packUnsignedFloat(b, 5) << 22);
     }
 
-    private static int packUnsignedFloat(float value, int mantissaBits) {
+    static int packUnsignedFloat(float value, int mantissaBits) {
         if (!(value > 0.0f)) return 0;
         if (!Float.isFinite(value)) return (30 << mantissaBits) | ((1 << mantissaBits) - 1);
         int exponent = Math.getExponent(value);
@@ -277,7 +277,10 @@ final class RtLightHierarchy {
         int mantissaScale = 1 << mantissaBits;
         if (encodedExponent <= 0) {
             int mantissa = Math.round(Math.scalb(value, 14 + mantissaBits));
-            return Math.min(mantissa, mantissaScale - 1);
+            if (mantissa >= mantissaScale) {
+                return 1 << mantissaBits;
+            }
+            return mantissa;
         }
         if (encodedExponent >= 31) return (30 << mantissaBits) | (mantissaScale - 1);
         int mantissa = Math.round((Math.scalb(value, -exponent) - 1.0f) * mantissaScale);

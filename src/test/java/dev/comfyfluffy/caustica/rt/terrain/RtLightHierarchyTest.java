@@ -82,6 +82,44 @@ final class RtLightHierarchyTest {
     }
 
     @Test
+    void packUnsignedFloatRoundsAcrossSubnormalToNormalBoundary6Bit() {
+        int mantissaBits = 6;
+        float maxSubnormal = Math.scalb(63.0f, -20);
+        float minNormal = Math.scalb(1.0f, -14);
+        float midpoint = Math.scalb(63.5f, -20);
+        float justBelow = Math.scalb(63.49f, -20);
+        float justAbove = Math.scalb(63.51f, -20);
+
+        assertEquals(63, RtLightHierarchy.packUnsignedFloat(maxSubnormal, mantissaBits));
+        assertEquals(64, RtLightHierarchy.packUnsignedFloat(minNormal, mantissaBits));
+        assertEquals(64, RtLightHierarchy.packUnsignedFloat(midpoint, mantissaBits));
+        assertEquals(63, RtLightHierarchy.packUnsignedFloat(justBelow, mantissaBits));
+        assertEquals(64, RtLightHierarchy.packUnsignedFloat(justAbove, mantissaBits));
+
+        assertEquals(maxSubnormal, RtLightHierarchy.unpackUnsignedFloat(63, mantissaBits), 1e-9f);
+        assertEquals(minNormal, RtLightHierarchy.unpackUnsignedFloat(64, mantissaBits), 1e-9f);
+    }
+
+    @Test
+    void packUnsignedFloatRoundsAcrossSubnormalToNormalBoundary5Bit() {
+        int mantissaBits = 5;
+        float maxSubnormal = Math.scalb(31.0f, -19);
+        float minNormal = Math.scalb(1.0f, -14);
+        float midpoint = Math.scalb(31.5f, -19);
+        float justBelow = Math.scalb(31.49f, -19);
+        float justAbove = Math.scalb(31.51f, -19);
+
+        assertEquals(31, RtLightHierarchy.packUnsignedFloat(maxSubnormal, mantissaBits));
+        assertEquals(32, RtLightHierarchy.packUnsignedFloat(minNormal, mantissaBits));
+        assertEquals(32, RtLightHierarchy.packUnsignedFloat(midpoint, mantissaBits));
+        assertEquals(31, RtLightHierarchy.packUnsignedFloat(justBelow, mantissaBits));
+        assertEquals(32, RtLightHierarchy.packUnsignedFloat(justAbove, mantissaBits));
+
+        assertEquals(maxSubnormal, RtLightHierarchy.unpackUnsignedFloat(31, mantissaBits), 1e-9f);
+        assertEquals(minNormal, RtLightHierarchy.unpackUnsignedFloat(32, mantissaBits), 1e-9f);
+    }
+
+    @Test
     void retainedGenerationCanBeTranslatedAcrossARebase() {
         List<RtLightHierarchy.SectionInput> sections = List.of(
                 new RtLightHierarchy.SectionInput(0, 3, 0, 0, light(1f, 1f)));

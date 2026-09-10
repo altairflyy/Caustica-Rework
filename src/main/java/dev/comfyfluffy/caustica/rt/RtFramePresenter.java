@@ -127,14 +127,17 @@ public final class RtFramePresenter {
             // for the real frame itself, so the pool caps the generated count. Requesting beyond it
             // made vkAcquireNextImageKHR sit until timeout and froze the frame loop (the 0.2 FPS
             // slideshow at high multipliers).
-            int want = Math.min(generatedCount, Math.max(0, swapchainImages.size() - 1));
+            int want = effectiveGeneratedCount(generatedCount, swapchainImages.size());
+            if (want <= 0) {
+                return;
+            }
             ensureCapacity(device, swapchainImages.size() + 1, want);
             for (int i = 0; i < want; i++) {
                 // null = no captured RT frame this tick (menu/loading/transition — routine, not a bug): fall
                 // back to duplicating the real frame for just this one frame. A genuine FG failure instead
                 // throws, caught below, which disables FG for the session.
                 RtImage interp = RtComposite.INSTANCE.fgInterpolate(enc, backbufferView, srcImage,
-                        swapW, swapH, i + 1, generatedCount, hdrBackbuffer);
+                        swapW, swapH, i + 1, want, hdrBackbuffer);
                 if (interp != null) {
                     interpOkInWindow++;
                 } else {
@@ -329,5 +332,27 @@ public final class RtFramePresenter {
         acquireSemaphores = new long[0];
         acquireCursor = 0;
         pendingCount = 0;
+    }
+
+    /**
+     * Determine the effective number of generated frames that can participate in presentation,
+     * bounded by available swapchain images (reserving one image for the real frame).
+     */
+    public static int effectiveGeneratedCount(int requested, int swapchainImageCount) {
+        if (requested <= 0 || swapchainImageCount <= 1) {
+            return 0;
+        }
+        return Math.min(requested, swapchainImageCount - 1);
+    }
+
+    /**
+     * Compute the uniform temporal interpolation fraction for the given 1-based frame index
+     * within the effective generated frame count.
+     */
+    public static float interpolationFraction(int index, int effectiveCount) {
+        if (effectiveCount <= 0 || index <= 0) {
+            return 0.0f;
+        }
+        return (float) index / (float) (effectiveCount + 1);
     }
 }
