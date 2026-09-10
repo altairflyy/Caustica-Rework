@@ -31,16 +31,13 @@ public struct SpecSurface {
     public float3 motionPrev;     // current-minus-previous displacement of the reflecting surface
     public float roughness;
     public float3 albedo;         // specular albedo fed to DLSS-RR for demodulation (0 = pure diffuse)
-    public float3 planeCamRel;    // rest-plane hit relative to current camera
-    public bool isWaved;          // true when displaced water height field
 };
 public static SpecSurface gv_spec = {};
 
-// Static surfaces reuse one normal for all three roles. Water overrides them (height-field shading
-// point, waved normal now and last frame, flat geometric normal for the bias) via the eight-argument form.
+// Static surfaces reuse one normal for all three roles. Water overrides the current/previous shading
+// normals while retaining the flat geometric normal for ray-origin bias.
 public SpecSurface makeSpecSurface(float3 camRel, float3 normal, float3 previousNormal,
-                            float3 biasNormal, float3 motionPrev, float roughness, float3 albedo,
-                            float3 planeCamRel, bool isWaved) {
+                            float3 biasNormal, float3 motionPrev, float roughness, float3 albedo) {
     SpecSurface s;
     s.camRel = camRel;
     s.normal = normal;
@@ -49,25 +46,17 @@ public SpecSurface makeSpecSurface(float3 camRel, float3 normal, float3 previous
     s.motionPrev = motionPrev;
     s.roughness = roughness;
     s.albedo = albedo;
-    s.planeCamRel = planeCamRel;
-    s.isWaved = isWaved;
     return s;
-}
-
-public SpecSurface makeSpecSurface(float3 camRel, float3 normal, float3 previousNormal,
-                            float3 biasNormal, float3 motionPrev, float roughness, float3 albedo) {
-    return makeSpecSurface(camRel, normal, previousNormal, biasNormal, motionPrev, roughness, albedo,
-                           camRel, false);
 }
 
 public SpecSurface makeSpecSurface(float3 camRel, float3 normal, float roughness, float3 albedo) {
     return makeSpecSurface(camRel, normal, normal, normal,
-            float3(0.0, 0.0, 0.0), roughness, albedo, camRel, false);
+            float3(0.0, 0.0, 0.0), roughness, albedo);
 }
 
 public SpecSurface makeSpecSurface(float3 camRel, float3 normal, float3 motionPrev,
                             float roughness, float3 albedo) {
-    return makeSpecSurface(camRel, normal, normal, normal, motionPrev, roughness, albedo, camRel, false);
+    return makeSpecSurface(camRel, normal, normal, normal, motionPrev, roughness, albedo);
 }
 // angle can land behind the eye even though the reflector itself is comfortably in view.
 public float2 projectPrevNdc(float3 worldPos, out bool valid) {
@@ -113,11 +102,8 @@ public float2 resolveSpecularGuides(SpecSurface surface, float3 primaryDir,
 
     // Pass A stops radiance traversal at the first split, so reflection motion keeps one dedicated,
     // deterministic guide probe.
-    float3 guideOrigin = surface.isWaved
-            ? waterWaveContinueOriginPos(surfacePos, surface.planeCamRel + worldPush.camOffset, surface.biasNormal, specDir, SURF_BIAS)
-            : offsetSurfaceOrigin(surfacePos, surface.biasNormal, specDir, SURF_BIAS);
     traceGuide(CULL_SECONDARY,
-            guideOrigin,
+            offsetSurfaceOrigin(surfacePos, surface.biasNormal, specDir, SURF_BIAS),
             RAY_TMIN, specDir, 10000.0,
             max(length(surface.camRel) * primaryConeSpread, RAY_CONE_MIN_WIDTH),
             max(primaryConeSpread, RAY_CONE_MIN_SPREAD));
@@ -195,8 +181,7 @@ public void resolveTransmissionGuide(float3 origin, float3 transmittedDir,
     if (dot(transmittedDir, transmittedDir) <= 0.0) return;
 
     float3 direction = normalize(transmittedDir);
-    // `origin` arrives already offset off the foreground interface (Pass A uses
-    // waterWaveContinueOrigin so a crest/trough cannot immediately re-hit the rest-plane mesh).
+    // `origin` arrives already offset from the foreground's actual BLAS interface.
     float3 ro = origin;
 
     // The camera interface consumed bounce 0; the remaining configured bounce budget is the natural
@@ -217,16 +202,13 @@ public void resolveTransmissionGuide(float3 origin, float3 transmittedDir,
         float3 geometricNormal = normalize(payload.normal);
         float3 interfaceNormal = geometricNormal;
         float3 interfacePos = ro + direction * payload.hitT;
-        WaterWaves waterSurf = flatWaterWaves(interfacePos, payload.hitT, geometricNormal);
         if (isWater && waterWavesEnabled()) {
             float waterFootprint = rayConeWidth
                     / max(abs(dot(-direction, geometricNormal)), 0.2);
-            waterSurf = evaluateWaterWaves(ro, direction, payload.hitT, geometricNormal,
-                    worldPush.waterParams.w, worldPush.waterParams.w, waterFootprint);
-            interfaceNormal = waterSurf.normal;
-            interfacePos = waterSurf.position;
+            interfaceNormal = applyWaterWaves(geometricNormal,
+                    interfacePos.xz + worldPush.waterAnchor.xy,
+                    worldPush.waterParams.w, waterFootprint);
         }
-        float effectiveHitT = (isWater && waterWavesEnabled()) ? waterSurf.hitT : payload.hitT;
 
         // Transmittance of the segment just traced: Beer–Lambert over the medium it travelled in
         // (water extinction for water, one-block-reference volume extinction for glass), bounded
@@ -234,7 +216,7 @@ public void resolveTransmissionGuide(float3 origin, float3 transmittedDir,
         // This replaces the old one-shot `guideFilter *= payload.albedo` per glass entry: the medium
         // the stack pushed already encodes that tint as extinction, so applying the physical factor
         // over the real segment length matches Pass B exactly instead of over-darkening thin panes.
-        guideFilter = max(guideFilter * exp(-min(medium.current.extinction * effectiveHitT,
+        guideFilter = max(guideFilter * exp(-min(medium.current.extinction * payload.hitT,
                 float3(32.0, 32.0, 32.0))), float3(GUIDE_TRANSMITTANCE_MIN));
 
         if (material == MATERIAL_OPAQUE || material == MATERIAL_PARTICLE) {
@@ -272,9 +254,7 @@ public void resolveTransmissionGuide(float3 origin, float3 transmittedDir,
         }
         direction = normalize(nextDirection);
         float transmitBias = isWater ? SURF_BIAS : INSET_TRANSMIT_BIAS;
-        ro = isWater && waterWavesEnabled()
-                ? waterWaveContinueOrigin(waterSurf, direction, transmitBias)
-                : offsetSurfaceOrigin(interfacePos, geometricNormal, direction, transmitBias);
+        ro = offsetSurfaceOrigin(interfacePos, geometricNormal, direction, transmitBias);
     }
 }
 

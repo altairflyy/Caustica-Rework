@@ -37,7 +37,7 @@ final class RtFogShaderRegressionTest {
         String source = Files.readString(WORLD_RGEN);
         assertInOrder(source,
                 "float3 fogSegThroughput = throughput;",
-                "FogVolume segFog = fogSegment(worldPush, ro, rd, effectiveHitT, seed, showCelestial);",
+                "FogVolume segFog = fogSegment(worldPush, ro, rd, payload.hitT, seed, showCelestial);",
                 "throughput *= segFog.transmittance;",
                 "CloudVolume segCloud = cloudSegment(");
     }

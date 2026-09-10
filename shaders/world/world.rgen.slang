@@ -210,25 +210,22 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         float3 geometricNormal = payload.normal; // oriented toward the incoming ray by the closest-hit
         float3 n = geometricNormal;
         float3 hitPos = ro + rd * payload.hitT;
-        WaterWaves waterSurf = flatWaterWaves(hitPos, payload.hitT, geometricNormal);
         if (isWater && waterWaves) {
             float waterFootprint = (rayConeWidth + rayConeSpread * max(payload.hitT, 0.0))
                     / max(abs(dot(-rd, geometricNormal)), 0.2);
-            waterSurf = evaluateWaterWaves(ro, rd, payload.hitT, geometricNormal,
-                    worldPush.waterParams.w, worldPush.waterParams.w, waterFootprint);
-            n = waterSurf.normal;
-            hitPos = waterSurf.position;
+            n = applyWaterWaves(geometricNormal,
+                    hitPos.xz + worldPush.waterAnchor.xy,
+                    worldPush.waterParams.w, waterFootprint);
         }
-        float effectiveHitT = (isWater && waterWaves) ? waterSurf.hitT : payload.hitT;
 
         // First-bounce hit distance capture: the trace we just ran is the continuation hop whose
         // distance REBLUR wants for the lobe that spawned it. A miss leaves the distance at 0 —
         // REBLUR's "no data" value, which it treats as a skipped lobe rather than zero distance.
         if (pendingHitChannel != 0) {
             if (pendingHitChannel == 1) {
-                hitDiff = effectiveHitT;
+                hitDiff = payload.hitT;
             } else {
-                hitSpec = effectiveHitT;
+                hitSpec = payload.hitT;
             }
             pendingHitChannel = 0;
         }
@@ -238,7 +235,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // lies within it), shifting the transmitted radiance with distance. Air's extinction is zero, so
         // the ordinary case costs one comparison.
         if (any(medium.current.extinction > 0.0)) {
-            throughput *= exp(-medium.current.extinction * effectiveHitT);
+            throughput *= exp(-medium.current.extinction * payload.hitT);
         }
 
         // ---- Volumetric fog crossed on the way to this hit (see fog.slang).
@@ -255,7 +252,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // light sample only exists then) and must not silently pick up this segment's fog T.
         float3 fogSegThroughput = throughput;
         if (fogEnabled(worldPush) && fogAppliesHere(medium)) {
-            FogVolume segFog = fogSegment(worldPush, ro, rd, effectiveHitT, seed, showCelestial);
+            FogVolume segFog = fogSegment(worldPush, ro, rd, payload.hitT, seed, showCelestial);
             L += throughput * segFog.scatter;
             if (channel == 2) {
                 Lspec += throughput * segFog.scatter;
@@ -269,7 +266,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // ends on GEOMETRY can still pass through cloud before it gets there — looking down at the
         // ground from above the deck is exactly that case, and it is the one that was broken: clouds
         // were composited only in the miss shader, which a terrain hit never reaches, so the world
-        // showed straight through them. Bounded by effectiveHitT, so cloud in front of the surface is
+        // showed straight through them. Bounded by payload.hitT, so cloud in front of the surface is
         // drawn and cloud behind it is rejected.
         //
         // Expressed as the same in-scatter/transmittance pair the medium extinction above uses, because
@@ -280,7 +277,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             // showCelestial marks the rays whose clouds are seen directly (camera + specular bounces),
             // so it selects the full march; diffuse continuations take the cheap one — see cloudSegment.
             CloudVolume segCloud = cloudSegment(worldPush, ro - worldPush.camOffset, rd,
-                                                effectiveHitT, cloudSkyAmbient(worldPush),
+                                                payload.hitT, cloudSkyAmbient(worldPush),
                                                 showCelestial);
             L += throughput * segCloud.scatter;
             if (channel == 2) {
@@ -291,7 +288,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             throughput *= segCloud.transmittance;
         }
 
-        rayConeWidth = max(rayConeWidth + rayConeSpread * max(effectiveHitT, 0.0), RAY_CONE_MIN_WIDTH);
+        rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0), RAY_CONE_MIN_WIDTH);
         int hitDepth = indirectDepth++;
 
         // ---- Dielectric interface: water, stained glass, ice. ONE handler and one behaviour — every
@@ -300,8 +297,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // pushes or pops a participating medium, and the segment travelled inside it is attenuated by
         // that medium's extinction rather than by a tint multiply at the interface.
         //
-        // Water is the only material that adds anything: the animated geometric wave (height-field
-        // intersection + matching normal), and a medium marked for the caustic term. Which side of the
+        // Water is the only material that adds anything: an animated shading normal and a medium marked
+        // for the caustic term. The BLAS hit position and distance remain authoritative. Which side of the
         // face we are on comes from the geometry (payloadDielectricEntering), so a stray or missing
         // face cannot desync the medium for the rest of the path.
         if (material == MATERIAL_WATER || material == MATERIAL_DIELECTRIC) {
@@ -332,15 +329,11 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             bool chooseReflection = rndf(seed) < F;
             if (chooseReflection) {
                 rd = reflect(rd, n);
-                ro = isWater && waterWaves
-                        ? waterWaveContinueOrigin(waterSurf, rd, SURF_BIAS)
-                        : offsetSurfaceOrigin(hitPos, geometricNormal, rd, SURF_BIAS);
+                ro = offsetSurfaceOrigin(hitPos, geometricNormal, rd, SURF_BIAS);
             } else {
                 if (dot(transmittedDir, transmittedDir) <= 0.0) break; // TIR with F < 1 cannot happen
                 rd = normalize(transmittedDir);
-                ro = isWater && waterWaves
-                        ? waterWaveContinueOrigin(waterSurf, rd, transmitBias)
-                        : offsetSurfaceOrigin(hitPos, geometricNormal, rd, transmitBias);
+                ro = offsetSurfaceOrigin(hitPos, geometricNormal, rd, transmitBias);
                 // Crossing into or out of the volume. Absorption is the medium's job from here, so the
                 // tint is NOT also multiplied into the throughput — that would double-count it.
                 if (entering) {
