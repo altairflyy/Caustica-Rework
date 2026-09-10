@@ -47,10 +47,12 @@ try {
 
     $actualFailures = @()
     $characterization = $null
+    $totalTests = 0
 
     foreach ($file in $xmlFiles) {
         [xml]$xml = Get-Content $file.FullName -Raw
         $suite = $xml.testsuite
+        $totalTests += [int]$suite.tests
 
         if ($suite.name -eq "dev.comfyfluffy.caustica.rt.RtRewriteCharacterizationTest") {
             $characterization = $suite
@@ -89,6 +91,7 @@ try {
     }
 
     Write-Host "[validate-fast] Characterization: 7/7 PASS"
+    Write-Host "[validate-fast] Total tests: $totalTests"
     Write-Host "[validate-fast] Expected failures: 0"
     Write-Host "[validate-fast] Unexpected failures: 0"
     Write-Host "[validate-fast] Gradle exit code $gradleExit"

@@ -15,7 +15,7 @@ package dev.comfyfluffy.caustica.client;
 public final class CausticaJitter {
 	public static final CausticaJitter INSTANCE = new CausticaJitter();
 
-	private int frameIndex;
+	private int phaseIndex;
 	private float pixelsX;
 	private float pixelsY;
 
@@ -23,20 +23,43 @@ public final class CausticaJitter {
 		this(0);
 	}
 
-	CausticaJitter(int initialFrameIndex) {
-		this.frameIndex = initialFrameIndex;
+	CausticaJitter(int initialPhaseIndex) {
+		this.phaseIndex = initialPhaseIndex;
+	}
+
+	void setPhaseIndex(int phaseIndex) {
+		this.phaseIndex = phaseIndex;
+	}
+
+	int phaseIndex() {
+		return this.phaseIndex;
 	}
 
 	void setFrameIndex(int frameIndex) {
-		this.frameIndex = frameIndex;
+		this.phaseIndex = frameIndex;
 	}
 
 	int frameIndex() {
-		return this.frameIndex;
+		return this.phaseIndex;
 	}
 
-	static int computeIndex(int frameIndex, int phaseCount) {
-		return Math.floorMod(frameIndex, phaseCount) + 1;
+	/**
+	 * Compute the 1-based Halton index from a phase index and phase count.
+	 */
+	static int computeIndex(int phaseIndex, int phaseCount) {
+		int count = Math.max(1, phaseCount);
+		return Math.floorMod(phaseIndex, count) + 1;
+	}
+
+	/**
+	 * Advance the internal phase counter cyclically within [0, phaseCount - 1]
+	 * and return the 1-based Halton index for the current frame.
+	 */
+	int advanceIndex(int phaseCount) {
+		int count = Math.max(1, phaseCount);
+		int current = Math.floorMod(this.phaseIndex, count);
+		this.phaseIndex = (current + 1) % count;
+		return current + 1;
 	}
 
 	/** Advance one frame on the DLSS phase-count rule. Call once per frame before the level
@@ -58,7 +81,7 @@ public final class CausticaJitter {
 	}
 
 	private void prepareWithPhaseCount(int phaseCount) {
-		int index = computeIndex(this.frameIndex++, phaseCount);
+		int index = advanceIndex(phaseCount);
 		this.pixelsX = halton(index, 2) - 0.5f;
 		this.pixelsY = halton(index, 3) - 0.5f;
 	}

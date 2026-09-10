@@ -110,10 +110,12 @@ function Invoke-Tests {
     $actualFailures = @()
     $characterizationFound = $false
     $characterizationPass = $false
+    $totalTests = 0
 
     foreach ($file in $xmlFiles) {
         [xml]$xml = Get-Content $file.FullName -Raw
         $suite = $xml.testsuite
+        $totalTests += [int]$suite.tests
 
         if ($suite.name -eq "dev.comfyfluffy.caustica.rt.RtRewriteCharacterizationTest") {
             $characterizationFound = $true
@@ -156,6 +158,7 @@ function Invoke-Tests {
     }
 
     Write-Host "[validate-build] Characterization: 7/7 PASS"
+    Write-Host "[validate-build] Total tests: $totalTests"
     Write-Host "[validate-build] Expected failures: 0"
     Write-Host "[validate-build] Unexpected failures: 0"
     Write-Host "[validate-build] Gradle test exit code $gradleExit"
