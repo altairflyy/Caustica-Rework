@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2]
+
+### Fixed
+- Fixed animated water shoreline artifacts by keeping ray-traced water geometry on authoritative BLAS hits and applying waves to surface normals only.
+
 ## [0.1.1]
 
 ### Fixed

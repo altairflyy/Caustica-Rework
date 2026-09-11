@@ -1,18 +1,18 @@
 # Caustica Rework
 
-[![Release](https://img.shields.io/badge/release-0.1.1-blue.svg)](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.1)
+[![Release](https://img.shields.io/badge/release-0.1.2-blue.svg)](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.2)
 [![License](https://img.shields.io/badge/license-LGPL--3.0--or--later-green.svg)](LICENSE.md)
 [![Minecraft](https://img.shields.io/badge/minecraft-26.2-brightgreen.svg)](https://minecraft.net/)
 [![Fabric](https://img.shields.io/badge/fabric-0.19.3+-orange.svg)](https://fabricmc.net/)
 [![Vulkan RT](https://img.shields.io/badge/vulkan-ray%20tracing-red.svg)](https://www.vulkan.org/)
-[![Downloads](https://img.shields.io/github/downloads/altairflyy/Caustica-Rework/total?color=blue)](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.1)
+[![Downloads](https://img.shields.io/github/downloads/altairflyy/Caustica-Rework/total?color=blue)](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.2)
 
 **Caustica Rework** is a heavily reworked direct fork and architectural overhaul of [Caustica](https://github.com/ComfyFluffy/Caustica), an experimental hardware ray-traced renderer for Minecraft 26.2's Vulkan backend. It brings native hardware path tracing, NVIDIA DLSS Ray Reconstruction, native SVGF denoising, and HDR presentation to Minecraft while preserving the vanilla UI and gameplay intact.
 
-> ### [Download Caustica Rework 0.1.1](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.1)
-> Verified release artifact: `caustica-0.1.1.jar` &bull; [Direct JAR Download](https://github.com/altairflyy/Caustica-Rework/releases/download/rework-0.1.1/caustica-0.1.1.jar) &bull; [Installation Guide](#install)
+> ### [Download Caustica Rework 0.1.2](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.2)
+> Verified release artifact: `caustica-0.1.2.jar` &bull; [Direct JAR Download](https://github.com/altairflyy/Caustica-Rework/releases/download/rework-0.1.2/caustica-0.1.2.jar) &bull; [Installation Guide](#install)
 
-[Download](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.1) | [Install](#install) | [Requirements](#requirements) | [Building from Source](#building-from-source) | [Known Limitations](#known-limitations) | [Architecture](#architecture) | [Changelog](CHANGELOG.md) | [Rewrite Documentation](#rewrite-documentation)
+[Download](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.2) | [Install](#install) | [Requirements](#requirements) | [Building from Source](#building-from-source) | [Known Limitations](#known-limitations) | [Architecture](#architecture) | [Changelog](CHANGELOG.md) | [Rewrite Documentation](#rewrite-documentation)
 
 This repository is published as a direct GitHub fork of the original [ComfyFluffy/Caustica](https://github.com/ComfyFluffy/Caustica) repository, with development initially based upon the [xysgottaken2/Caustica](https://github.com/xysgottaken2/Caustica) development fork before systematically diverging into a redesigned, decoupled architecture.
 
@@ -22,7 +22,7 @@ The rewrite was undertaken to replace monolithic GPU resource ownership with str
 
 ## Links
 
-- [GitHub Releases (Download)](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.1)
+- [GitHub Releases (Download)](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.2)
 - [Changelog](CHANGELOG.md)
 - [Original Upstream Repository (ComfyFluffy/Caustica)](https://github.com/ComfyFluffy/Caustica)
 - [Development Base Repository (xysgottaken2/Caustica)](https://github.com/xysgottaken2/Caustica)
@@ -91,8 +91,8 @@ Full architectural analyses, gate criteria, and task verification records are ma
 
 1. **Minecraft & Java Environment**: Ensure you have Minecraft `26.2` installed with Java `25` or newer.
 2. **Install Dependencies**: Install [Fabric Loader](https://fabricmc.net/) (`>=0.19.3`) and [Fabric API](https://modrinth.com/mod/fabric-api) (`>=0.145.4+26.2`).
-3. **Download Caustica Rework**: Download `caustica-0.1.1.jar` from the [GitHub Releases](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.1) page.
-4. **Place JAR**: Place `caustica-0.1.1.jar` directly into your Minecraft instance's `.minecraft/mods` directory.
+3. **Download Caustica Rework**: Download `caustica-0.1.2.jar` from the [GitHub Releases](https://github.com/altairflyy/Caustica-Rework/releases/tag/rework-0.1.2) page.
+4. **Place JAR**: Place `caustica-0.1.2.jar` directly into your Minecraft instance's `.minecraft/mods` directory.
 5. **Launch with Vulkan**: Start Minecraft with the Vulkan graphics backend enabled.
 6. **Configure Renderer**: Open **Video Settings** in-game to configure Caustica's ray tracing, denoiser, and presentation settings.
 
@@ -137,7 +137,7 @@ $env:DLSS_SDK = "C:\path\to\DLSS_SDK"
 .\gradlew.bat build -x test -PngxShimConfig=release -PngxVendorConfig=rel
 ```
 
-The resulting mod JAR will be located at `build/libs/caustica-0.1.1.jar`.
+The resulting mod JAR will be located at `build/libs/caustica-0.1.2.jar`.
 
 ## Known limitations
 
