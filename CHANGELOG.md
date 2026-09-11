@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.1.1]
 
 ### Fixed
+- Fixed animated water shoreline artifacts by keeping ray-traced water geometry on authoritative BLAS hits and applying waves to surface normals only.
 - Corrected inverted moon-phase lighting.
 - Corrected Frame Generation interpolation/effective generated-frame count when swapchain capacity limits generated frames.
 - Corrected R11G11B10 subnormal→normal rounding carry.
