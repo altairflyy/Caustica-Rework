@@ -107,7 +107,7 @@ public final class PostProcessing implements GeneratedFrameUiComposer {
                        long nativeColorView, long nativeDepthView,
                        long nativeWaterMaskView, long nativeWaterMaskImage, float nativeDepthClear,
                        boolean hybrid, boolean dhFarLighting, Matrix4f dhInverseViewProjection,
-                       float dhLightX, float dhLightY, float dhLightZ, float dhDirectStrength,
+                       float dhLightX, float dhLightY, float dhLightZ, float dhLightLuminance,
                        boolean postHdr,
                        RtGpuProfiler.Session gpuProfile,
                        double camX, double camY, double camZ,
@@ -156,11 +156,16 @@ public final class PostProcessing implements GeneratedFrameUiComposer {
                         backgroundView, backgroundDepthView, waterMaskView,
                         backgroundLayout, backgroundLayout, waterMaskLayout);
 
-                float ambientIntensity = dhDirectStrength > 0.05f ? 1.0f : 0.2f;
+                float ambientIntensity = dhLightLuminance > 1.0f ? 1.0f : 0.2f;
+                float tintR = dhLightLuminance > 1.0f ? 1.0f : 0.77f;
+                float tintG = dhLightLuminance > 1.0f ? 0.965f : 0.84f;
+                float tintB = dhLightLuminance > 1.0f ? 0.91f : 1.0f;
+                float tintLuminance = 0.2126f * tintR + 0.7152f * tintG + 0.0722f * tintB;
+                float radianceScale = dhLightLuminance / Math.max(tintLuminance, 1.0e-4f);
                 gpuProfile.begin(RtGpuProfiler.Region.DH_RT_REFLECTION);
                 dhReflectionPipeline.trace(cmd, displayW, displayH, dhInverseViewProjection,
                         dhLightX, dhLightY, dhLightZ,
-                        dhLightX * dhDirectStrength, dhLightY * dhDirectStrength, dhLightZ * dhDirectStrength,
+                        tintR * radianceScale, tintG * radianceScale, tintB * radianceScale,
                         0.5f, 0.6f, 0.8f, ambientIntensity,
                         nativeDepthClear, renderW, renderH);
                 gpuProfile.end(RtGpuProfiler.Region.DH_RT_REFLECTION);
@@ -194,7 +199,7 @@ public final class PostProcessing implements GeneratedFrameUiComposer {
                     CausticaConfig.Rt.Tonemapping.CONTRAST.value(),
                     renderW, renderH, useNativeBackground, nativeDepthClear,
                     dhFarLighting, dhInverseViewProjection,
-                    dhLightX, dhLightY, dhLightZ, dhDirectStrength, waterMaskDebug);
+                    dhLightX, dhLightY, dhLightZ, dhLightLuminance, waterMaskDebug);
             if (dhFarLighting) gpuProfile.end(RtGpuProfiler.Region.DH_FAR_LIGHTING);
             gpuProfile.end(RtGpuProfiler.Region.DISPLAY);
         }

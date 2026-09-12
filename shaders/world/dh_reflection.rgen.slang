@@ -37,8 +37,8 @@ void main() {
     if (pix.x >= size.x || pix.y >= size.y) return;
 
     float2 uv = (float2(pix) + 0.5) / float2(size);
-    float water = dhWaterMask.SampleLevel(uv, 0.0).r;
-    if (water < 0.5) {
+    uint surfaceKey = (uint)round(saturate(dhWaterMask.SampleLevel(uv, 0.0).a) * 255.0);
+    if ((surfaceKey & 8u) == 0u) {
         reflectionOutput[pix] = float4(0.0);
         return;
     }

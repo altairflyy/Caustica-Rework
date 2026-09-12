@@ -18,7 +18,13 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.function.Supplier;
 
-/** Same-pass native-DH water classification attachment. No geometry is captured or redrawn here. */
+/**
+ * Same-pass native-DH compact surface attachment. No geometry is captured or redrawn here.
+ *
+ * <p>RGB stores the unlit LOD albedo. Alpha stores a byte-sized surface key containing the DH face
+ * normal, water classification and quantized sky/block light. The existing class name is retained to
+ * avoid broad compatibility churn while the attachment grows beyond its original one-bit mask.</p>
+ */
 public final class DistantHorizonsWaterMask {
     private static final Vector4f CLEAR = new Vector4f(0.0f, 0.0f, 0.0f, 0.0f);
     private static final ThreadLocal<Boolean> TERRAIN_PASS = new ThreadLocal<>();
@@ -42,7 +48,7 @@ public final class DistantHorizonsWaterMask {
     public static void addColorTarget(RenderPipeline.Builder builder) {
         if (BUILDING_TERRAIN_PIPELINES.get()) {
             builder.withColorTargetState(1, new ColorTargetState(
-                    Optional.empty(), GpuFormat.R8_UNORM, ColorTargetState.WRITE_RED));
+                    Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL));
         }
     }
 
@@ -110,7 +116,7 @@ public final class DistantHorizonsWaterMask {
         int usage = GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC
                 | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_RENDER_ATTACHMENT;
         texture = RenderSystem.getDevice().createTexture(
-                "Caustica DH water mask", usage, GpuFormat.R8_UNORM, width, height, 1, 1);
+                "Caustica DH surface data", usage, GpuFormat.RGBA8_UNORM, width, height, 1, 1);
         view = RenderSystem.getDevice().createTextureView(texture);
         return view;
     }

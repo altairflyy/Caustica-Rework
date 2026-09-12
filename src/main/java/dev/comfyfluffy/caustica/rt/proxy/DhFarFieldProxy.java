@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -52,6 +53,7 @@ public final class DhFarFieldProxy {
     private final RtAccel.TlasRing tlasRing = new RtAccel.TlasRing();
     private final List<RtAccel.PreparedBlas> pendingBlasBuilds = new ArrayList<>();
 
+    private RtContext ownerContext;
     private RtBuffer sharedIndexBuffer;
     private boolean initialized;
     private int lastCenterTileX = Integer.MAX_VALUE;
@@ -88,6 +90,7 @@ public final class DhFarFieldProxy {
             }
         }
         sharedIndexBuffer.flush();
+        ownerContext = ctx;
         initialized = true;
     }
 
@@ -159,7 +162,8 @@ public final class DhFarFieldProxy {
         }
     }
 
-    private synchronized void updateTilesAround(RtContext ctx, int centerTileX, int centerTileZ) {
+    private synchronized void updateTilesAround(
+            RtContext ctx, int centerTileX, int centerTileZ, RtGpuExecutor.GraphicsUse graphicsUse) {
         if (centerTileX == lastCenterTileX && centerTileZ == lastCenterTileZ) return;
         lastCenterTileX = centerTileX;
         lastCenterTileZ = centerTileZ;
@@ -170,7 +174,7 @@ public final class DhFarFieldProxy {
             int dx = t.tileX - centerTileX;
             int dz = t.tileZ - centerTileZ;
             if (dx * dx + dz * dz > maxRadiusSq) {
-                t.destroy();
+                t.retire(ctx, graphicsUse);
                 return true;
             }
             return false;
@@ -202,14 +206,16 @@ public final class DhFarFieldProxy {
 
         int centerTileX = Math.floorDiv((int) Math.floor(camX), TILE_SIZE);
         int centerTileZ = Math.floorDiv((int) Math.floor(camZ), TILE_SIZE);
-        updateTilesAround(ctx, centerTileX, centerTileZ);
+        updateTilesAround(ctx, centerTileX, centerTileZ, graphicsUse);
 
         for (Tile tile : residentTiles.values()) {
             if (tile.dirty) {
                 tile.ensureBuffer(ctx);
                 tile.uploadHeights();
                 if (tile.blas != null) {
-                    tile.blas.destroy();
+                    RtAccel staleBlas = tile.blas;
+                    ctx.accelerationStructures().retire(graphicsUse,
+                            () -> ctx.accelerationStructures().destroyOwnedBlas(staleBlas));
                     tile.blas = null;
                     tile.blasReady = false;
                 }
@@ -229,7 +235,8 @@ public final class DhFarFieldProxy {
             RtAccel.recordBlasBuilds(ctx, cmd, pendingBlasBuilds);
             List<RtAccel.PreparedBlas> toRetire = new ArrayList<>(pendingBlasBuilds);
             pendingBlasBuilds.clear();
-            ctx.accelerationStructures().retire(graphicsUse, () -> RtAccel.freeBlasScratch(toRetire));
+            ctx.accelerationStructures().retire(graphicsUse,
+                    () -> ctx.accelerationStructures().releaseBuildScratch(toRetire));
             accelerationStructureBuildBarrier(cmd);
         }
 
@@ -283,8 +290,10 @@ public final class DhFarFieldProxy {
     }
 
     public synchronized void destroy() {
+        if (!initialized) return;
+        RtContext ctx = Objects.requireNonNull(ownerContext, "initialized DH proxy context");
         for (Tile tile : residentTiles.values()) {
-            tile.destroy();
+            tile.destroy(ctx);
         }
         residentTiles.clear();
         if (sharedIndexBuffer != null) {
@@ -292,6 +301,7 @@ public final class DhFarFieldProxy {
             sharedIndexBuffer = null;
         }
         tlasRing.destroy();
+        ownerContext = null;
         initialized = false;
         lastCenterTileX = Integer.MAX_VALUE;
         lastCenterTileZ = Integer.MAX_VALUE;
@@ -391,9 +401,25 @@ public final class DhFarFieldProxy {
             }
         }
 
-        void destroy() {
+        void retire(RtContext ctx, RtGpuExecutor.GraphicsUse graphicsUse) {
+            RtAccel retiredBlas = blas;
+            RtBuffer retiredVertexBuffer = vertexBuffer;
+            blas = null;
+            blasReady = false;
+            vertexBuffer = null;
+            ctx.accelerationStructures().retire(graphicsUse, () -> {
+                if (retiredBlas != null) {
+                    ctx.accelerationStructures().destroyOwnedBlas(retiredBlas);
+                }
+                if (retiredVertexBuffer != null) {
+                    retiredVertexBuffer.destroy();
+                }
+            });
+        }
+
+        void destroy(RtContext ctx) {
             if (blas != null) {
-                blas.destroy();
+                ctx.accelerationStructures().destroyOwnedBlas(blas);
                 blas = null;
                 blasReady = false;
             }

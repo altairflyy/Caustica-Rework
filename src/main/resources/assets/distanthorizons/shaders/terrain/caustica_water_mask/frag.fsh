@@ -7,10 +7,12 @@ in vec3 vBlockPos;
 flat in uint vNormalIndex;
 flat in uint vTextureTileId;
 flat in uint vMaterialId;
+flat in uint vPackedLight;
+in vec4 vBaseColor;
 in vec4 gl_FragCoord;
 
 layout(location = 0) out vec4 fragColor;
-layout(location = 1) out vec4 waterMask;
+layout(location = 1) out vec4 surfaceData;
 
 uniform sampler2D uBlockAtlas;
 
@@ -82,6 +84,7 @@ vec2 blockFaceUv()
 void main()
 {
     fragColor = vertexColor;
+    vec4 baseColor = vBaseColor;
     if (vTextureTileId != 0u)
     {
         ivec2 tileOrigin = ivec2(int(vTextureTileId % 256u), int(vTextureTileId / 256u)) * 16;
@@ -89,6 +92,8 @@ void main()
         vec4 tile = texelFetch(uBlockAtlas, texelPos, 0);
         vec3 clampedColor = clamp(fragColor.rgb * (tile.rgb * 2.0), 0.0, 1.0);
         fragColor.rgb = mix(fragColor.rgb, clampedColor, tile.a);
+        vec3 clampedBase = clamp(baseColor.rgb * (tile.rgb * 2.0), 0.0, 1.0);
+        baseColor.rgb = mix(baseColor.rgb, clampedBase, tile.a);
     }
 
     float viewDist = length(vertexWorldPos);
@@ -106,8 +111,18 @@ void main()
     if (uNoiseEnabled && vTextureTileId == 0u)
     {
         applyNoise(fragColor, viewDist);
+        applyNoise(baseColor, viewDist);
     }
 
-    // EDhApiBlockMaterial.WATER.index in the targeted DH 3.2.0-b-26.2 build.
-    waterMask = vec4(vMaterialId == 12u ? 1.0 : 0.0, 0.0, 0.0, 1.0);
+    // One UNORM8 lane carries the exact axis-aligned face normal, water classification and a
+    // 2-bit quantization of each 4-bit light level. Native depth remains the occupancy authority.
+    uint skyLevel = (vPackedLight >> 4u) & 15u;
+    uint blockLevel = vPackedLight & 15u;
+    uint skyQ = (skyLevel + 2u) / 5u;
+    uint blockQ = (blockLevel + 2u) / 5u;
+    uint packedSurface = (vNormalIndex & 7u)
+            | (vMaterialId == 12u ? 8u : 0u)
+            | ((skyQ & 3u) << 4u)
+            | ((blockQ & 3u) << 6u);
+    surfaceData = vec4(clamp(baseColor.rgb, 0.0, 1.0), float(packedSurface) / 255.0);
 }

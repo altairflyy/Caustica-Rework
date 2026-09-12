@@ -358,7 +358,7 @@ public final class RtComposite {
     private long nativeColorView;
     /** VkImageView and exact clear value of DH's depth target; depth is the occupancy authority. */
     private long nativeDepthView;
-    /** Same-frame native-DH R8 water classification and its backing image. */
+    /** Same-frame native-DH RGBA8 compact surface data and its backing image. */
     private long nativeWaterMaskView;
     private long nativeWaterMaskImage;
     private float nativeDepthClear;
@@ -367,7 +367,7 @@ public final class RtComposite {
     private float nativeDhLightX;
     private float nativeDhLightY;
     private float nativeDhLightZ;
-    private float nativeDhDirectStrength;
+    private float nativeDhLightLuminance;
 
     // Camera captured each frame from GameRenderer (unjittered level projection + camera rotation + pos).
     private final Matrix4f frameProjection = new Matrix4f();
@@ -413,7 +413,7 @@ public final class RtComposite {
     private float pipelinePostPresentDhLightX;
     private float pipelinePostPresentDhLightY;
     private float pipelinePostPresentDhLightZ;
-    private float pipelinePostPresentDhDirectStrength;
+    private float pipelinePostPresentDhLightLuminance;
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -1060,7 +1060,7 @@ public final class RtComposite {
                 pipelinePostPresentNativeDepthClear, pipelinePostPresentHybrid,
                 pipelinePostPresentDhLighting, pipelinePostPresentDhInverseViewProjection,
                 pipelinePostPresentDhLightX, pipelinePostPresentDhLightY, pipelinePostPresentDhLightZ,
-                pipelinePostPresentDhDirectStrength, postHdr, pipelineGpuProfile,
+                pipelinePostPresentDhLightLuminance, postHdr, pipelineGpuProfile,
                 camX, camY, camZ, pendingGraphicsUse);
     }
 
@@ -1268,11 +1268,11 @@ public final class RtComposite {
                 nativeDhLightX = nativeDhLightY = nativeDhLightZ = 0.0f;
             }
             // Rec.709 luminance of the same weather-attenuated celestial radiance used by RT NEE.
-            // The clear-noon peak is authored as 21 in skyPush; this ratio is a bounded correction
-            // strength over DH's already-lightmapped color, not a second direct-light contribution.
+            // Keep it in the RT radiance domain so the LOD Lambert term and near-field path tracer
+            // enter one exposure/tonemap transform with comparable energy.
             float dhLightLuminance = 0.2126f * dhLightRadiance.x()
                     + 0.7152f * dhLightRadiance.y() + 0.0722f * dhLightRadiance.z();
-            nativeDhDirectStrength = Math.clamp(dhLightLuminance / 21.0f, 0.0f, 1.0f);
+            nativeDhLightLuminance = Math.max(dhLightLuminance, 0.0f);
             // Analytic held-item light: position + intensity lane and the item's RGB tint; w == 0
             // disables the shader term (toggle off, no luminous item, or no player).
             HandLightState hand = handLightState(terrain);
@@ -1532,7 +1532,7 @@ public final class RtComposite {
             pipelinePostPresentDhLightX = nativeDhLightX;
             pipelinePostPresentDhLightY = nativeDhLightY;
             pipelinePostPresentDhLightZ = nativeDhLightZ;
-            pipelinePostPresentDhDirectStrength = nativeDhDirectStrength;
+            pipelinePostPresentDhLightLuminance = nativeDhLightLuminance;
             try {
                 pipelineCursor.executeNext();
             } finally {

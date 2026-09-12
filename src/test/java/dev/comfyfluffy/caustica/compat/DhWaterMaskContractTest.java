@@ -18,16 +18,20 @@ final class DhWaterMaskContractTest {
         String fragment = read("src/main/resources/assets/distanthorizons/shaders/terrain/caustica_water_mask/frag.fsh");
         assertTrue(vertex.contains("in int irisMaterial"));
         assertTrue(vertex.contains("vMaterialId = uint(irisMaterial)"));
+        assertTrue(vertex.contains("vPackedLight = meta & 0xFFu"));
+        assertTrue(vertex.contains("vBaseColor"));
         assertTrue(fragment.contains("vMaterialId == 12u"));
-        assertTrue(fragment.contains("layout(location = 1) out vec4 waterMask"));
+        assertTrue(fragment.contains("layout(location = 1) out vec4 surfaceData"));
+        assertTrue(fragment.contains("float(packedSurface) / 255.0"));
         assertFalse(fragment.contains("nativeBackground"));
         assertFalse(fragment.contains("biome"));
     }
 
     @Test
-    void maskIsAOneByteSamePassAttachmentWithoutReadback() throws IOException {
+    void surfaceDataIsACompactSamePassAttachmentWithoutReadback() throws IOException {
         String owner = read("src/main/java/dev/comfyfluffy/caustica/compat/DistantHorizonsWaterMask.java");
-        assertTrue(owner.contains("GpuFormat.R8_UNORM"));
+        assertTrue(owner.contains("GpuFormat.RGBA8_UNORM"));
+        assertTrue(owner.contains("ColorTargetState.WRITE_ALL"));
         assertTrue(owner.contains("withColorAttachment(mask"));
         assertTrue(owner.contains("USAGE_RENDER_ATTACHMENT"));
         assertTrue(owner.contains("USAGE_TEXTURE_BINDING"));
@@ -48,12 +52,19 @@ final class DhWaterMaskContractTest {
     }
 
     @Test
-    void maskAttachmentIsUsedForWaterCompositing() throws IOException {
+    void packedSurfaceAttachmentFeedsTerrainAndWaterCompositing() throws IOException {
         String shader = read("shaders/display/display.comp");
-        assertTrue(shader.contains("uniform sampler2D nativeWaterMask"));
-        assertTrue(shader.contains("texelFetch(nativeWaterMask, nativeDepthPix, 0).r"));
-        assertTrue(shader.contains("water >= 0.5"));
-        assertFalse(shader.contains("vec3 debugColor = vec3(water)"));
+        String reflection = read("shaders/world/dh_reflection.rgen.slang");
+        String reflectionPipeline = read(
+                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDhReflectionPipeline.java");
+        assertTrue(shader.contains("uniform sampler2D nativeSurfaceData"));
+        assertTrue(shader.contains("surfaceKey(surface)"));
+        assertTrue(shader.contains("dhWater(key)"));
+        assertTrue(shader.contains("shadeDhTerrain"));
+        assertTrue(shader.contains("shadeDhWater"));
+        assertTrue(reflection.contains("(surfaceKey & 8u) == 0u"));
+        assertTrue(reflectionPipeline.contains("VK_FILTER_NEAREST"));
+        assertFalse(shader.contains("Temporary inspection"));
     }
 
     private static String read(String relative) throws IOException {

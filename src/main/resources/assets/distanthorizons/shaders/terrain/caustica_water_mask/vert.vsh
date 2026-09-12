@@ -15,6 +15,8 @@ out vec3 vBlockPos;
 flat out uint vNormalIndex;
 flat out uint vTextureTileId;
 flat out uint vMaterialId;
+flat out uint vPackedLight;
+out vec4 vBaseColor;
 
 layout (std140) uniform vertUniqueUniformBlock
 {
@@ -40,6 +42,7 @@ void main()
     vNormalIndex = uint(irisNormal);
     vTextureTileId = textureTile;
     vMaterialId = uint(irisMaterial);
+    vPackedLight = meta & 0xFFu;
 
     vertexWorldPos = vPosition.xyz + (uModelOffset - uCameraPos);
     float vertexYPos = vPosition.y + uWorldYOffset;
@@ -60,13 +63,10 @@ void main()
         vertexWorldPos.xz = vertexWorldPos.xz * sin(phi) / phi;
     }
 
-    uint lights = meta & 0xFFu;
+    uint lights = vPackedLight;
     float skyLight = (float(lights / 16u) + 0.5) / 16.0;
     float blockLight = (mod(float(lights), 16.0) + 0.5) / 16.0;
-    vertexColor = vec4(texture(uLightMap, vec2(skyLight, blockLight)).xyz, 1.0);
-    if (!uIsWhiteWorld)
-    {
-        vertexColor *= vColor;
-    }
+    vBaseColor = uIsWhiteWorld ? vec4(1.0) : vColor;
+    vertexColor = vec4(texture(uLightMap, vec2(skyLight, blockLight)).xyz, 1.0) * vBaseColor;
     gl_Position = uCombinedMatrix * vec4(vertexWorldPos, 1.0);
 }

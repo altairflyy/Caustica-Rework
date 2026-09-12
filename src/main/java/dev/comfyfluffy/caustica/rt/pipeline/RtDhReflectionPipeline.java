@@ -180,7 +180,9 @@ public final class RtDhReflectionPipeline {
             sbt.flush();
 
             VkSamplerCreateInfo samplerInfo = VkSamplerCreateInfo.calloc(stack).sType$Default()
-                    .magFilter(VK10.VK_FILTER_LINEAR).minFilter(VK10.VK_FILTER_LINEAR)
+                    // Depth and the packed surface byte are discrete per-pixel data. Linear
+                    // filtering would manufacture invalid material/light bits at LOD edges.
+                    .magFilter(VK10.VK_FILTER_NEAREST).minFilter(VK10.VK_FILTER_NEAREST)
                     .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_NEAREST)
                     .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
                     .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)

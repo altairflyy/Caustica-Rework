@@ -37,9 +37,9 @@ public final class RtDisplayPipeline {
      * Push constants: int hdrEnabled, float paperWhiteNits/headroom, int tonemapOperator,
      * float tonemapExposureEv/gamma/saturation/contrast, int hybridEnabled, int renderWidth,
      * int renderHeight, float nativeDepthClear, mat4 DH inverse view-projection,
-     * vec4 DH light direction/direct-strength, int DH water-mask debug flag.
+     * vec4 DH light direction/radiance-luminance. Negative luminance values encode feature-off/debug.
      */
-    private static final int PUSH_BYTES = 33 * Integer.BYTES;
+    private static final int PUSH_BYTES = 32 * Integer.BYTES;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -246,7 +246,7 @@ public final class RtDisplayPipeline {
                           float tonemapSaturation, float tonemapContrast, int renderWidth, int renderHeight,
                           boolean hybridEnabled, float nativeDepthClear,
                           boolean dhFarLighting, Matrix4f dhInverseViewProjection,
-                          float dhLightX, float dhLightY, float dhLightZ, float dhDirectStrength,
+                          float dhLightX, float dhLightY, float dhLightZ, float dhLightLuminance,
                           boolean dhWaterMaskDebug) {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "display compute")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
@@ -268,8 +268,8 @@ public final class RtDisplayPipeline {
             push.putFloat(112, dhLightX);
             push.putFloat(116, dhLightY);
             push.putFloat(120, dhLightZ);
-            push.putFloat(124, dhFarLighting ? dhDirectStrength : 0.0f);
-            push.putInt(128, dhWaterMaskDebug ? 1 : 0);
+            float lightControl = dhFarLighting ? Math.max(dhLightLuminance, 0.0f) : -1.0f;
+            push.putFloat(124, dhWaterMaskDebug ? -2.0f : lightControl);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

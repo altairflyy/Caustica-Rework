@@ -73,17 +73,26 @@ final class DhNativeHookHybridContractTest {
     }
 
     @Test
-    void farLightingUsesDhDepthReconstructionWithoutRtGeometryOrRays() throws IOException {
+    void farLightingUsesSamePassSurfaceDataAndOneDisplayTransform() throws IOException {
         String shader = read("shaders/display/display.comp");
         String scaler = read("src/main/java/dev/comfyfluffy/caustica/client/WorldRenderScaler.java");
         String config = read("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
+        String pipeline = read("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDisplayPipeline.java");
         assertTrue(shader.contains("nativeInvViewProj"));
         assertTrue(shader.contains("reconstructDhPosition"));
-        assertTrue(shader.contains("reconstructDhNormal"));
-        assertTrue(shader.contains("srgbToLinear(native.rgb)"));
-        assertTrue(shader.contains("ndotl - 0.5"));
+        assertTrue(shader.contains("nativeSurfaceData"));
+        assertTrue(shader.contains("dhFaceNormal"));
+        assertTrue(shader.contains("dhSkyLight"));
+        assertTrue(shader.contains("dhBlockLight"));
+        assertTrue(shader.contains("? mix(nativeRadiance, rt.rgb, rtCoverage"));
+        assertTrue(shader.contains(": nativeRadiance;"));
+        assertTrue(shader.contains("tonemap(sceneRadiance, exposure)"));
+        assertTrue(shader.contains("tonemapHdr(sceneRadiance, exposure)"));
+        assertFalse(shader.contains("Temporary inspection"));
         assertFalse(shader.contains("rayQueryEXT"));
         assertFalse(shader.contains("traceRayEXT"));
+        assertTrue(pipeline.contains("PUSH_BYTES = 32 * Integer.BYTES"));
+        assertFalse(pipeline.contains("push.putInt(128"));
         assertTrue(scaler.contains("DistantHorizonsCompat.inverseViewProjection"));
         assertTrue(config.contains("terrain.dh-far-lighting"));
     }
