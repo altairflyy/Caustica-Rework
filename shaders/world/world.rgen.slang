@@ -42,19 +42,27 @@ import sharc;
 // continuation lobe; until then (camera prefix, sky) the diffuse bucket is the catch-all.
 public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                  bool restirEligiblePath, bool restirOwner, float restirSampleScale,
-                 uint2 dimensions,
+                 uint2 dimensions
+#ifndef CAUSTICA_INDIRECT_NO_NRD
+                 ,
                  out float3 outLdiff, out float3 outLspec,
-                 out float outHitDiff, out float outHitSpec) {
+                 out float outHitDiff, out float outHitSpec
+#endif
+                 ) {
     float3 L = float3(0.0, 0.0, 0.0);
+#ifndef CAUSTICA_INDIRECT_NO_NRD
     float3 Ldiff = float3(0.0, 0.0, 0.0);
     float3 Lspec = float3(0.0, 0.0, 0.0);
     float hitDiff = 0.0;
     float hitSpec = 0.0;
+#endif
     // channel: 0 = not yet classified (diffuse catch-all), 1 = diffuse path, 2 = specular path.
     int channel = seg.bounce > 0 ? 2 : 0;
     // Segments split off a dielectric start mid-flight: their first trace inside this call IS the
     // specular continuation hop, so its hit distance feeds the specular channel.
+#ifndef CAUSTICA_INDIRECT_NO_NRD
     int pendingHitChannel = seg.bounce > 0 ? 2 : 0;
+#endif
     float3 ro = seg.ro;
     float3 rd = seg.rd;
     float3 throughput = seg.throughput;
@@ -97,7 +105,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 FogVolume preFog = fogSegment(worldPush, worldPush.camOffset, toStart / prefixDist,
                                               prefixDist, seed, seg.showCelestial);
                 L += throughput * preFog.scatter;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                 Lspec += throughput * preFog.scatter;
+#endif
                 throughput *= preFog.transmittance;
             }
             // The cloud crossing belongs to the camera->surface prefix, so it is recovered here in
@@ -105,7 +115,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             CloudVolume pre = cloudSegment(worldPush, float3(0.0, 0.0, 0.0), toStart / prefixDist,
                                            prefixDist, cloudSkyAmbient(worldPush), seg.showCelestial);
             L += throughput * pre.scatter;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
             Lspec += throughput * pre.scatter;
+#endif
             throughput *= pre.transmittance;
         }
     }
@@ -188,11 +200,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 sky = sky * skyFog.transmittance + skyFog.scatter;
             }
             L += throughput * sky;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
             if (channel == 2) {
                 Lspec += throughput * sky;
             } else {
                 Ldiff += throughput * sky;
             }
+#endif
             // SHaRC: the sky is a real light source for every earlier path vertex. Propagating it
             // back teaches their voxels the sky ambient their continuation rays would find — this is
             // NVIDIA's SharcUpdateMiss. Only diffuse continuations propagate: a showCelestial
@@ -221,6 +235,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // First-bounce hit distance capture: the trace we just ran is the continuation hop whose
         // distance REBLUR wants for the lobe that spawned it. A miss leaves the distance at 0 —
         // REBLUR's "no data" value, which it treats as a skipped lobe rather than zero distance.
+#ifndef CAUSTICA_INDIRECT_NO_NRD
         if (pendingHitChannel != 0) {
             if (pendingHitChannel == 1) {
                 hitDiff = payload.hitT;
@@ -229,6 +244,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             }
             pendingHitChannel = 0;
         }
+#endif
 
         // Beer–Lambert: attenuate along the segment just travelled by the medium it lay inside. Applies
         // to every hit reached while inside a volume dielectric (its own exit face, or whatever content
@@ -254,11 +270,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         if (fogEnabled(worldPush) && fogAppliesHere(medium)) {
             FogVolume segFog = fogSegment(worldPush, ro, rd, payload.hitT, seed, showCelestial);
             L += throughput * segFog.scatter;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
             if (channel == 2) {
                 Lspec += throughput * segFog.scatter;
             } else {
                 Ldiff += throughput * segFog.scatter;
             }
+#endif
             throughput *= segFog.transmittance;
         }
 
@@ -280,11 +298,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                                                 payload.hitT, cloudSkyAmbient(worldPush),
                                                 showCelestial);
             L += throughput * segCloud.scatter;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
             if (channel == 2) {
                 Lspec += throughput * segCloud.scatter;
             } else {
                 Ldiff += throughput * segCloud.scatter;
             }
+#endif
             throughput *= segCloud.transmittance;
         }
 
@@ -347,7 +367,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             // distance REBLUR wants (measured from the interface).
             if (channel == 0) {
                 channel = 2;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                 pendingHitChannel = 2;
+#endif
             }
             showCelestial = true; // specular interface: the continuation ray may see the sun/moon disc
             if (bounce >= rrStart) {
@@ -387,11 +409,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 // the day, so streaks read as a light veil over the bright sky.
                 float weatherSheet = lerp(0.12, 1.9, worldPush.sunDir.w);
                 L += throughput * albedo * weatherSheet;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                 if (channel == 2) {
                     Lspec += throughput * albedo * weatherSheet;
                 } else {
                     Ldiff += throughput * albedo * weatherSheet;
                 }
+#endif
                 break;
             }
 
@@ -421,11 +445,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                     if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
                         float3 particleNee = throughput * albedo * INV_PI * worldPush.lightRadiance.xyz * ndl * vis;
                         L += particleNee;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                         if (channel == 2) {
                             Lspec += particleNee;
                         } else {
                             Ldiff += particleNee;
                         }
+#endif
                     }
                 }
             }
@@ -439,11 +465,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 if (max(particleHandIrr.x, max(particleHandIrr.y, particleHandIrr.z)) > 0.0) {
                     float3 particleHand = throughput * albedo * INV_PI * particleHandIrr;
                     L += particleHand;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                     if (channel == 2) {
                         Lspec += particleHand;
                     } else {
                         Ldiff += particleHand;
                     }
+#endif
                 }
             }
 
@@ -473,11 +501,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                             float3(0.0, 0.0, 0.0), 1.0, true, 0.0) * estimatorScale;
                     L += particleRis;
                     // twoSided shading has no specular term — the whole estimate is diffuse.
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                     if (channel == 2) {
                         Lspec += particleRis;
                     } else {
                         Ldiff += particleRis;
                     }
+#endif
                 }
             }
 
@@ -533,11 +563,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 float3 emissive = throughput * albedo * emission * max(emissionScale, 0.0);
                 L += emissive;
                 // Emission has no lobe; REBLUR convention is to carry it in the diffuse signal.
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                 if (channel == 2) {
                     Lspec += emissive;
                 } else {
                     Ldiff += emissive;
                 }
+#endif
             }
             break;
         }
@@ -573,7 +605,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 L += sharcGi;
                 // Cached GI is the diffuse lobe's tail; even an unclassified (channel 0) split-leaf
                 // vertex reached here via its diffuse continuation.
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                 Ldiff += sharcGi;
+#endif
                 // Feed the cached tail back one hop so upstream voxels learn multi-bounce GI
                 // (NVIDIA's cache resampling), then stop tracing this path.
                 sharcPropagateToPath(worldPush, sharcState, hitPos, sharcCached, throughput);
@@ -602,11 +636,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             L += emissive;
             // Emission has no lobe; REBLUR convention is to carry it in the diffuse signal (a
             // specular bucket would mislead the hit-distance-driven specular filter).
+#ifndef CAUSTICA_INDIRECT_NO_NRD
             if (channel == 2) {
                 Lspec += emissive;
             } else {
                 Ldiff += emissive;
             }
+#endif
         }
 
         // NEE: direct light from the dominant celestial body (sun by day, moon by night) — Lambert
@@ -668,6 +704,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                     float3 brdf = brdfDiff + brdfSpec;
                     float3 nee = throughput * brdf * worldPush.lightRadiance.xyz * ndl * vis;
                     L += nee;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                     if (channel == 0) {
                         // Unclassified primary hit: split direct light by BRDF lobe.
                         Ldiff += throughput * brdfDiff * worldPush.lightRadiance.xyz * ndl * vis;
@@ -677,6 +714,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                     } else {
                         Lspec += nee;
                     }
+#endif
                 }
             }
         }
@@ -691,11 +729,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         if (max(handIrr.x, max(handIrr.y, handIrr.z)) > 0.0) {
             float3 handNee = throughput * diffAlb * INV_PI * handIrr;
             L += handNee;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
             if (channel == 2) {
                 Lspec += handNee;
             } else {
                 Ldiff += handNee;
             }
+#endif
         }
 
         float activeSss = hitDepth <= MAX_SSS_INDIRECT_DEPTH ? sss : 0.0;
@@ -740,12 +780,15 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                             r.pos, r.lnrm, r.le, r.area) * estimatorScale;
                     fogE *= fogSegThroughput;
                     L += fogE;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                     if (channel == 2) {
                         Lspec += fogE;
                     } else {
                         Ldiff += fogE;
                     }
+#endif
                 }
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                 if (nrdEnabled()) {
                     if (channel == 0) {
                         // Unclassified primary hit: split the reservoir estimate by BRDF lobe. Costs a
@@ -762,6 +805,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                         Lspec += ris;
                     }
                 }
+#endif
             }
         }
 
@@ -795,11 +839,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                         float3 sssTerm = throughput * diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G) * backNdl * worldPush.lightRadiance.xyz * visB;
                         L += sssTerm;
                         // Back-face transmission is a diffuse-scattering event.
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                         if (channel == 2) {
                             Lspec += sssTerm;
                         } else {
                             Ldiff += sssTerm;
                         }
+#endif
                     }
                 }
             }
@@ -872,7 +918,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             // lobe's hit distance for REBLUR. Deeper bounces keep the channel they inherited.
             if (channel == 0) {
                 channel = 2;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                 pendingHitChannel = 2;
+#endif
             }
         } else {
             throughput *= diffAlb / (1.0 - ps);
@@ -882,7 +930,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
             if (channel == 0) {
                 channel = 1;
+#ifndef CAUSTICA_INDIRECT_NO_NRD
                 pendingHitChannel = 1;
+#endif
             }
         }
 
@@ -897,10 +947,12 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         }
     }
     // Every term was classified into exactly one accumulator, so the split is exact.
+#ifndef CAUSTICA_INDIRECT_NO_NRD
     outLdiff = Ldiff;
     outLspec = Lspec;
     outHitDiff = hitDiff;
     outHitSpec = hitSpec;
+#endif
     return L;
 }
 
@@ -926,17 +978,20 @@ void main() {
     gv_sharcDbgCount = 0.0;
     ConstPtr<PackedPathSegment> queue = ConstPtr<PackedPathSegment>(pc.pathQueueAddr);
     float3 frameRadiance = float3(0.0, 0.0, 0.0);
+#ifndef CAUSTICA_INDIRECT_NO_NRD
     float3 frameDiff = float3(0.0, 0.0, 0.0);
     float3 frameSpec = float3(0.0, 0.0, 0.0);
     // Per-lobe hit distance across samples: min of the finite values (NRD's own front-end averaging
     // for specular hit distances is a min; 0 is reserved for "no data" and skipped).
     float frameHitDiff = 0.0;
     float frameHitSpec = 0.0;
+#endif
     uint recordIndex = pixelIndex;
     for (uint leaf = 0u; leaf < MAX_PATH_SEGMENTS; ++leaf) {
         PackedPathSegment packed = queue[recordIndex];
         PathSegment segment = unpackPathSegment(packed);
         for (uint s = 0u; s < spp; ++s) {
+#ifndef CAUSTICA_INDIRECT_NO_NRD
             float3 sampleDiff;
             float3 sampleSpec;
             float sampleHitDiff;
@@ -952,6 +1007,10 @@ void main() {
             if (sampleHitSpec > 0.0) {
                 frameHitSpec = frameHitSpec > 0.0 ? min(frameHitSpec, sampleHitSpec) : sampleHitSpec;
             }
+#else
+            frameRadiance += tracePath(segment, uint2(pix), s + leaf * spp,
+                    leaf == 0u, leaf == 0u && s == 0u, float(spp), dimensions);
+#endif
         }
         if (packed.nextRecord == PATH_NO_NEXT) {
             break;
@@ -1001,6 +1060,7 @@ void main() {
     }
     outImage[pix] = float4(radiance, 1.0);
 
+#ifndef CAUSTICA_INDIRECT_NO_NRD
     if (nrdEnabled()) {
         // ---- REBLUR front-end pack. Mirrors REBLUR_FrontEnd_PackRadianceAndNormHitDist: DEMODULATED
         // YCoCg radiance clamped to the FP16 range, plus the normalized hit distance. Invalid
@@ -1067,4 +1127,5 @@ void main() {
         gNrdDiff[pix] = float4(nrdLinearToYCoCg(diffRad), normHitDiff);
         gNrdSpec[pix] = float4(nrdLinearToYCoCg(specRad), normHitSpec);
     }
+#endif
 }

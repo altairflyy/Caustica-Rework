@@ -6,8 +6,13 @@
 	"client": [
 		"BlockModelRenderStateMixin",
 		"BlockModelResolverMixin",
+		"ChunkSectionsToRenderMixin",
 		"CommandEncoderAccessor",
 		"DistantHorizonsLodBufferMixin",
+		"DistantHorizonsPipelineBuilderWaterMaskMixin",
+		"DistantHorizonsRenderPassWaterMaskMixin",
+		"DistantHorizonsTerrainWaterMaskMixin",
+		"DebugScreenOverlayMixin",
 		"GameRendererMixin",
 		"GpuDeviceAccessor",
 		"GlxMixin",

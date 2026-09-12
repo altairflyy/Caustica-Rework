@@ -17,6 +17,8 @@ import org.lwjgl.vulkan.VkPipelineShaderStageCreateInfo;
 import org.lwjgl.vulkan.VkPushConstantRange;
 import org.lwjgl.vulkan.VkShaderModuleCreateInfo;
 import org.lwjgl.vulkan.VkWriteDescriptorSet;
+import org.lwjgl.vulkan.VkSamplerCreateInfo;
+import org.joml.Matrix4f;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -33,9 +35,11 @@ public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
     /**
      * Push constants: int hdrEnabled, float paperWhiteNits/headroom, int tonemapOperator,
-     * float tonemapExposureEv/gamma/saturation/contrast.
+     * float tonemapExposureEv/gamma/saturation/contrast, int hybridEnabled, int renderWidth,
+     * int renderHeight, float nativeDepthClear, mat4 DH inverse view-projection,
+     * vec4 DH light direction/direct-strength, int DH water-mask debug flag.
      */
-    private static final int PUSH_BYTES = 8 * Integer.BYTES;
+    private static final int PUSH_BYTES = 33 * Integer.BYTES;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -43,25 +47,36 @@ public final class RtDisplayPipeline {
     private final long descriptorSet;
     private final long pipelineLayout;
     private final long pipeline;
+    private final long backgroundSampler;
     private long boundOutputView;
     private long boundRtView;
     private long boundExposureView;
     private long boundHdrView;
+    private long boundViewZView;
+    private long boundBackgroundView;
+    private long boundBackgroundDepthView;
+    private long boundWaterMaskView;
+    private long boundReflectionView;
+    private int boundBackgroundLayout;
+    private int boundWaterMaskLayout;
+    private int boundReflectionLayout;
     private boolean destroyed;
 
-    private RtDisplayPipeline(RtContext ctx, long dsl, long pool, long set, long layout, long pipeline) {
+    private RtDisplayPipeline(RtContext ctx, long dsl, long pool, long set, long layout, long pipeline,
+                              long backgroundSampler) {
         this.ctx = ctx;
         this.descriptorSetLayout = dsl;
         this.descriptorPool = pool;
         this.descriptorSet = set;
         this.pipelineLayout = layout;
         this.pipeline = pipeline;
+        this.backgroundSampler = backgroundSampler;
     }
 
     public static RtDisplayPipeline create(RtContext ctx) {
         VkDevice vk = ctx.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(4, stack);
+            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(9, stack);
             binds.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(1).binding(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -70,6 +85,16 @@ public final class RtDisplayPipeline {
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(3).binding(3).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(4).binding(4).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(5).binding(5).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(6).binding(6).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(7).binding(7).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(8).binding(8).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
 
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
@@ -77,9 +102,12 @@ public final class RtDisplayPipeline {
             long dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, "display descriptor set layout");
 
-            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
-            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(4);
-            VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
+            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(2, stack);
+            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(5);
+            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(4);
+
+            VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
+                    .maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(rt display)");
             long pool = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, pool, "display descriptor pool");
@@ -111,13 +139,42 @@ public final class RtDisplayPipeline {
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, pPipeline.get(0), "display compute pipeline");
             VK10.vkDestroyShaderModule(vk, module, null);
 
-            return new RtDisplayPipeline(ctx, dsl, pool, set, layout, pPipeline.get(0));
+            VkSamplerCreateInfo samplerInfo = VkSamplerCreateInfo.calloc(stack).sType$Default()
+                    .magFilter(VK10.VK_FILTER_LINEAR).minFilter(VK10.VK_FILTER_LINEAR)
+                    .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_NEAREST)
+                    .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .maxLod(0.0f);
+            LongBuffer pSampler = stack.mallocLong(1);
+            check(VK10.vkCreateSampler(vk, samplerInfo, null, pSampler), "vkCreateSampler(rt display background)");
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, pSampler.get(0), "display background sampler");
+
+            return new RtDisplayPipeline(ctx, dsl, pool, set, layout, pPipeline.get(0), pSampler.get(0));
         }
     }
 
-    public void setImages(long outputImageView, long rtImageView, long exposureImageView, long hdrImageView) {
+    public void setImages(long outputImageView, long rtImageView, long exposureImageView, long hdrImageView,
+                          long viewZImageView, long backgroundImageView, long backgroundDepthImageView,
+                          long waterMaskImageView, int backgroundImageLayout, int waterMaskImageLayout) {
+        setImages(outputImageView, rtImageView, exposureImageView, hdrImageView, viewZImageView,
+                backgroundImageView, backgroundDepthImageView, waterMaskImageView, backgroundImageView,
+                backgroundImageLayout, waterMaskImageLayout, backgroundImageLayout);
+    }
+
+    public void setImages(long outputImageView, long rtImageView, long exposureImageView, long hdrImageView,
+                          long viewZImageView, long backgroundImageView, long backgroundDepthImageView,
+                          long waterMaskImageView, long reflectionImageView,
+                          int backgroundImageLayout, int waterMaskImageLayout, int reflectionImageLayout) {
         if (boundOutputView == outputImageView && boundRtView == rtImageView
-                && boundExposureView == exposureImageView && boundHdrView == hdrImageView) {
+                && boundExposureView == exposureImageView && boundHdrView == hdrImageView
+                && boundViewZView == viewZImageView && boundBackgroundView == backgroundImageView
+                && boundBackgroundDepthView == backgroundDepthImageView
+                && boundWaterMaskView == waterMaskImageView
+                && boundReflectionView == reflectionImageView
+                && boundBackgroundLayout == backgroundImageLayout
+                && boundWaterMaskLayout == waterMaskImageLayout
+                && boundReflectionLayout == reflectionImageLayout) {
             return;
         }
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -129,8 +186,22 @@ public final class RtDisplayPipeline {
             exposureInfo.get(0).imageView(exposureImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
             VkDescriptorImageInfo.Buffer hdrInfo = VkDescriptorImageInfo.calloc(1, stack);
             hdrInfo.get(0).imageView(hdrImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+            VkDescriptorImageInfo.Buffer viewZInfo = VkDescriptorImageInfo.calloc(1, stack);
+            viewZInfo.get(0).imageView(viewZImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+            VkDescriptorImageInfo.Buffer backgroundInfo = VkDescriptorImageInfo.calloc(1, stack);
+            backgroundInfo.get(0).sampler(backgroundSampler).imageView(backgroundImageView)
+                    .imageLayout(backgroundImageLayout);
+            VkDescriptorImageInfo.Buffer backgroundDepthInfo = VkDescriptorImageInfo.calloc(1, stack);
+            backgroundDepthInfo.get(0).sampler(backgroundSampler).imageView(backgroundDepthImageView)
+                    .imageLayout(backgroundImageLayout);
+            VkDescriptorImageInfo.Buffer waterMaskInfo = VkDescriptorImageInfo.calloc(1, stack);
+            waterMaskInfo.get(0).sampler(backgroundSampler).imageView(waterMaskImageView)
+                    .imageLayout(waterMaskImageLayout);
+            VkDescriptorImageInfo.Buffer reflectionInfo = VkDescriptorImageInfo.calloc(1, stack);
+            reflectionInfo.get(0).sampler(backgroundSampler).imageView(reflectionImageView)
+                    .imageLayout(reflectionImageLayout);
 
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(4, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(9, stack);
             writes.get(0).sType$Default().dstSet(descriptorSet).dstBinding(0)
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(outputInfo);
             writes.get(1).sType$Default().dstSet(descriptorSet).dstBinding(1)
@@ -139,12 +210,30 @@ public final class RtDisplayPipeline {
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(exposureInfo);
             writes.get(3).sType$Default().dstSet(descriptorSet).dstBinding(3)
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(hdrInfo);
+            writes.get(4).sType$Default().dstSet(descriptorSet).dstBinding(4)
+                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(viewZInfo);
+            writes.get(5).sType$Default().dstSet(descriptorSet).dstBinding(5)
+                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(backgroundInfo);
+            writes.get(6).sType$Default().dstSet(descriptorSet).dstBinding(6)
+                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(backgroundDepthInfo);
+            writes.get(7).sType$Default().dstSet(descriptorSet).dstBinding(7)
+                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(waterMaskInfo);
+            writes.get(8).sType$Default().dstSet(descriptorSet).dstBinding(8)
+                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(reflectionInfo);
             VK10.vkUpdateDescriptorSets(ctx.vk(), writes, null);
         }
         boundOutputView = outputImageView;
         boundRtView = rtImageView;
         boundExposureView = exposureImageView;
         boundHdrView = hdrImageView;
+        boundViewZView = viewZImageView;
+        boundBackgroundView = backgroundImageView;
+        boundBackgroundDepthView = backgroundDepthImageView;
+        boundWaterMaskView = waterMaskImageView;
+        boundReflectionView = reflectionImageView;
+        boundBackgroundLayout = backgroundImageLayout;
+        boundWaterMaskLayout = waterMaskImageLayout;
+        boundReflectionLayout = reflectionImageLayout;
     }
 
     /**
@@ -154,7 +243,11 @@ public final class RtDisplayPipeline {
      */
     public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, float paperWhiteNits,
                          float headroom, int tonemapOperator, float tonemapExposureEv, float tonemapGamma,
-                         float tonemapSaturation, float tonemapContrast) {
+                          float tonemapSaturation, float tonemapContrast, int renderWidth, int renderHeight,
+                          boolean hybridEnabled, float nativeDepthClear,
+                          boolean dhFarLighting, Matrix4f dhInverseViewProjection,
+                          float dhLightX, float dhLightY, float dhLightZ, float dhDirectStrength,
+                          boolean dhWaterMaskDebug) {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "display compute")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, stack.longs(descriptorSet), null);
@@ -167,6 +260,16 @@ public final class RtDisplayPipeline {
             push.putFloat(20, tonemapGamma);
             push.putFloat(24, tonemapSaturation);
             push.putFloat(28, tonemapContrast);
+            push.putInt(32, hybridEnabled ? 1 : 0);
+            push.putInt(36, renderWidth);
+            push.putInt(40, renderHeight);
+            push.putFloat(44, nativeDepthClear);
+            dhInverseViewProjection.get(48, push);
+            push.putFloat(112, dhLightX);
+            push.putFloat(116, dhLightY);
+            push.putFloat(120, dhLightZ);
+            push.putFloat(124, dhFarLighting ? dhDirectStrength : 0.0f);
+            push.putInt(128, dhWaterMaskDebug ? 1 : 0);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }
@@ -179,6 +282,7 @@ public final class RtDisplayPipeline {
         VkDevice vk = ctx.vk();
         VK10.vkDestroyPipeline(vk, pipeline, null);
         VK10.vkDestroyPipelineLayout(vk, pipelineLayout, null);
+        VK10.vkDestroySampler(vk, backgroundSampler, null);
         VK10.vkDestroyDescriptorPool(vk, descriptorPool, null);
         VK10.vkDestroyDescriptorSetLayout(vk, descriptorSetLayout, null);
         destroyed = true;

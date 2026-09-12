@@ -74,7 +74,16 @@ public float payloadTransmission() { return unpackHalf2(payload.iorTransmission)
 // what a flag means, and gives one place to look when a new option is added.
 public bool sssEnabled() { return worldFeature(worldPush, FEATURE_SSS); }
 public bool denoiserEnabled() { return worldFeature(worldPush, FEATURE_DENOISER); }
-public bool nrdEnabled() { return worldFeature(worldPush, FEATURE_NRD); }
+public bool nrdEnabled() {
+#ifdef CAUSTICA_INDIRECT_NO_NRD
+    // DLSS-RR lean indirect variant: NRD is incompatible with this compiled program, allowing
+    // Slang to eliminate per-lobe radiance, hit-distance and packing state rather than retaining
+    // it behind a runtime branch. The generic program keeps the live feature-bit behavior.
+    return false;
+#else
+    return worldFeature(worldPush, FEATURE_NRD);
+#endif
+}
 public bool viewZEnabled() { return worldFeature(worldPush, FEATURE_VIEWZ); }
 public bool restirEnabled() {
     // Use the explicit hot push uniform as the authoritative live toggle. The featureFlags copy remains

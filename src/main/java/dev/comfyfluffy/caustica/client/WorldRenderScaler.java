@@ -1,7 +1,9 @@
 package dev.comfyfluffy.caustica.client;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.rt.RtComposite;
+import org.joml.Matrix4f;
 
 /**
  * RT composite seam. Brackets vanilla's level-rendering section in {@code GameRenderer.render}: the
@@ -18,6 +20,7 @@ public final class WorldRenderScaler {
 
 	// Tracks that the level-render window is open so the safety-net end() does not composite twice.
 	private boolean rtWindowOpen;
+	private final Matrix4f dhInverseViewProjection = new Matrix4f();
 
 	private WorldRenderScaler() {
 	}
@@ -32,7 +35,8 @@ public final class WorldRenderScaler {
 
 	/**
 	 * Run the RT composite once, at the before-hand seam (the safety-net end() then no-ops because the
-	 * window is already closed). In cancel-vanilla mode, this is where the skipped world is replaced.
+	 * window is already closed). LevelRenderer and DH have completed their native orchestration here;
+	 * only Minecraft's ordinary chunk-group bodies were suppressed.
 	 */
 	public void end(RenderTarget mainTarget) {
 		this.end(mainTarget, true);
@@ -45,11 +49,24 @@ public final class WorldRenderScaler {
 	private void end(RenderTarget mainTarget, boolean beforeHandSeam) {
 		if (this.rtWindowOpen) {
 			this.rtWindowOpen = false;
-			if (!beforeHandSeam && VanillaRenderController.INSTANCE.wasWorldSkippedThisFrame()) {
+			if (!beforeHandSeam && VanillaRenderController.INSTANCE.wasTerrainSuppressedThisFrame()) {
 				VanillaRenderController.INSTANCE.markMissedBeforeHandSeam();
 				return;
 			}
-			boolean success = RtComposite.INSTANCE.composite(mainTarget.getColorTexture(), mainTarget.width, mainTarget.height);
+			boolean nativeRaster = VanillaRenderController.INSTANCE.wasNativeDhHookObservedThisFrame()
+					&& DistantHorizonsCompat.nativeRasterActive();
+			// DH's native apply pass has already run. Its private color/depth targets remain the minimum safe
+			// background source because Caustica's final copy replaces the Minecraft main color target.
+			long nativeColorView = nativeRaster ? DistantHorizonsCompat.colorTextureView() : 0L;
+			long nativeDepthView = nativeRaster ? DistantHorizonsCompat.depthTextureView() : 0L;
+			long nativeWaterMaskView = nativeRaster ? DistantHorizonsCompat.waterMaskTextureView() : 0L;
+			long nativeWaterMaskImage = nativeRaster ? DistantHorizonsCompat.waterMaskTextureImage() : 0L;
+			float nativeDepthClear = nativeRaster ? DistantHorizonsCompat.depthClearValue() : Float.NaN;
+			boolean nativeMatrixValid = nativeRaster
+					&& DistantHorizonsCompat.inverseViewProjection(this.dhInverseViewProjection);
+			boolean success = RtComposite.INSTANCE.composite(mainTarget.getColorTexture(), mainTarget.width, mainTarget.height,
+					nativeColorView, nativeDepthView, nativeWaterMaskView, nativeWaterMaskImage, nativeDepthClear,
+					nativeMatrixValid ? this.dhInverseViewProjection : null, nativeRaster);
 			VanillaRenderController.INSTANCE.markRtCompositeResult(success);
 		}
 	}

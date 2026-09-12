@@ -104,6 +104,8 @@ public final class RtComposite {
     public static final RtComposite INSTANCE = new RtComposite();
 
     public static boolean enabled() {
+        // Caustica replaces ordinary chunk terrain while LevelRenderer and DH keep native orchestration.
+        // Disabling the optional DH RT ring must never disable Caustica RT itself.
         return CausticaConfig.Rt.ENABLED.value();
     }
 
@@ -238,6 +240,11 @@ public final class RtComposite {
                 flags |= FEATURE_VIEWZ;
             }
         }
+        // Hybrid compositing samples view-Z to distinguish near RT hits from misses that should reveal
+        // the native DH raster already drawn into the main target.
+        if (nativeRasterVisible) {
+            flags |= FEATURE_VIEWZ;
+        }
         return flags;
     }
 
@@ -318,6 +325,7 @@ public final class RtComposite {
     private final SvgfReconstructionBackend svgfBackend = new SvgfReconstructionBackend();
     private final DlssRrReconstructionBackend dlssRrBackend = new DlssRrReconstructionBackend();
     private final ExperimentalNrdBackend nrdBackend = new ExperimentalNrdBackend();
+    private int vramDiagnosticTransition;
     private final UpscalerRuntime upscalers = UpscalerRuntime.INSTANCE;
     // Experimental SHaRC (Spatially Hashed Radiance Cache). Shader-only — the host only owns the
     // persistent cache buffer and publishes its device address (no native lib, no extra binding).
@@ -344,6 +352,22 @@ public final class RtComposite {
     private boolean waterWaveTimeValid;
     private boolean failed;
     private boolean loggedActive;
+    /** Whether native DH raster was rendered into the main target for the current frame. */
+    private boolean nativeRasterVisible;
+    /** VkImageView of DH's native color target, retained for the hybrid display descriptor. */
+    private long nativeColorView;
+    /** VkImageView and exact clear value of DH's depth target; depth is the occupancy authority. */
+    private long nativeDepthView;
+    /** Same-frame native-DH R8 water classification and its backing image. */
+    private long nativeWaterMaskView;
+    private long nativeWaterMaskImage;
+    private float nativeDepthClear;
+    private boolean nativeDhMatrixValid;
+    private final Matrix4f nativeDhInverseViewProjection = new Matrix4f();
+    private float nativeDhLightX;
+    private float nativeDhLightY;
+    private float nativeDhLightZ;
+    private float nativeDhDirectStrength;
 
     // Camera captured each frame from GameRenderer (unjittered level projection + camera rotation + pos).
     private final Matrix4f frameProjection = new Matrix4f();
@@ -371,11 +395,25 @@ public final class RtComposite {
     private FrameInputs pipelineInputs;
     private VkCommandBuffer pipelineCommand;
     private MemoryStack pipelineStack;
+    private RtGpuProfiler.Session pipelineGpuProfile;
+    private dev.comfyfluffy.caustica.rt.trace.IndirectShaderVariant loggedIndirectShaderVariant;
     private ByteBuffer pipelinePushConstants;
     private ReconstructionInput pipelineReconstructionInput;
     private ReconstructionResult pipelineReconstructionResult;
     private UpscaleInput pipelineUpscaleInput;
     private long pipelinePostPresentTarget;
+    private long pipelinePostPresentNativeColorView;
+    private long pipelinePostPresentNativeDepthView;
+    private long pipelinePostPresentNativeWaterMaskView;
+    private long pipelinePostPresentNativeWaterMaskImage;
+    private float pipelinePostPresentNativeDepthClear;
+    private boolean pipelinePostPresentHybrid;
+    private boolean pipelinePostPresentDhLighting;
+    private final Matrix4f pipelinePostPresentDhInverseViewProjection = new Matrix4f();
+    private float pipelinePostPresentDhLightX;
+    private float pipelinePostPresentDhLightY;
+    private float pipelinePostPresentDhLightZ;
+    private float pipelinePostPresentDhDirectStrength;
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -485,8 +523,30 @@ public final class RtComposite {
         RtContext ctx = RtContext.currentOrNull();
         if (ctx != null) {
             ctx.accelerationStructures().recordDiagnostics(RtFrameStats.FRAME);
+            RtFrameStats.FRAME.count("queuedGpuBuildCount", ctx.gpuExecutor().pendingJobCount());
+            RtFrameStats.FRAME.count("lodInstanceCount", RtLodTerrain.frameInstanceCount());
+            RtFrameStats.FRAME.count("dhSourceCount", RtLodTerrain.dhSourceCount());
+            RtFrameStats.FRAME.count("dhBlasCount", RtLodTerrain.dhBlasCount());
+            RtFrameStats.FRAME.count("dhTlasInstanceCount", RtLodTerrain.frameInstanceCount());
+            RtFrameStats.FRAME.count("dhFullyVanillaCoveredCount", RtLodTerrain.dhFullyVanillaCoveredCount());
+            RtFrameStats.FRAME.count("dhPartiallyCoveredCount", RtLodTerrain.dhPartiallyCoveredCount());
+            RtFrameStats.FRAME.count("dhUncoveredCount", RtLodTerrain.dhUncoveredCount());
+            RtFrameStats.FRAME.count("fullTerrainInstanceCount", RtTerrain.terrainPublishedSections());
+            RtFrameStats.FRAME.count("totalTlasInstanceCount",
+                    RtTerrain.terrainPublishedSections() + RtLodTerrain.frameInstanceCount());
+            RtFrameStats.FRAME.count("lodPending", RtLodTerrain.pending() ? 1 : 0);
+            RtFrameStats.FRAME.count("lodCpuPending", RtLodTerrain.cpuPending() ? 1 : 0);
+            RtFrameStats.FRAME.count("lodPackPending", RtLodTerrain.packPending() ? 1 : 0);
+            RtFrameStats.FRAME.count("lodBuildSession", RtLodTerrain.buildSessionActive() ? 1 : 0);
         }
         postProcessing.beginFrame();
+        nativeRasterVisible = false;
+        nativeColorView = 0L;
+        nativeDepthView = 0L;
+        nativeWaterMaskView = 0L;
+        nativeWaterMaskImage = 0L;
+        nativeDepthClear = Float.NaN;
+        nativeDhMatrixValid = false;
     }
 
     /** This frame's completion token, valid until {@link #finishGraphicsUse()} signals it. */
@@ -515,10 +575,25 @@ public final class RtComposite {
         RtFrameStats.FRAME.end();
     }
 
-    public boolean composite(GpuTexture nativeColor, int width, int height) {
+    public boolean composite(GpuTexture nativeColor, int width, int height,
+                             long nativeColorView, long nativeDepthView,
+                             long nativeWaterMaskView, long nativeWaterMaskImage, float nativeDepthClear,
+                             Matrix4f nativeDhInverseViewProjection, boolean nativeRasterVisible) {
         frameCounter++; // global frame serial used by remaining per-frame/entity rings and diagnostics
         VulkanDiagnostics.setInFlight("graphics-latest", "frame=" + frameCounter + " size=" + width + "x" + height);
         postProcessing.beginFrame(); // set true again once this frame's HDR display image is written
+        this.nativeRasterVisible = nativeRasterVisible && nativeColorView != 0L && nativeDepthView != 0L
+                && Float.isFinite(nativeDepthClear);
+        this.nativeColorView = nativeColorView;
+        this.nativeDepthView = nativeDepthView;
+        this.nativeWaterMaskView = nativeWaterMaskView;
+        this.nativeWaterMaskImage = nativeWaterMaskImage;
+        this.nativeDepthClear = nativeDepthClear;
+        this.nativeDhMatrixValid = nativeDhInverseViewProjection != null
+                && nativeDhInverseViewProjection.isFinite();
+        if (this.nativeDhMatrixValid) {
+            this.nativeDhInverseViewProjection.set(nativeDhInverseViewProjection);
+        }
         if (failed) {
             return false;
         }
@@ -683,10 +758,21 @@ public final class RtComposite {
         TraceFrameResources.Configuration configuration = new TraceFrameResources.Configuration(
                 new FrameContext.Extent(width, height), rrEnabled, rrQuality, fsrEnabled, fsrQuality,
                 xessEnabled, xessQuality, svgfEnabled, nrdEnabled);
+        TraceFrameResources.TraceFrameViews previousViews = traceFrameResources.views();
+        int previousRrQuality = previousViews == null
+                ? Integer.MIN_VALUE : previousViews.sizingKey().configuration().rrQuality();
+        boolean rrQualityTransition = rrEnabled && previousRrQuality != Integer.MIN_VALUE
+                && previousRrQuality != rrQuality;
         if (traceFrameResources.matches(configuration)
                 && postProcessing.imagesReady() && postProcessing.exposureReady()) {
             syncRestirResources(ctx);
             return;
+        }
+        if (rrQualityTransition) {
+            vramDiagnosticTransition++;
+            CausticaMod.LOGGER.info("[Caustica VRAM][DLSS quality {}->{}][transition {}][A before] {}",
+                    previousRrQuality, rrQuality, vramDiagnosticTransition,
+                    VulkanDiagnostics.vramSnapshot(ctx));
         }
         recordTemporalReset(TemporalResetReason.RESOLUTION_CHANGE);
         ctx.waitIdle(); // resize is rare; no in-flight frame may use the old image/descriptor
@@ -702,6 +788,11 @@ public final class RtComposite {
         traceFrameResources.releaseGuidesAfterIdle();
         svgfBackend.releaseResources();
         traceFrameResources.releaseReconstructionOutputsAfterIdle();
+        if (rrQualityTransition) {
+            CausticaMod.LOGGER.info("[Caustica VRAM][DLSS quality {}->{}][transition {}][B afterRelease] {}",
+                    previousRrQuality, rrQuality, vramDiagnosticTransition,
+                    VulkanDiagnostics.vramSnapshot(ctx));
+        }
 
         // The path tracer + its guide buffers run at render res; the active upscaler — DLSS-RR
         // (denoise + upscale) or FSR 3 (upscale only) — or a fallback blit brings the image to
@@ -742,6 +833,11 @@ public final class RtComposite {
                     views.viewZ().view, views.specularAlbedo().view, views.normal().view));
         }
         postProcessing.ensureExposure(ctx);
+        if (rrQualityTransition) {
+            CausticaMod.LOGGER.info("[Caustica VRAM][DLSS quality {}->{}][transition {}][C afterTraceCreate render={}x{}] {}",
+                    previousRrQuality, rrQuality, vramDiagnosticTransition,
+                    views.renderWidth(), views.renderHeight(), VulkanDiagnostics.vramSnapshot(ctx));
+        }
 
         broadcastTemporalReset(() -> {
             if (svgfEnabled) {
@@ -756,7 +852,7 @@ public final class RtComposite {
             waterWaveTimeValid = false;
         });
         worldTraceResources.bindFrameViews(traceFrameViews());
-        postProcessing.bind(views.rrOutput());
+        postProcessing.bind(views.rrOutput(), views.viewZ());
     }
 
     /**
@@ -810,7 +906,9 @@ public final class RtComposite {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world primary trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.tracePrimary")) {
+            pipelineGpuProfile.begin(RtGpuProfiler.Region.PRIMARY);
             worldTraceResources.trace(pipelineCommand, frameViews().renderWidth(), frameViews().renderHeight(), pipelinePushConstants, 0);
+            pipelineGpuProfile.end(RtGpuProfiler.Region.PRIMARY);
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
@@ -818,7 +916,16 @@ public final class RtComposite {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world indirect trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
-            worldTraceResources.trace(pipelineCommand, frameViews().renderWidth(), frameViews().renderHeight(), pipelinePushConstants, 1);
+            pipelineGpuProfile.begin(RtGpuProfiler.Region.INDIRECT);
+            var indirectVariant = dev.comfyfluffy.caustica.rt.trace.IndirectShaderVariant
+                    .select(pipelineInputs.rrPath(), pipelineInputs.nrdPath());
+            if (indirectVariant != loggedIndirectShaderVariant) {
+                CausticaMod.LOGGER.info("Indirect shader variant: {}", indirectVariant);
+                loggedIndirectShaderVariant = indirectVariant;
+            }
+            worldTraceResources.trace(pipelineCommand, frameViews().renderWidth(), frameViews().renderHeight(),
+                    pipelinePushConstants, indirectVariant.raygenIndex());
+            pipelineGpuProfile.end(RtGpuProfiler.Region.INDIRECT);
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
@@ -844,11 +951,13 @@ public final class RtComposite {
                 ? pipelineReconstructionInput.denoisedSource() : frameViews().output();
 
         if (pipelineInputs.rrPath()) {
+            pipelineGpuProfile.begin(RtGpuProfiler.Region.DLSS_RR);
             dev.comfyfluffy.caustica.rt.reconstruction.ReconstructionResult result = dlssRrBackend.execute(
                     new DlssRrReconstructionBackend.Request(ctx, cmd, frameViews().output(), frameViews().depth(), frameViews().motion(), frameViews().albedo(),
                             frameViews().specularAlbedo(), frameViews().normal(), frameViews().specularMotion(), frameViews().rrOutput(),
                             frameViews().renderWidth(), frameViews().renderHeight(), frameViews().displayWidth(), frameViews().displayHeight(),
                             -frame.jitter().x(), -frame.jitter().y(), frameViewRotation, frameProjection));
+            pipelineGpuProfile.end(RtGpuProfiler.Region.DLSS_RR);
             rrDone = result.executed();
             if (rrDone) {
                 upscaleSource = result.output();
@@ -860,11 +969,13 @@ public final class RtComposite {
         if (pipelineInputs.svgfPath() && !pipelineReconstructionInput.nrdDone()
                 && !pipelineReconstructionInput.nrdValidationOn()
                 && svgfBackend.available() && frameViews().viewZ() != null) {
+            pipelineGpuProfile.begin(RtGpuProfiler.Region.SVGF);
             dev.comfyfluffy.caustica.rt.reconstruction.ReconstructionResult result = svgfBackend.execute(
                     new SvgfReconstructionBackend.Request(ctx, cmd, stack, upscaleSource,
                             frameViews().motion(), frameViews().viewZ(), frameViews().normal(), frameViews().albedo(), frameViews().renderWidth(), frameViews().renderHeight(),
                             svgfDebugView ? pipelineReconstructionInput.debugView() : 0,
                             frameViewRotation, camX, camY, camZ));
+            pipelineGpuProfile.end(RtGpuProfiler.Region.SVGF);
             upscaleSource = result.output();
             svgfRan = result.executed();
         }
@@ -879,6 +990,7 @@ public final class RtComposite {
         RtContext ctx = pipelineContext;
         VkCommandBuffer cmd = pipelineCommand;
         MemoryStack stack = pipelineStack;
+        pipelineGpuProfile.begin(RtGpuProfiler.Region.UPSCALE);
         boolean rrDone = pipelineUpscaleInput.rrDone();
         dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend barrierBackend =
                 dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.DLSS_RR;
@@ -931,6 +1043,7 @@ public final class RtComposite {
             CausticaMod.LOGGER.info("AER-083 upscaler barriers: path={}, scope=legacy-conservative", barrierMode);
             loggedUpscalerBarrierMode = barrierMode;
         }
+        pipelineGpuProfile.end(RtGpuProfiler.Region.UPSCALE);
     }
 
     private void postPresentFrame(FrameContext frame) {
@@ -940,7 +1053,15 @@ public final class RtComposite {
         }
         boolean postHdr = CausticaConfig.Rt.Hdr.enabled();
         postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, frameViews().rrOutput(),
-                frameViews().displayWidth(), frameViews().displayHeight(), pipelinePostPresentTarget, postHdr);
+                frameViews().renderWidth(), frameViews().renderHeight(),
+                frameViews().displayWidth(), frameViews().displayHeight(), pipelinePostPresentTarget,
+                pipelinePostPresentNativeColorView, pipelinePostPresentNativeDepthView,
+                pipelinePostPresentNativeWaterMaskView, pipelinePostPresentNativeWaterMaskImage,
+                pipelinePostPresentNativeDepthClear, pipelinePostPresentHybrid,
+                pipelinePostPresentDhLighting, pipelinePostPresentDhInverseViewProjection,
+                pipelinePostPresentDhLightX, pipelinePostPresentDhLightY, pipelinePostPresentDhLightZ,
+                pipelinePostPresentDhDirectStrength, postHdr, pipelineGpuProfile,
+                camX, camY, camZ, pendingGraphicsUse);
     }
 
     private FrameInputs prepareFrameInputs() {
@@ -995,6 +1116,8 @@ public final class RtComposite {
         RtEntities.EntitySceneContribution entityContribution = null;
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
         RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_COMMAND_BUFFER, cmd.address(), "composite command buffer");
+        RtGpuProfiler.Session gpuProfile = ctx.gpuProfiler().beginGraphicsFrame(cmd);
+        pipelineGpuProfile = gpuProfile;
         int debugView = debugView();
         RtTerrain terrain = RtTerrain.currentOrNull();
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope frameLabel = RtDebugLabels.scope(ctx, cmd, "composite frame")) {
@@ -1133,6 +1256,23 @@ public final class RtComposite {
             // Dimension + weather drive the sky model and the celestial light, so both are resolved
             // together, once, from the same level and partial tick.
             EnvironmentParameters environment = environmentParameters(level);
+            Float4 dhLightDir = environment.sky().lightDir();
+            Float4 dhLightRadiance = environment.sky().lightRadiance();
+            float dhLightLength = (float) Math.sqrt(dhLightDir.x() * dhLightDir.x()
+                    + dhLightDir.y() * dhLightDir.y() + dhLightDir.z() * dhLightDir.z());
+            if (dhLightLength > 1.0e-6f) {
+                nativeDhLightX = dhLightDir.x() / dhLightLength;
+                nativeDhLightY = dhLightDir.y() / dhLightLength;
+                nativeDhLightZ = dhLightDir.z() / dhLightLength;
+            } else {
+                nativeDhLightX = nativeDhLightY = nativeDhLightZ = 0.0f;
+            }
+            // Rec.709 luminance of the same weather-attenuated celestial radiance used by RT NEE.
+            // The clear-noon peak is authored as 21 in skyPush; this ratio is a bounded correction
+            // strength over DH's already-lightmapped color, not a second direct-light contribution.
+            float dhLightLuminance = 0.2126f * dhLightRadiance.x()
+                    + 0.7152f * dhLightRadiance.y() + 0.0722f * dhLightRadiance.z();
+            nativeDhDirectStrength = Math.clamp(dhLightLuminance / 21.0f, 0.0f, 1.0f);
             // Analytic held-item light: position + intensity lane and the item's RGB tint; w == 0
             // disables the shader term (toggle off, no luminous item, or no player).
             HandLightState hand = handLightState(terrain);
@@ -1222,7 +1362,9 @@ public final class RtComposite {
             // Barriers separate each stage; the graphics-use timeline guards resource reuse.
             if (!fe.blas().isEmpty()) {
                 try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.blasRecord")) {
+                    gpuProfile.begin(RtGpuProfiler.Region.ENTITY_BLAS);
                     ctx.accelerationStructures().recordBuilds(ctx, cmd, fe.blas());
+                    gpuProfile.end(RtGpuProfiler.Region.ENTITY_BLAS);
                 }
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // entity BLAS writes visible to the TLAS build
             }
@@ -1235,7 +1377,9 @@ public final class RtComposite {
             worldTraceResources.bindTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
             currentTlasHandle = frameTlas.accel.handle;
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.recordTlas")) {
+                gpuProfile.begin(RtGpuProfiler.Region.TLAS);
                 ctx.accelerationStructures().recordTlas(ctx, cmd, frameTlas);
+                gpuProfile.end(RtGpuProfiler.Region.TLAS);
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
 
@@ -1294,6 +1438,7 @@ public final class RtComposite {
             boolean nrdDone = false;
             RtImage denoisedSource = null;
             if (nrdPath && frameViews().viewZ() != null && frameViews().nrdDiffuseOutput() != null) {
+                gpuProfile.begin(RtGpuProfiler.Region.NRD);
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "NRD denoise");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrd")) {
                     // The camera goes in as ABSOLUTE world coordinates plus the terrain anchor the
@@ -1327,6 +1472,7 @@ public final class RtComposite {
                     }
                     denoisedSource = frameViews().nrdCombined();
                 }
+                gpuProfile.end(RtGpuProfiler.Region.NRD);
             }
 
             // Validation mode: REBLUR's 16-viewport diagnostic overlay replaces the image (set the
@@ -1370,18 +1516,51 @@ public final class RtComposite {
             pipelineCommand = cmd;
             pipelineStack = stack;
             pipelinePostPresentTarget = dstImage;
+            // The view is supplied by WorldRenderScaler from DH's own color wrapper; the VkImage handle
+            // above is still resolved separately for the final copy into Minecraft's main target.
+            pipelinePostPresentNativeColorView = this.nativeColorView;
+            pipelinePostPresentNativeDepthView = this.nativeDepthView;
+            pipelinePostPresentNativeWaterMaskView = this.nativeWaterMaskView;
+            pipelinePostPresentNativeWaterMaskImage = this.nativeWaterMaskImage;
+            pipelinePostPresentNativeDepthClear = this.nativeDepthClear;
+            pipelinePostPresentHybrid = nativeRasterVisible;
+            pipelinePostPresentDhLighting = nativeRasterVisible && nativeDhMatrixValid
+                    && CausticaConfig.Rt.Terrain.DH_FAR_LIGHTING.value();
+            if (pipelinePostPresentDhLighting) {
+                pipelinePostPresentDhInverseViewProjection.set(this.nativeDhInverseViewProjection);
+            }
+            pipelinePostPresentDhLightX = nativeDhLightX;
+            pipelinePostPresentDhLightY = nativeDhLightY;
+            pipelinePostPresentDhLightZ = nativeDhLightZ;
+            pipelinePostPresentDhDirectStrength = nativeDhDirectStrength;
             try {
                 pipelineCursor.executeNext();
             } finally {
                 pipelineCommand = null;
                 pipelineStack = null;
                 pipelinePostPresentTarget = 0L;
+                pipelinePostPresentNativeColorView = 0L;
+                pipelinePostPresentNativeDepthView = 0L;
+                pipelinePostPresentNativeWaterMaskView = 0L;
+                pipelinePostPresentNativeWaterMaskImage = 0L;
+                pipelinePostPresentNativeDepthClear = Float.NaN;
+                pipelinePostPresentHybrid = false;
+                pipelinePostPresentDhLighting = false;
             }
         }
+        gpuProfile.finish();
         if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
+            gpuProfile.abort();
+            pipelineGpuProfile = null;
             throw new IllegalStateException("vkEndCommandBuffer(rt composite) failed");
         }
-        encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
+        pipelineGpuProfile = null;
+        try {
+            encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
+        } catch (Throwable failure) {
+            gpuProfile.abort();
+            throw failure;
+        }
         // Submission order on the one graphics queue is the history dependency: next frame reads the half
         // this frame just wrote and writes the other half. Advance only after execute accepted the command.
         restirSystem.advance();

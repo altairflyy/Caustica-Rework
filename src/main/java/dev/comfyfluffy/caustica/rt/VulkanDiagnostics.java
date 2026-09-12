@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vulkan.init.VulkanFeature;
 import com.mojang.blaze3d.vulkan.init.VulkanPNextStruct;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.Version;
 import org.lwjgl.system.MemoryStack;
@@ -61,6 +62,7 @@ import static org.lwjgl.vulkan.EXTDeviceFault.VK_EXT_DEVICE_FAULT_EXTENSION_NAME
 
 /** Startup Vulkan inventory and best-effort {@code VK_EXT_device_fault} reporting. */
 public final class VulkanDiagnostics {
+    public record MemoryBudget(long usage, long budget) { }
     private static final int MAX_FAULT_RECORDS = 64;
     private static final int MAX_BREADCRUMBS = 96;
     private static final long MAX_VENDOR_BINARY_BYTES = 64L * 1024L * 1024L;
@@ -411,6 +413,43 @@ public final class VulkanDiagnostics {
         }
     }
 
+    /** Temporary, transition-scoped VRAM diagnostic; never called from the steady-state frame path. */
+    public static String vramSnapshot(RtContext context) {
+        long bdaBytes = BUFFERS.values().stream().mapToLong(BufferRange::size).sum();
+        StringBuilder out = new StringBuilder("bdaBuffers=").append(BUFFERS.size())
+                .append('/').append(formatBytes(bdaBytes))
+                .append(" asLive=").append(RtAccel.liveCount())
+                .append(" blasLive=").append(formatBytes(RtAccel.liveBlasBytes()));
+        if (context == null || memoryHeapCount <= 0) return out.toString();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VmaBudget.Buffer budgets = VmaBudget.calloc(memoryHeapCount, stack);
+            Vma.vmaGetHeapBudgets(context.vma(), budgets);
+            for (int i = 0; i < memoryHeapCount; i++) {
+                VmaBudget budget = budgets.get(i);
+                out.append(" heap").append(i).append("{usage=").append(formatBytes(budget.usage()))
+                        .append(",budget=").append(formatBytes(budget.budget()))
+                        .append(",vmaAlloc=").append(formatBytes(budget.statistics().allocationBytes()))
+                        .append(",allocs=").append(budget.statistics().allocationCount()).append('}');
+            }
+        } catch (Throwable t) {
+            out.append(" heapSnapshotError=").append(t.getClass().getSimpleName());
+        }
+        return out.toString();
+    }
+
+    /** Global device-local heap signal; callers must not attribute it to one subsystem. */
+    public static MemoryBudget memoryBudget(RtContext context) {
+        if (context == null || memoryHeapCount <= 0) return new MemoryBudget(0L, 0L);
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VmaBudget.Buffer budgets = VmaBudget.calloc(memoryHeapCount, stack);
+            Vma.vmaGetHeapBudgets(context.vma(), budgets);
+            VmaBudget budget = budgets.get(0);
+            return new MemoryBudget(budget.usage(), budget.budget());
+        } catch (Throwable ignored) {
+            return new MemoryBudget(0L, 0L);
+        }
+    }
+
     private static void logNvQueueCheckpoints(VkQueue queue, String label) {
         if (queue.getCapabilities().vkGetQueueCheckpointDataNV == 0L) {
             return;
@@ -579,7 +618,7 @@ public final class VulkanDiagnostics {
                 VK10.VK_VERSION_MINOR(packed), VK10.VK_VERSION_PATCH(packed));
     }
 
-    private static String formatBytes(long bytes) {
+    public static String formatBytes(long bytes) {
         if (bytes < 0L) return "unknown";
         return String.format(Locale.ROOT, "%.2f MiB", bytes / (1024.0 * 1024.0));
     }

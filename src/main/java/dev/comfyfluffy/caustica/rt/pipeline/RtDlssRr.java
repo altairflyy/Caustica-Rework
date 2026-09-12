@@ -5,6 +5,7 @@ import com.mojang.blaze3d.vulkan.VulkanDevice;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtContext;
+import dev.comfyfluffy.caustica.rt.VulkanDiagnostics;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.mixin.GpuDeviceAccessor;
 import dev.comfyfluffy.caustica.ngx.NgxLibrary;
@@ -23,6 +24,7 @@ import java.lang.foreign.ValueLayout;
  */
 public final class RtDlssRr {
     public static final RtDlssRr INSTANCE = new RtDlssRr();
+    private long vramDiagnosticRecreation;
 
     /**
      * Whether the RR denoise+upscale pass should run this frame. Two switches gate it and both must be
@@ -219,7 +221,16 @@ public final class RtDlssRr {
                     || featureDisplayWidth != displayWidth || featureDisplayHeight != displayHeight
                     || featureQuality != quality || featurePreset != preset
                     || isNull(feature)) {
+                long recreation = ++vramDiagnosticRecreation;
+                int oldQuality = featureQuality;
+                RtContext diagnosticContext = RtContext.currentOrNull();
+                CausticaMod.LOGGER.info(
+                        "[Caustica VRAM][NGX-RR recreation {}][A beforeRelease oldQuality={} newQuality={}] {}",
+                        recreation, oldQuality, quality, VulkanDiagnostics.vramSnapshot(diagnosticContext));
                 releaseFeature(device);
+                CausticaMod.LOGGER.info(
+                        "[Caustica VRAM][NGX-RR recreation {}][B afterRelease oldQuality={} newQuality={}] {}",
+                        recreation, oldQuality, quality, VulkanDiagnostics.vramSnapshot(diagnosticContext));
                 feature = lib.createDlssd(cmd, renderWidth, renderHeight, displayWidth, displayHeight,
                         quality, FEATURE_FLAGS, preset);
                 if (isNull(feature)) {
@@ -233,6 +244,9 @@ public final class RtDlssRr {
                 featureQuality = quality;
                 featurePreset = preset;
                 resetHistory = true; // a fresh feature has no temporal history
+                CausticaMod.LOGGER.info(
+                        "[Caustica VRAM][NGX-RR recreation {}][C afterCreate oldQuality={} newQuality={}] {}",
+                        recreation, oldQuality, quality, VulkanDiagnostics.vramSnapshot(diagnosticContext));
                 CausticaMod.LOGGER.info("DLSS-RR feature created: {}x{} -> {}x{} (quality {}, preset {})",
                         renderWidth, renderHeight, displayWidth, displayHeight, quality, preset);
             }

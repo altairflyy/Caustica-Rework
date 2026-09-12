@@ -32,7 +32,7 @@ class PostProcessingOwnershipTest {
                 "svgfBackend.ensureResources(ctx", "traceFrameResources.createReconstructionOutputs(ctx)",
                 "nrdBackend.bindCombine(ctx", "postProcessing.ensureExposure(ctx)",
                 "broadcastTemporalReset", "worldTraceResources.bindFrameViews(traceFrameViews())",
-                "postProcessing.bind(views.rrOutput())");
+                "postProcessing.bind(views.rrOutput(), views.viewZ())");
         ordered(source.substring(source.indexOf("public void destroy()")),
                 "postProcessing.destroyImages()", "RtWorldOverlay.INSTANCE.destroy()",
                 "traceFrameResources.release()", "restirSystem.destroy()",
@@ -54,7 +54,7 @@ class PostProcessingOwnershipTest {
     @Test void postOwnerPreservesExposureDispatchBarrierAndCompletionOrder() throws Exception {
         String owner = Files.readString(ROOT.resolve("post/PostProcessing.java"));
         ordered(owner.substring(owner.indexOf("public void record(")),
-                "exposure.record(ctx, cmd, stack, rrOutput, postHdr)", "PostBarrierPlan.DISPLAY",
+                "exposure.record(ctx, cmd, stack, rrOutput, postHdr, gpuProfile)", "PostBarrierPlan.DISPLAY",
                 "displayPipeline.dispatch(cmd, displayW, displayH, postHdr",
                 "hdrWrittenThisFrame = postHdr", "PostBarrierPlan.COPY", "VK10.vkCmdCopyImage",
                 "PostBarrierPlan.EXPORT");

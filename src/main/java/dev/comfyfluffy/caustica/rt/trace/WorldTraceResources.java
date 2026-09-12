@@ -231,7 +231,8 @@ public final class WorldTraceResources {
         bindlessTextureCapacity = RtEntityTextures.maxTextures();
         worldPipeline = RtPipeline.create(ctx, new String[]{
                         RtDeviceBringup.worldPrimaryRaygenShader(),
-                        RtDeviceBringup.worldRaygenShader()},
+                        RtDeviceBringup.worldRaygenShader(),
+                        RtDeviceBringup.worldLeanRaygenShader()},
                 new String[]{"world.rmiss.spv", "world_guide.rmiss.spv"},
                 "world.rchit.spv", "world.rahit.spv",
                 WorldPushConstantsData.BYTE_SIZE, true, guideCount, bindlessTextureCapacity, true);

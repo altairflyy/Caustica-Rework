@@ -47,4 +47,16 @@ class FrameGenerationEffectiveCountTest {
         assertEquals(0, RtFramePresenter.effectiveGeneratedCount(0, 4));
         assertEquals(0, RtFramePresenter.effectiveGeneratedCount(-1, 4));
     }
+
+    @Test
+    void presentRateSeparatesRenderedGeneratedAndActuallyPresentedFrames() {
+        RtFramePresenter.PresentRateSnapshot rate = RtFramePresenter.samplePresentRate(
+                30, 30, 1_000_000_000L, 5_000_000_000L);
+
+        assertEquals(30.0, rate.realFps(), 1e-6);
+        assertEquals(30.0, rate.generatedFps(), 1e-6);
+        assertEquals(60.0, rate.totalPresentFps(), 1e-6);
+        assertEquals(30, rate.realFrames());
+        assertEquals(30, rate.generatedFrames());
+    }
 }

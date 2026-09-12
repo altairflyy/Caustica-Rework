@@ -33,6 +33,7 @@ import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructurePropertiesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceDescriptorIndexingProperties;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties2;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPipelinePropertiesKHR;
+import org.lwjgl.vulkan.VkQueueFamilyProperties;
 import org.lwjgl.vulkan.VkSubmitInfo;
 
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
@@ -42,6 +43,7 @@ import dev.comfyfluffy.caustica.rt.gpu.DeferredDeletionQueue;
 import dev.comfyfluffy.caustica.rt.gpu.FrameTailRetirement;
 import dev.comfyfluffy.caustica.rt.gpu.VulkanFrameTailRetirement;
 
+import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.util.function.Consumer;
 
@@ -64,6 +66,7 @@ public final class RtContext {
     private final VulkanQueue computeQueue;
     /** Serializes device-wide host waits against submissions from the Caustica compute thread. */
     private final Object deviceQueueHostLock = new Object();
+    private final RtGpuProfiler gpuProfiler;
     private final RtGpuExecutor gpuExecutor;
     private final DeferredDeletionQueue deferredDeletionQueue;
     private final FrameTailRetirement frameTailRetirement;
@@ -77,7 +80,9 @@ public final class RtContext {
     private long commandPool;
 
     private RtContext(VulkanDevice device, long vma, int handleSize, int baseAlign, int handleAlign,
-                      int maxSbtStride, int scratchAlign, long updateAfterBindCombinedImageSamplerLimit) {
+                      int maxSbtStride, int scratchAlign, long updateAfterBindCombinedImageSamplerLimit,
+                      double timestampPeriodNanos, int graphicsTimestampValidBits,
+                      int computeTimestampValidBits) {
         this.device = device;
         this.vk = device.vkDevice();
         this.vma = vma;
@@ -90,6 +95,8 @@ public final class RtContext {
         this.maxShaderGroupStride = maxSbtStride;
         this.accelerationStructureScratchAlignment = scratchAlign;
         this.updateAfterBindCombinedImageSamplerLimit = updateAfterBindCombinedImageSamplerLimit;
+        this.gpuProfiler = new RtGpuProfiler(this, timestampPeriodNanos,
+                graphicsTimestampValidBits, computeTimestampValidBits);
         this.gpuExecutor = new RtGpuExecutor(this);
         this.deferredDeletionQueue = new DeferredDeletionQueue(gpuExecutor);
         this.frameTailRetirement = new VulkanFrameTailRetirement(device.createCommandEncoder());
@@ -172,9 +179,24 @@ public final class RtContext {
                     Integer.toUnsignedLong(rtProps.maxShaderGroupStride()),
                     asProps.minAccelerationStructureScratchOffsetAlignment(), combinedImageSamplerLimit);
 
+            int graphicsTimestampValidBits = timestampValidBits(phys, device.graphicsQueue().queueFamilyIndex());
+            int computeTimestampValidBits = timestampValidBits(phys, RtDeviceBringup.computeQueueFamilyIndex());
+
             return new RtContext(device, pVma.get(0), rtProps.shaderGroupHandleSize(), rtProps.shaderGroupBaseAlignment(),
                     rtProps.shaderGroupHandleAlignment(), rtProps.maxShaderGroupStride(),
-                    asProps.minAccelerationStructureScratchOffsetAlignment(), combinedImageSamplerLimit);
+                    asProps.minAccelerationStructureScratchOffsetAlignment(), combinedImageSamplerLimit,
+                    limits.timestampPeriod(), graphicsTimestampValidBits, computeTimestampValidBits);
+        }
+    }
+
+    private static int timestampValidBits(VkPhysicalDevice physicalDevice, int queueFamilyIndex) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer count = stack.ints(0);
+            VK10.vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, count, null);
+            if (queueFamilyIndex < 0 || queueFamilyIndex >= count.get(0)) return 0;
+            VkQueueFamilyProperties.Buffer families = VkQueueFamilyProperties.calloc(count.get(0), stack);
+            VK10.vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, count, families);
+            return families.get(queueFamilyIndex).timestampValidBits();
         }
     }
 
@@ -200,6 +222,10 @@ public final class RtContext {
 
     public RtGpuExecutor gpuExecutor() {
         return gpuExecutor;
+    }
+
+    public RtGpuProfiler gpuProfiler() {
+        return gpuProfiler;
     }
 
     public DeferredDeletionQueue deferredDeletionQueue() {
@@ -546,6 +572,7 @@ public final class RtContext {
 
     public void destroy() {
         gpuExecutor.destroyAfterQuiescence();
+        gpuProfiler.destroy();
         accelerationStructureManager.destroy();
         if (commandPool != 0L) {
             VK10.vkDestroyCommandPool(vk, commandPool, null);

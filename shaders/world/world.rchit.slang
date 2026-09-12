@@ -222,6 +222,16 @@ ParallaxHit parallaxTrace(MaterialHeader header, float2 atlasUv, float lod, floa
         return flatHit;
     }
 
+    // POM is disabled by setting the authored relief depth to zero. Test that lane before building
+    // the tangent frame or evaluating camera/grazing/edge fades so the feature-off path pays only
+    // the WorldPush load and this branch. The later reliefDepth test still handles fades that reduce
+    // an enabled effect to zero, and the enabled result is unchanged.
+    WorldPush worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
+    float4 parallaxParams = worldPush.parallaxParams;
+    if (parallaxParams.x <= 1.0e-5) {
+        return flatHit;
+    }
+
     float2 g1 = uv1 - uv0;
     float2 g2 = uv2 - uv0;
     float det = g1.x * g2.y - g1.y * g2.x;
@@ -239,8 +249,6 @@ ParallaxHit parallaxTrace(MaterialHeader header, float2 atlasUv, float lod, floa
 
     float2 localUv = clamp((atlasUv - header.albedoUv.xy) * header.albedoUv.zw,
             float2(0.0, 0.0), float2(1.0, 1.0));
-    WorldPush worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
-    float4 parallaxParams = worldPush.parallaxParams;
     float maxDistance = max(parallaxParams.w, 1.0);
     float3 hitPosition = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
     float cameraDistance = length(hitPosition - worldPush.camOffset);

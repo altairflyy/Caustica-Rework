@@ -53,6 +53,71 @@ public final class LodCoverageResolver {
         return !relevant.isEmpty() && coveredSquare(target.x, target.z, target.width, relevant);
     }
 
+    /** Conservative CPU-side result used before a DH BLAS is inserted into the frame TLAS. */
+    public enum VanillaCoverage {
+        FULL,
+        PARTIAL,
+        NONE
+    }
+
+    @FunctionalInterface
+    public interface SectionReadiness {
+        boolean isReady(int sectionX, int sectionY, int sectionZ);
+    }
+
+    @FunctionalInterface
+    public interface SectionWindow {
+        boolean contains(int sectionX, int sectionY, int sectionZ);
+    }
+
+    /**
+     * Resolve a conservative 3-D vanilla replacement state for one spatial DH tile.  Anything outside
+     * the current readiness window is PARTIAL (never FULL), while NONE is reserved for an entirely
+     * in-window tile with no authoritative ready section.  A bounded scan prevents malformed or very
+     * tall provider metadata from becoming a render-thread hitch; the safe result is PARTIAL.
+     */
+    public static VanillaCoverage resolveVanillaCoverage(CoverageRect tile,
+                                                         SectionReadiness readiness,
+                                                         SectionWindow window) {
+        int minSectionX = Math.floorDiv(tile.x(), 16);
+        int minSectionZ = Math.floorDiv(tile.z(), 16);
+        int maxSectionX = Math.floorDiv(Math.addExact(tile.x(), Math.max(0, tile.width() - 1)), 16);
+        int maxSectionZ = Math.floorDiv(Math.addExact(tile.z(), Math.max(0, tile.width() - 1)), 16);
+        int minSectionY;
+        int maxSectionY;
+        if (!tile.hasVerticalBounds()) {
+            return VanillaCoverage.PARTIAL;
+        }
+        minSectionY = Math.floorDiv(tile.minY(), 16);
+        maxSectionY = Math.floorDiv(Math.addExact(tile.maxY() - 1, 0), 16);
+        long cells = (long) (maxSectionX - minSectionX + 1)
+                * (maxSectionY - minSectionY + 1)
+                * (maxSectionZ - minSectionZ + 1);
+        if (cells <= 0L || cells > 1_000_000L) {
+            return VanillaCoverage.PARTIAL;
+        }
+        boolean anyReady = false;
+        boolean anyMissing = false;
+        boolean outside = false;
+        for (int sy = minSectionY; sy <= maxSectionY; sy++) {
+            for (int sz = minSectionZ; sz <= maxSectionZ; sz++) {
+                for (int sx = minSectionX; sx <= maxSectionX; sx++) {
+                    if (!window.contains(sx, sy, sz)) {
+                        outside = true;
+                        anyMissing = true;
+                    } else if (readiness.isReady(sx, sy, sz)) {
+                        anyReady = true;
+                    } else {
+                        anyMissing = true;
+                    }
+                }
+            }
+        }
+        if (!anyMissing) return VanillaCoverage.FULL;
+        if (!anyReady && !outside) return VanillaCoverage.NONE;
+        return VanillaCoverage.PARTIAL;
+    }
+
     private static boolean coveredSquare(int x, int z, int width, List<CoverageRect> candidates) {
         for (CoverageRect candidate : candidates) {
             if (contains(candidate, x, z, width)) return true;
@@ -103,6 +168,22 @@ public final class LodCoverageResolver {
     }
 
     /** Provider-neutral rectangle used by both planning and progressive eviction. */
-    public record CoverageRect(long key, int x, int z, int width, int detailWidth) {
+    public record CoverageRect(long key, int x, int z, int width, int detailWidth,
+                               int minY, int maxY) {
+        public CoverageRect(long key, int x, int z, int width, int detailWidth) {
+            this(key, x, z, width, detailWidth, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        }
+
+        public CoverageRect {
+            if (width < 0) throw new IllegalArgumentException("width must be non-negative");
+            if (maxY < minY) throw new IllegalArgumentException("maxY must be >= minY");
+        }
+
+        public boolean hasVerticalBounds() {
+            return minY != Integer.MIN_VALUE && maxY != Integer.MAX_VALUE && maxY > minY;
+        }
+
+        public int maxX() { return Math.addExact(x, width); }
+        public int maxZ() { return Math.addExact(z, width); }
     }
 }

@@ -5,6 +5,7 @@ import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
+import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 import java.util.List;
@@ -111,6 +112,9 @@ public final class AccelerationStructureManager {
 
     public void recordTlas(RtContext ctx, VkCommandBuffer command, RtAccel.PreparedTlas tlas) {
         RtAccel.recordTlasBuild(ctx, command, tlas);
+        RtFrameStats.FRAME.count(tlas.isUpdate() ? "tlasUpdateCount" : "tlasBuildCount", 1);
+        RtFrameStats.FRAME.count("tlasInstanceCount", tlas.instanceCount());
+        RtFrameStats.FRAME.count("tlasCapacity", tlas.capacity());
     }
 
     public void retire(RtGpuExecutor.GraphicsUse lastUse, Runnable destroy) {
@@ -124,6 +128,11 @@ public final class AccelerationStructureManager {
     public void recordDiagnostics(RtFrameStats.Profile profile) {
         profile.count("gpuRetiredResourcesPending", deletionQueue.pendingRetirements());
         profile.count("gpuDeferredDestroyQueueDepth", deletionQueue.queueDepth());
+        profile.count("terrainBlasAllocatedBytes", RtAccel.terrainBlasAllocatedBytes());
+        profile.count("terrainBlasCompactedBytes", RtAccel.terrainBlasCompactedBytes());
+        profile.count("terrainBlasLiveBytes", RtTerrain.terrainBlasLiveBytes());
+        profile.count("terrainResidentSections", RtTerrain.terrainResidentSections());
+        profile.count("terrainPublishedSections", RtTerrain.terrainPublishedSections());
         profile.count("gpuAsLiveCount", RtAccel.liveCount());
         profile.count("gpuBlasLiveBytes", RtAccel.liveBlasBytes());
     }

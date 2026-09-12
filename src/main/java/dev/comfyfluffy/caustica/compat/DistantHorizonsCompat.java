@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import dev.comfyfluffy.caustica.rt.lod.DhLodMeshSource;
 import dev.comfyfluffy.caustica.rt.lod.LodMesh;
 import dev.comfyfluffy.caustica.rt.lod.LodProviderSelector;
+import dev.comfyfluffy.caustica.CausticaConfig;
 
 /** Lightweight, API-independent Distant Horizons hybrid-rendering gate. */
 public final class DistantHorizonsCompat {
@@ -59,7 +60,12 @@ public final class DistantHorizonsCompat {
      */
     public static void captureLodBuffers(long pos, Object level, List<ByteBuffer> opaque,
                                          List<ByteBuffer> transparent) {
-        if (!LOADED) return;
+        dev.comfyfluffy.caustica.rt.proxy.DhFarFieldProxy.get().onLodBuffers(pos, level, opaque, transparent);
+        if (!dhRtRingEnabled()) {
+            // Do not retain multi-megabyte DH VBO copies when the Caustica RT bridge is disabled.
+            resetDhCapturedLods();
+            return;
+        }
         ensureCurrentWorldScope();
         try {
             LodMesh previous = LOD_MESHES.get(pos);
@@ -109,7 +115,7 @@ public final class DistantHorizonsCompat {
 
     /** DH-only snapshot used by {@link DhLodMeshSource}; Voxy selection stays in {@link #lodMeshesSnapshot()}. */
     public static List<LodMesh> dhLodMeshesSnapshot() {
-        if (!LOADED) return List.of();
+        if (!dhRtRingEnabled()) return List.of();
         ensureCurrentWorldScope();
         try {
             Set<Long> active = RenderApi.INSTANCE.activeLodPositions();
@@ -178,7 +184,7 @@ public final class DistantHorizonsCompat {
 
     /** DH-only revision used by {@link DhLodMeshSource}. */
     public static long dhLodRevision() {
-        if (!LOADED) return 0L;
+        if (!dhRtRingEnabled()) return 0L;
         ensureCurrentWorldScope();
         return LOD_REVISION.get();
     }
@@ -251,6 +257,20 @@ public final class DistantHorizonsCompat {
     }
 
     public static boolean enabled() {
+        // Voxy keeps its own enable switch. The Caustica DH switch controls only conversion of DH
+        // upload buffers into RT geometry; it must not make the native DH raster disappear.
+        return available() && (VoxyCompat.active() || dhRtRingEnabled());
+    }
+
+    /** True only when DH uploads may be retained and converted into the bounded Caustica RT ring. */
+    public static boolean dhRtRingEnabled() {
+        return LOADED
+                && CausticaConfig.Rt.Terrain.DH_RT_ENABLED.value()
+                && CausticaConfig.Rt.Terrain.DH_RT_DISTANCE_CHUNKS.value() > 0;
+    }
+
+    /** Whether an optional distant-geometry provider is present, regardless of its Caustica RT switch. */
+    public static boolean available() {
         return LOADED || VoxyCompat.active();
     }
 
@@ -361,6 +381,21 @@ public final class DistantHorizonsCompat {
         }
     }
 
+    /** True when the native DH mixin is present; Caustica never calls the renderer itself. */
+    public static boolean nativeHookInstalled() {
+        return LOADED;
+    }
+
+    /** Observe whether DH produced a current native frame (including its own F6 state). */
+    public static boolean nativeRasterActive() {
+        if (!LOADED) return false;
+        try {
+            return RenderApi.INSTANCE.nativeRasterActive();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     /** Vulkan image-view of DH's own depth target. The Minecraft main depth does not contain LOD depth. */
     public static long depthTextureView() {
         if (!LOADED) return 0L;
@@ -368,6 +403,44 @@ public final class DistantHorizonsCompat {
             return RenderApi.INSTANCE.depthTextureView();
         } catch (Throwable ignored) {
             return 0L;
+        }
+    }
+
+    /** Vulkan image-view of DH's own color target, sampled by the hybrid display pass. */
+    public static long colorTextureView() {
+        if (!LOADED) return 0L;
+        try {
+            return RenderApi.INSTANCE.colorTextureView();
+        } catch (Throwable ignored) {
+            return 0L;
+        }
+    }
+
+    /** R8_UNORM same-pass water classification produced by DH's native terrain raster. */
+    public static long waterMaskTextureView() {
+        return LOADED ? DistantHorizonsWaterMask.imageView() : 0L;
+    }
+
+    /** VkImage backing {@link #waterMaskTextureView()}, for the render-to-sample dependency. */
+    public static long waterMaskTextureImage() {
+        return LOADED ? DistantHorizonsWaterMask.image() : 0L;
+    }
+
+    public static int waterMaskWidth() {
+        return LOADED ? DistantHorizonsWaterMask.width() : 0;
+    }
+
+    public static int waterMaskHeight() {
+        return LOADED ? DistantHorizonsWaterMask.height() : 0;
+    }
+
+    /** Depth value used by DH to clear uncovered pixels; occupancy must not depend on color alpha. */
+    public static float depthClearValue() {
+        if (!LOADED) return Float.NaN;
+        try {
+            return RenderApi.INSTANCE.depthClearValue();
+        } catch (Throwable ignored) {
+            return Float.NaN;
         }
     }
 
@@ -381,13 +454,27 @@ public final class DistantHorizonsCompat {
         }
     }
 
+    /** Query the bounding corner of a DH section position. */
+    public static int[] minCorner(long pos, Object levelHint) {
+        if (!LOADED) return null;
+        try {
+            return Api.INSTANCE.minCorner(pos, levelHint);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     /** Isolated from the terrain API so a DH renderer-internal change cannot disable terrain capture. */
     private static final class RenderApi {
         static final RenderApi INSTANCE = new RenderApi();
         private final Field metaInstanceField;
         private final Field depthWrapperField;
+        private final Field colorWrapperField;
+        private final Field clearDepthField;
         private final Method getTextureView;
         private final Field renderParamsField;
+        private final Field clientApiInstanceField;
+        private final Field rendererDisabledBecauseOfExceptions;
         private final Field validatedField;
         private final Field inverseMatrixField;
         private final Method matrixValues;
@@ -401,11 +488,16 @@ public final class DistantHorizonsCompat {
                 Class<?> meta = Class.forName("com.seibel.distanthorizons.common.render.blaze.BlazeDhMetaRenderer");
                 metaInstanceField = meta.getField("INSTANCE");
                 depthWrapperField = meta.getField("dhDepthTextureWrapper");
+                colorWrapperField = meta.getField("dhColorTextureWrapper");
+                clearDepthField = meta.getDeclaredField("clearDepth");
+                clearDepthField.setAccessible(true);
                 Class<?> wrapper = Class.forName(
                         "com.seibel.distanthorizons.common.render.blaze.wrappers.texture.BlazeTextureWrapper");
                 getTextureView = wrapper.getMethod("getTextureView");
 
                 Class<?> clientApi = Class.forName("com.seibel.distanthorizons.core.api.internal.ClientApi");
+                clientApiInstanceField = clientApi.getField("INSTANCE");
+                rendererDisabledBecauseOfExceptions = clientApi.getField("rendererDisabledBecauseOfExceptions");
                 renderParamsField = clientApi.getDeclaredField("RENDER_PARAMS");
                 renderParamsField.setAccessible(true);
                 Class<?> renderParams = Class.forName("com.seibel.distanthorizons.core.render.RenderParams");
@@ -426,12 +518,44 @@ public final class DistantHorizonsCompat {
             }
         }
 
+        boolean nativeRasterActive() throws ReflectiveOperationException {
+            Object params = renderParamsField.get(null);
+            if (params == null || !validatedField.getBoolean(params)) return false;
+            Object clientApi = clientApiInstanceField.get(null);
+            if (clientApi != null && rendererDisabledBecauseOfExceptions.getBoolean(clientApi)) return false;
+            try {
+                Class<?> debugging = Class.forName(
+                        "com.seibel.distanthorizons.core.config.Config$Client$Advanced$Debugging");
+                Field rendererMode = debugging.getField("rendererMode");
+                Object entry = rendererMode.get(null);
+                Method get = entry == null ? null : entry.getClass().getMethod("get");
+                Object mode = get == null ? null : get.invoke(entry);
+                return mode == null || !"DISABLED".equals(String.valueOf(mode));
+            } catch (ReflectiveOperationException ignored) {
+                // The mode field is observation-only. If it drifts, DH's native hook remains authoritative.
+                return true;
+            }
+        }
+
         long depthTextureView() throws ReflectiveOperationException {
             Object meta = metaInstanceField.get(null);
             if (meta == null) return 0L;
             Object wrapper = depthWrapperField.get(meta);
             Object view = wrapper == null ? null : getTextureView.invoke(wrapper);
             return view instanceof VulkanGpuTextureView vkView ? vkView.vkImageView() : 0L;
+        }
+
+        long colorTextureView() throws ReflectiveOperationException {
+            Object meta = metaInstanceField.get(null);
+            if (meta == null) return 0L;
+            Object wrapper = colorWrapperField.get(meta);
+            Object view = wrapper == null ? null : getTextureView.invoke(wrapper);
+            return view instanceof VulkanGpuTextureView vkView ? vkView.vkImageView() : 0L;
+        }
+
+        float depthClearValue() throws ReflectiveOperationException {
+            Object meta = metaInstanceField.get(null);
+            return meta == null ? Float.NaN : clearDepthField.getFloat(meta);
         }
 
         boolean inverseViewProjection(Matrix4f dest) throws ReflectiveOperationException {

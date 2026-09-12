@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class LodCoverageResolverTest {
@@ -65,6 +66,42 @@ final class LodCoverageResolverTest {
                 List.of(parent, touching));
 
         assertTrue(result.contains(parent));
+    }
+
+    @Test
+    void fullyCoveredTileIsOmittableOnlyWhenEverySectionIsReady() {
+        LodCoverageResolver.CoverageRect tile = new LodCoverageResolver.CoverageRect(
+                1L, 0, 0, 32, 1, 0, 16);
+        assertEquals(LodCoverageResolver.VanillaCoverage.FULL,
+                LodCoverageResolver.resolveVanillaCoverage(tile, (x, y, z) -> true,
+                        (x, y, z) -> true));
+        assertEquals(LodCoverageResolver.VanillaCoverage.PARTIAL,
+                LodCoverageResolver.resolveVanillaCoverage(tile, (x, y, z) -> !(x == 1 && z == 0),
+                        (x, y, z) -> true));
+    }
+
+    @Test
+    void emptyAndPublishedSectionsAreBothAuthoritativeReady() {
+        LodCoverageResolver.CoverageRect tile = new LodCoverageResolver.CoverageRect(
+                2L, 0, 0, 16, 1, 0, 16);
+        assertEquals(LodCoverageResolver.VanillaCoverage.FULL,
+                LodCoverageResolver.resolveVanillaCoverage(tile, (x, y, z) -> true,
+                        (x, y, z) -> true));
+        assertEquals(LodCoverageResolver.VanillaCoverage.NONE,
+                LodCoverageResolver.resolveVanillaCoverage(tile, (x, y, z) -> false,
+                        (x, y, z) -> true));
+    }
+
+    @Test
+    void outsideWindowAndVerticalGapRemainRetained() {
+        LodCoverageResolver.CoverageRect tile = new LodCoverageResolver.CoverageRect(
+                3L, 0, 0, 16, 1, 0, 32);
+        assertEquals(LodCoverageResolver.VanillaCoverage.PARTIAL,
+                LodCoverageResolver.resolveVanillaCoverage(tile, (x, y, z) -> true,
+                        (x, y, z) -> y == 0));
+        assertEquals(LodCoverageResolver.VanillaCoverage.PARTIAL,
+                LodCoverageResolver.resolveVanillaCoverage(tile, (x, y, z) -> true,
+                        (x, y, z) -> y == 0));
     }
 
     private static LodMesh mesh(long key, long version, int x, int z, int width, int detailWidth) {
