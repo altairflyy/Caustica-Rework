@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.3]
+
+### Added
+- Authoritative Distant Horizons material provenance tracking (`DhMaterialProvenance`) and face recipe resolution (`DhFaceRecipeResolver`).
+- Reconstruction of DH foliage albedo from Near sprite atlas, biome color tinting, and ray-cone equivalent mip selection.
+- Detailed Distant Horizons integration diagnostics in debug overlay.
+
+### Changed
+- Relit Distant Horizons distant geometry in scene-linear ray-traced display space with celestial Lambert lighting, sky/block illumination, and tonemapping.
+
+### Removed
+- Removed obsolete Distant Horizons rasterization fallback, dedicated reflection pipeline, and water mask passes.
+
 ## [0.1.2]
 
 ### Fixed

@@ -104,6 +104,6 @@ final class DhFaceRecipeContractTest {
     }
 
     private static String read(String path) throws IOException {
-        return Files.readString(Path.of(path));
+        return Files.readString(Path.of(path)).replace("\r\n", "\n");
     }
 }
