@@ -65,7 +65,7 @@ public final class CausticaConfig {
             Rt.Terrain.PRESSURE_HYSTERESIS_MIB, Rt.Terrain.AS_PACING_ENABLED,
             Rt.Terrain.AS_PACING_BUSY_ENTER_MS, Rt.Terrain.AS_PACING_BUSY_EXIT_MS,
             Rt.Terrain.AS_PACING_RESUME_STABLE_MS, Rt.Terrain.AS_PACING_BUSY_INTERVAL_MS,
-            Rt.Terrain.DH_RT_ENABLED, Rt.Terrain.DH_RT_DISTANCE_CHUNKS, Rt.Terrain.DH_FAR_LIGHTING, Rt.Omm.ENABLED,
+            Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES,
             Rt.DlssRr.ENABLED, Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.Fg.ENABLED,
             Rt.Fsr.ENABLED, Rt.Fsr.QUALITY, Rt.Xess.ENABLED, Rt.Xess.QUALITY,
@@ -124,11 +124,8 @@ public final class CausticaConfig {
                         + " safety-headroom-mib reserves space for the rest of the renderer and driver.\n"
                         + " protected-near-radius is reserved for the future provider-aware eviction policy;\n"
                         + " no-LOD mode never evicts visible full terrain.\n"
-                        + " dh-rt-enabled controls Caustica's ray-traced DH contribution independently of DH's\n"
-                         + " own raster toggle (F6); dh-rt-distance-chunks limits how far DH geometry enters the\n"
-                         + " RT acceleration structure. Zero disables the optional DH RT ring; native DH raster\n"
-                         + " remains responsible for the far horizon. dh-far-lighting adds a cheap depth-derived\n"
-                         + " directional lighting correction to native DH pixels without adding RT geometry.");
+                        + " Distant Horizons is authoritative for FAR enable state, render distance and LOD quality.\n"
+                        + " Caustica converts only DH's current native active set and adds no independent FAR cap.");
         FILE.setComment("frame-generation",
                 " DLSS Frame Generation. Default off; gated additionally by hardware/driver availability\n"
                         + " (the driver's NGX capability query reports FrameGeneration_Available; RTX 40/50 series only).\n"
@@ -964,19 +961,6 @@ public final class CausticaConfig {
                     intAtLeast("caustica.rt.asPacingResumeStableMs", "terrain.as-pacing-resume-stable-ms", 1500, 0);
             public static final IntSetting AS_PACING_BUSY_INTERVAL_MS =
                     intAtLeast("caustica.rt.asPacingBusyIntervalMs", "terrain.as-pacing-busy-interval-ms", 250, 1);
-            /** Whether a bounded subset of captured Distant Horizons geometry contributes to Caustica RT. */
-            public static final BooleanSetting DH_RT_ENABLED =
-                    bool("caustica.rt.dhRtEnabled", "terrain.dh-rt-enabled", true);
-            /** RT-only DH ring radius in chunks; zero disables DH conversion and keeps native DH raster. */
-            public static final IntSetting DH_RT_DISTANCE_CHUNKS =
-                    intAtLeast("caustica.rt.dhRtDistanceChunks", "terrain.dh-rt-distance-chunks", 0, 0);
-            /** Cheap far-field directional correction over native DH color/depth; no DH RT geometry. */
-            public static final BooleanSetting DH_FAR_LIGHTING =
-                    bool("caustica.rt.dhFarLighting", "terrain.dh-far-lighting", false);
-            /** Development-only proof view: white authoritative native-DH water, black elsewhere. */
-            public static final BooleanSetting DH_WATER_MASK_DEBUG =
-                    bool("caustica.rt.dhWaterMaskDebug", "terrain.dh-water-mask-debug", false);
-
             private Terrain() {
             }
         }

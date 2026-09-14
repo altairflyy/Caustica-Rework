@@ -21,4 +21,17 @@ public abstract class DistantHorizonsLodBufferMixin {
                                          CallbackInfoReturnable<CompletableFuture<?>> cir) {
         DistantHorizonsCompat.captureLodBuffers(pos, level, opaque, transparent);
     }
+
+    @Inject(method = "tryMakeAndUploadBuffersAsync", at = @At("RETURN"), require = 0)
+    private static void caustica$bindExactContainer(long pos, @Coerce Object level,
+                                                     ArrayList<ByteBuffer> opaque,
+                                                     ArrayList<ByteBuffer> transparent,
+                                                     CallbackInfoReturnable<CompletableFuture<?>> cir) {
+        DistantHorizonsCompat.completeLodBufferCapture(opaque, cir.getReturnValue());
+    }
+
+    @Inject(method = "close", at = @At("HEAD"), require = 0)
+    private void caustica$forgetClosedContainer(org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+        DistantHorizonsCompat.forgetActiveContainer(this);
+    }
 }

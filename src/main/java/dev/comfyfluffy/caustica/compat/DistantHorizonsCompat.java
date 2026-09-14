@@ -3,21 +3,24 @@ package dev.comfyfluffy.caustica.compat;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
-import org.joml.Matrix4f;
+import net.minecraft.core.Direction;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import dev.comfyfluffy.caustica.rt.lod.DhLodMeshSource;
 import dev.comfyfluffy.caustica.rt.lod.LodMesh;
 import dev.comfyfluffy.caustica.rt.lod.LodProviderSelector;
-import dev.comfyfluffy.caustica.CausticaConfig;
 
 /** Lightweight, API-independent Distant Horizons hybrid-rendering gate. */
 public final class DistantHorizonsCompat {
@@ -26,6 +29,15 @@ public final class DistantHorizonsCompat {
     private static final ConcurrentHashMap<Long, LodMesh> LOD_MESHES = new ConcurrentHashMap<>();
     private static final AtomicLong LOD_REVISION = new AtomicLong();
     private static final AtomicLong MESH_VERSION = new AtomicLong();
+    private static final Object ACTIVE_MESH_LOCK = new Object();
+    private static final IdentityHashMap<Object, PendingActiveMesh> PENDING_ACTIVE_MESHES = new IdentityHashMap<>();
+    private static final IdentityHashMap<Object, BoundActiveMesh> BOUND_ACTIVE_MESHES = new IdentityHashMap<>();
+    /** DH meshes observed in this world, retained independently of the current raster frustum. */
+    private static final LinkedHashMap<Long, LodMesh> RESIDENT_FAR_MESHES = new LinkedHashMap<>();
+    private static volatile List<LodMesh> ACTIVE_FAR_MESHES = List.of();
+    private static PassActiveMeshes ACTIVE_OPAQUE_PASS = PassActiveMeshes.empty();
+    private static volatile int ACTIVE_RASTER_CONTAINER_COUNT;
+    private static volatile int ACTIVE_UNMATCHED_CONTAINER_COUNT;
     /**
      * Captures are scoped to the identity of Minecraft's current ClientLevel. DH section-position keys are
      * not world-unique, and uploads for a newly joined world may arrive before the RT proxy observes the
@@ -49,10 +61,6 @@ public final class DistantHorizonsCompat {
                              String maxHorizontalResolution, String horizontalQuality) {
     }
 
-    public static void captureLodBuffers(long pos, List<ByteBuffer> opaque, List<ByteBuffer> transparent) {
-        captureLodBuffers(pos, null, opaque, transparent);
-    }
-
     /**
      * Capture a DH upload together with the level wrapper that produced it. Multiplayer worlds do not
      * expose {@code getSinglePlayerLevel()}, so relying on that API loses the dimension metadata needed
@@ -60,21 +68,26 @@ public final class DistantHorizonsCompat {
      */
     public static void captureLodBuffers(long pos, Object level, List<ByteBuffer> opaque,
                                          List<ByteBuffer> transparent) {
-        dev.comfyfluffy.caustica.rt.proxy.DhFarFieldProxy.get().onLodBuffers(pos, level, opaque, transparent);
-        if (!dhRtRingEnabled()) {
-            // Do not retain multi-megabyte DH VBO copies when the Caustica RT bridge is disabled.
-            resetDhCapturedLods();
-            return;
-        }
         ensureCurrentWorldScope();
         try {
+            // These are the exact list identities emitted by the LodQuadBuilder on this worker thread.
+            // Consume their post-merge provenance before DH hands the buffers to its async uploader.
+            DhMaterialProvenance.BufferProvenance builtProvenance =
+                    DhMaterialProvenance.consumeBuiltBuffers(opaque, transparent);
             LodMesh previous = LOD_MESHES.get(pos);
             // DH can re-submit one or both passes unchanged. Compare source buffers directly against the
             // retained flattened bytes before allocating another multi-megabyte array, and reuse an unchanged
             // pass when only its counterpart was rebuilt.
             boolean sameOpaque = previous != null && quadBuffersEqual(opaque, previous.opaque());
             boolean sameTransparent = previous != null && quadBuffersEqual(transparent, previous.transparent());
-            if (sameOpaque && sameTransparent) return;
+            if (sameOpaque && sameTransparent) {
+                // The upload lists can be reused for a fresh LodBufferContainer. Rebind that
+                // exact future even when the byte content is unchanged.
+                synchronized (ACTIVE_MESH_LOCK) {
+                    PENDING_ACTIVE_MESHES.put(opaque, new PendingActiveMesh(previous));
+                }
+                return;
+            }
             byte[] opaqueCopy = sameOpaque ? previous.opaque() : copyQuadBuffers(opaque);
             byte[] transparentCopy = sameTransparent ? previous.transparent() : copyQuadBuffers(transparent);
 
@@ -100,9 +113,21 @@ public final class DistantHorizonsCompat {
             // with a still-published proxy entry that happened to have the same per-key version number.
             long version = MESH_VERSION.incrementAndGet();
             int dataPointWidth = estimateDataPointWidth(opaqueCopy, transparentCopy, width);
-            LOD_MESHES.put(pos, new LodMesh(pos, version, originX, originY, originZ, width,
-                    dataPointWidth, opaqueCopy, transparentCopy));
-            LOD_REVISION.incrementAndGet();
+            int[] opaqueProvenance = sameOpaque ? previous.opaqueProvenance()
+                    : builtProvenance.opaque();
+            int[] transparentProvenance = sameTransparent ? previous.transparentProvenance()
+                    : builtProvenance.transparent();
+            LodMesh captured = new LodMesh(pos, version, originX, originY, originZ, width,
+                    dataPointWidth, opaqueCopy, transparentCopy, opaqueProvenance, transparentProvenance);
+            synchronized (ACTIVE_MESH_LOCK) {
+                PENDING_ACTIVE_MESHES.put(opaque, new PendingActiveMesh(captured));
+            }
+            if (dhRtRingEnabled()) {
+                LOD_MESHES.put(pos, captured);
+                LOD_REVISION.incrementAndGet();
+            } else if (!LOD_MESHES.isEmpty()) {
+                resetDhCapturedLods();
+            }
         } catch (Throwable ignored) {
             // DH is optional and changes internals between releases. A failed capture must never break the
             // renderer; the existing mesh (if any) remains usable until a later successful upload.
@@ -117,44 +142,10 @@ public final class DistantHorizonsCompat {
     public static List<LodMesh> dhLodMeshesSnapshot() {
         if (!dhRtRingEnabled()) return List.of();
         ensureCurrentWorldScope();
-        try {
-            Set<Long> active = RenderApi.INSTANCE.activeLodPositions();
-
-            // On dedicated servers DH can upload valid client-side LOD VBOs before RenderParams has been
-            // validated, and some DH versions expose an empty/mismatched enabled-section list for remote
-            // level wrappers. Returning an empty snapshot here made the RT bootstrap retry forever while
-            // singleplayer worked. Captured buffers are already cleared on ClientLevel changes and filtered
-            // by the RT proxy radius, so they are a safe multiplayer fallback.
-            if (active.isEmpty()) {
-                return new ArrayList<>(LOD_MESHES.values());
-            }
-
-            // Captures used to accumulate forever while the player travelled. Keep a generous grace
-            // budget before pruning: DH can transiently omit a section while swapping LOD levels, and deleting
-            // it immediately would create a hole until that VBO happened to be uploaded again.
-            long retainedBudget = Math.min(Integer.MAX_VALUE, (long) active.size() * 2L + 128L);
-            if (LOD_MESHES.size() > retainedBudget) {
-                for (var entry : LOD_MESHES.entrySet()) {
-                    long pos = entry.getKey();
-                    if (!active.contains(pos)) LOD_MESHES.remove(pos, entry.getValue());
-                }
-            }
-
-            ArrayList<LodMesh> result = new ArrayList<>(Math.min(active.size(), LOD_MESHES.size()));
-            for (long pos : active) {
-                LodMesh mesh = LOD_MESHES.get(pos);
-                if (mesh != null) result.add(mesh);
-            }
-            // A non-empty active list can still use section identities from a different remote-level
-            // wrapper generation. Prefer the captured current-world set over suppressing DH completely.
-            return result.isEmpty() && !LOD_MESHES.isEmpty()
-                    ? new ArrayList<>(LOD_MESHES.values())
-                    : result;
-        } catch (Throwable ignored) {
-            // Renderer-internal active-section reflection is less stable on multiplayer DH paths. The
-            // upload hook is independent and already gave us valid current-world VBOs, so retain them.
-            return LOD_MESHES.isEmpty() ? List.of() : new ArrayList<>(LOD_MESHES.values());
-        }
+        // This is DH's exact post-cull draw set, in raster submission order. The main Caustica TLAS
+        // consumes these same meshes for primary and secondary rays; historical uploads are never a
+        // fallback and no second FAR geometry owner exists.
+        return ACTIVE_FAR_MESHES;
     }
 
     /**
@@ -168,6 +159,16 @@ public final class DistantHorizonsCompat {
         synchronized (WORLD_SCOPE_LOCK) {
             if (captureWorld == currentWorld) return;
             LOD_MESHES.clear();
+            DhMaterialProvenance.clear();
+            synchronized (ACTIVE_MESH_LOCK) {
+                PENDING_ACTIVE_MESHES.clear();
+                BOUND_ACTIVE_MESHES.clear();
+                RESIDENT_FAR_MESHES.clear();
+                ACTIVE_FAR_MESHES = List.of();
+                ACTIVE_OPAQUE_PASS = PassActiveMeshes.empty();
+                ACTIVE_RASTER_CONTAINER_COUNT = 0;
+                ACTIVE_UNMATCHED_CONTAINER_COUNT = 0;
+            }
             captureWorld = currentWorld;
             LOD_REVISION.incrementAndGet();
         }
@@ -176,6 +177,20 @@ public final class DistantHorizonsCompat {
     /** Drop captured buffers when disabling the integration or performing final shutdown. */
     public static void clearCapturedLods() {
         PROVIDER_SELECTOR.reset();
+        synchronized (ACTIVE_MESH_LOCK) {
+            PENDING_ACTIVE_MESHES.clear();
+            BOUND_ACTIVE_MESHES.clear();
+            RESIDENT_FAR_MESHES.clear();
+            ACTIVE_FAR_MESHES = List.of();
+            ACTIVE_OPAQUE_PASS = PassActiveMeshes.empty();
+            ACTIVE_RASTER_CONTAINER_COUNT = 0;
+            ACTIVE_UNMATCHED_CONTAINER_COUNT = 0;
+        }
+    }
+
+    /** Establish the same world scope before the transformer publishes provenance for a pending upload. */
+    static void prepareProvenanceCapture() {
+        ensureCurrentWorldScope();
     }
 
     public static long lodRevision() {
@@ -195,6 +210,14 @@ public final class DistantHorizonsCompat {
             if (!LOD_MESHES.isEmpty()) {
                 LOD_MESHES.clear();
                 LOD_REVISION.incrementAndGet();
+            }
+            DhMaterialProvenance.clear();
+            synchronized (ACTIVE_MESH_LOCK) {
+                RESIDENT_FAR_MESHES.clear();
+                ACTIVE_OPAQUE_PASS = PassActiveMeshes.empty();
+                ACTIVE_FAR_MESHES = List.of();
+                ACTIVE_RASTER_CONTAINER_COUNT = 0;
+                ACTIVE_UNMATCHED_CONTAINER_COUNT = 0;
             }
             // Adopt the currently visible level. A later real level-identity change still advances the
             // revision through ensureCurrentWorldScope(), while same-world re-uploads can repopulate normally.
@@ -262,16 +285,173 @@ public final class DistantHorizonsCompat {
         return available() && (VoxyCompat.active() || dhRtRingEnabled());
     }
 
-    /** True only when DH uploads may be retained and converted into the bounded Caustica RT ring. */
+    private record PendingActiveMesh(LodMesh mesh) {
+    }
+
+    private record BoundActiveMesh(LodMesh mesh, Object[] wrappers) {
+    }
+
+    /** Reflection is isolated to exact object identity; failure can only remove FAR geometry. */
+    private static final class RenderContainerApi {
+        static final RenderContainerApi INSTANCE = new RenderContainerApi();
+        private final Field opaqueWrappers;
+        private final Field transparentWrappers;
+        private final Method setSize;
+        private final Method setGet;
+
+        private RenderContainerApi() {
+            try {
+                Class<?> container = Class.forName(
+                        "com.seibel.distanthorizons.core.dataObjects.render.bufferBuilding.LodBufferContainer");
+                opaqueWrappers = container.getField("vboOpaqueWrappers");
+                transparentWrappers = container.getField("vboTransparentWrappers");
+                Class<?> sortedSet = Class.forName(
+                        "com.seibel.distanthorizons.core.util.objects.SortedArraySet");
+                setSize = sortedSet.getMethod("size");
+                setGet = sortedSet.getMethod("get", int.class);
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("Unsupported Distant Horizons render-container ABI", e);
+            }
+        }
+
+        /** DH's SortedArraySet is not java.lang.Iterable in 3.2.0-b. */
+        Object[] snapshot(Object containers) {
+            if (containers == null) return null;
+            if (containers instanceof Iterable<?> iterable) {
+                ArrayList<Object> result = new ArrayList<>();
+                for (Object value : iterable) result.add(value);
+                return result.toArray();
+            }
+            try {
+                int size = ((Number) setSize.invoke(containers)).intValue();
+                if (size < 0 || size > 1_000_000) return null;
+                Object[] result = new Object[size];
+                for (int i = 0; i < size; i++) result[i] = setGet.invoke(containers, i);
+                return result;
+            } catch (ReflectiveOperationException | RuntimeException ignored) {
+                return null;
+            }
+        }
+
+        Object[] wrapperIdentities(Object container) throws IllegalAccessException {
+            Object opaque = opaqueWrappers.get(container);
+            Object transparent = transparentWrappers.get(container);
+            int opaqueCount = opaque == null ? 0 : Array.getLength(opaque);
+            int transparentCount = transparent == null ? 0 : Array.getLength(transparent);
+            Object[] result = new Object[opaqueCount + transparentCount];
+            for (int i = 0; i < opaqueCount; i++) result[i] = Array.get(opaque, i);
+            for (int i = 0; i < transparentCount; i++) result[opaqueCount + i] = Array.get(transparent, i);
+            return result;
+        }
+
+        boolean sameWrappers(Object container, Object[] expected) {
+            try {
+                Object[] current = wrapperIdentities(container);
+                if (current.length != expected.length) return false;
+                for (int i = 0; i < current.length; i++) {
+                    if (current[i] != expected[i]) return false;
+                }
+                return true;
+            } catch (Throwable ignored) {
+                return false;
+            }
+        }
+
+    }
+
+    /** DH itself is the sole authority for FAR enable state and distance. */
     public static boolean dhRtRingEnabled() {
-        return LOADED
-                && CausticaConfig.Rt.Terrain.DH_RT_ENABLED.value()
-                && CausticaConfig.Rt.Terrain.DH_RT_DISTANCE_CHUNKS.value() > 0;
+        return LOADED && nativeRasterActive() && dhRenderDistanceChunks() > 0;
     }
 
     /** Whether an optional distant-geometry provider is present, regardless of its Caustica RT switch. */
-    public static boolean available() {
+    private static boolean available() {
         return LOADED || VoxyCompat.active();
+    }
+
+    /**
+     * Native Vulkan view of DH's authoritative 256xN block-tile atlas.  Zero means that DH has not
+     * created the atlas yet (or that a future DH release changed this optional ABI); callers must keep
+     * a valid fallback descriptor in that case.
+     */
+    public static long blockAtlasTextureView() {
+        if (!LOADED) return 0L;
+        try {
+            Object view = BlockAtlasApi.INSTANCE.textureView();
+            return view instanceof VulkanGpuTextureView vkView ? vkView.vkImageView() : 0L;
+        } catch (Throwable ignored) {
+            return 0L;
+        }
+    }
+
+    /** Exact directional shade DH baked into its vertex RGB for the current lodShading mode. */
+    public static float[] lodFaceShades() {
+        float[] enabled = {0.5f, 1.0f, 0.8f, 0.8f, 0.6f, 0.6f};
+        if (!LOADED) return new float[]{1f, 1f, 1f, 1f, 1f, 1f};
+        try {
+            String mode = LodShadingApi.INSTANCE.modeName();
+            if ("DISABLED".equals(mode)) return new float[]{1f, 1f, 1f, 1f, 1f, 1f};
+            if ("ENABLED".equals(mode)) return enabled;
+            var level = Minecraft.getInstance().level;
+            if (level == null) return enabled;
+            Direction[] directions = {Direction.DOWN, Direction.UP, Direction.NORTH,
+                    Direction.SOUTH, Direction.WEST, Direction.EAST};
+            float[] result = new float[6];
+            for (int i = 0; i < result.length; i++) {
+                result[i] = level.cardinalLighting().byFace(directions[i]);
+            }
+            return result;
+        } catch (Throwable ignored) {
+            return enabled;
+        }
+    }
+
+    private static final class LodShadingApi {
+        static final LodShadingApi INSTANCE = new LodShadingApi();
+        private final Object configEntry;
+        private final Method get;
+
+        private LodShadingApi() {
+            try {
+                Class<?> quality = Class.forName(
+                        "com.seibel.distanthorizons.core.config.Config$Client$Advanced$Graphics$Quality");
+                configEntry = quality.getField("lodShading").get(null);
+                get = configEntry.getClass().getMethod("get");
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("Unsupported Distant Horizons LOD-shading ABI", e);
+            }
+        }
+
+        String modeName() throws ReflectiveOperationException {
+            Object value = get.invoke(configEntry);
+            return value instanceof Enum<?> mode ? mode.name() : String.valueOf(value);
+        }
+    }
+
+    private static final class BlockAtlasApi {
+        static final BlockAtlasApi INSTANCE = new BlockAtlasApi();
+        private final Object atlas;
+        private final Method getTextureWrapper;
+        private final Method getTextureView;
+
+        private BlockAtlasApi() {
+            try {
+                Class<?> atlasClass = Class.forName(
+                        "com.seibel.distanthorizons.common.render.blaze.wrappers.texture.BlazeBlockTextureAtlas");
+                atlas = atlasClass.getField("INSTANCE").get(null);
+                getTextureWrapper = atlasClass.getMethod("getTextureWrapper");
+                Class<?> textureClass = Class.forName(
+                        "com.seibel.distanthorizons.common.render.blaze.wrappers.texture.IDhBlazeTexture");
+                getTextureView = textureClass.getMethod("getTextureView");
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("Unsupported Distant Horizons block-atlas ABI", e);
+            }
+        }
+
+        Object textureView() throws ReflectiveOperationException {
+            Object wrapper = getTextureWrapper.invoke(atlas);
+            return wrapper == null ? null : getTextureView.invoke(wrapper);
+        }
     }
 
     /** Update optional providers on the render thread before the RT proxy observes their revision. */
@@ -287,13 +467,11 @@ public final class DistantHorizonsCompat {
      * saved LOD database or world data is deleted.
      */
     public static boolean reloadRenderDataCache() {
-        if (!enabled()) return false;
-        boolean reloaded = VoxyCompat.reset();
-        if (!LOADED) return reloaded;
+        if (!dhRtRingEnabled()) return false;
         try {
-            return ReloadApi.INSTANCE.clearRenderDataCache() || reloaded;
+            return ReloadApi.INSTANCE.clearRenderDataCache();
         } catch (Throwable ignored) {
-            return reloaded;
+            return false;
         }
     }
 
@@ -311,6 +489,12 @@ public final class DistantHorizonsCompat {
             long signature = 0x564F585900000000L ^ ((long) distance << 16);
             return new LodQuality(signature, 1, 4, "VOXY_STREAMED", "DYNAMIC");
         }
+        return dhLodQuality();
+    }
+
+    /** DH-only quality snapshot for diagnostics; never substitutes Voxy's independent settings. */
+    public static LodQuality dhLodQuality() {
+        if (!dhRtRingEnabled()) return new LodQuality(0L, 16, 2, "UNKNOWN", "UNKNOWN");
         try {
             return Api.INSTANCE.lodQuality();
         } catch (Throwable ignored) {
@@ -381,13 +565,8 @@ public final class DistantHorizonsCompat {
         }
     }
 
-    /** True when the native DH mixin is present; Caustica never calls the renderer itself. */
-    public static boolean nativeHookInstalled() {
-        return LOADED;
-    }
-
     /** Observe whether DH produced a current native frame (including its own F6 state). */
-    public static boolean nativeRasterActive() {
+    private static boolean nativeRasterActive() {
         if (!LOADED) return false;
         try {
             return RenderApi.INSTANCE.nativeRasterActive();
@@ -396,105 +575,109 @@ public final class DistantHorizonsCompat {
         }
     }
 
-    /** Vulkan image-view of DH's own depth target. The Minecraft main depth does not contain LOD depth. */
-    public static long depthTextureView() {
-        if (!LOADED) return 0L;
-        try {
-            return RenderApi.INSTANCE.depthTextureView();
-        } catch (Throwable ignored) {
-            return 0L;
+    /** Bind the copied upload bytes to the exact LodBufferContainer returned by DH's upload future. */
+    public static void completeLodBufferCapture(Object opaqueBuffers, CompletableFuture<?> future) {
+        PendingActiveMesh pending;
+        synchronized (ACTIVE_MESH_LOCK) {
+            pending = PENDING_ACTIVE_MESHES.remove(opaqueBuffers);
+        }
+        if (pending == null || future == null) return;
+        future.whenComplete((container, failure) -> {
+            if (failure != null || container == null) return;
+            try {
+                Object[] wrappers = RenderContainerApi.INSTANCE.wrapperIdentities(container);
+                synchronized (ACTIVE_MESH_LOCK) {
+                    BOUND_ACTIVE_MESHES.put(container, new BoundActiveMesh(pending.mesh(), wrappers));
+                }
+            } catch (Throwable ignored) {
+                // Optional-version drift means omission, never a fallback to historical captures.
+            }
+        });
+    }
+
+    /** Publish one exact post-cull pass; the transparent pass commits the coherent opaque+transparent frame set. */
+    public static void publishActiveRasterContainers(Object exactContainers, boolean transparentPass) {
+        Object[] containers = RenderContainerApi.INSTANCE.snapshot(exactContainers);
+        if (containers == null) {
+            synchronized (ACTIVE_MESH_LOCK) {
+                if (!transparentPass) ACTIVE_OPAQUE_PASS = PassActiveMeshes.empty();
+            }
+            return;
+        }
+        ArrayList<LodMesh> active = new ArrayList<>();
+        int count = 0;
+        int unmatched = 0;
+        synchronized (ACTIVE_MESH_LOCK) {
+            for (Object container : containers) {
+                count++;
+                BoundActiveMesh bound = BOUND_ACTIVE_MESHES.get(container);
+                if (bound == null || !RenderContainerApi.INSTANCE.sameWrappers(container, bound.wrappers())) {
+                    unmatched++;
+                    continue;
+                }
+                active.add(bound.mesh());
+            }
+            PassActiveMeshes pass = new PassActiveMeshes(List.copyOf(active), count, unmatched);
+            if (!transparentPass) {
+                ACTIVE_OPAQUE_PASS = pass;
+                return;
+            }
+
+            LinkedHashMap<Long, LodMesh> combined = new LinkedHashMap<>();
+            for (LodMesh mesh : ACTIVE_OPAQUE_PASS.meshes) {
+                combined.put(mesh.key(), mesh);
+            }
+            for (LodMesh mesh : pass.meshes) {
+                combined.merge(mesh.key(), mesh,
+                        (opaque, transparent) -> transparent.version() >= opaque.version() ? transparent : opaque);
+            }
+            for (LodMesh mesh : combined.values()) {
+                RESIDENT_FAR_MESHES.merge(mesh.key(), mesh,
+                        (resident, visible) -> visible.version() >= resident.version() ? visible : resident);
+            }
+            List<LodMesh> published = List.copyOf(RESIDENT_FAR_MESHES.values());
+            // Count the containers submitted by DH this frame, not the resident RT set retained across
+            // frustum changes. This makes the diagnostic describe actual native-raster activity.
+            ACTIVE_RASTER_CONTAINER_COUNT = ACTIVE_OPAQUE_PASS.containers + pass.containers;
+            ACTIVE_UNMATCHED_CONTAINER_COUNT = ACTIVE_OPAQUE_PASS.unmatched + pass.unmatched;
+            if (!published.equals(ACTIVE_FAR_MESHES)) {
+                ACTIVE_FAR_MESHES = published;
+                LOD_REVISION.incrementAndGet();
+            }
         }
     }
 
-    /** Vulkan image-view of DH's own color target, sampled by the hybrid display pass. */
-    public static long colorTextureView() {
-        if (!LOADED) return 0L;
-        try {
-            return RenderApi.INSTANCE.colorTextureView();
-        } catch (Throwable ignored) {
-            return 0L;
+    private record PassActiveMeshes(List<LodMesh> meshes, int containers, int unmatched) {
+        static PassActiveMeshes empty() {
+            return new PassActiveMeshes(List.of(), 0, 0);
         }
     }
 
-    /** R8_UNORM same-pass water classification produced by DH's native terrain raster. */
-    public static long waterMaskTextureView() {
-        return LOADED ? DistantHorizonsWaterMask.imageView() : 0L;
+    public static int activeRasterContainerCount() {
+        return ACTIVE_RASTER_CONTAINER_COUNT;
     }
 
-    /** VkImage backing {@link #waterMaskTextureView()}, for the render-to-sample dependency. */
-    public static long waterMaskTextureImage() {
-        return LOADED ? DistantHorizonsWaterMask.image() : 0L;
+    public static int activeUnmatchedContainerCount() {
+        return ACTIVE_UNMATCHED_CONTAINER_COUNT;
     }
 
-    public static int waterMaskWidth() {
-        return LOADED ? DistantHorizonsWaterMask.width() : 0;
-    }
-
-    public static int waterMaskHeight() {
-        return LOADED ? DistantHorizonsWaterMask.height() : 0;
-    }
-
-    /** Depth value used by DH to clear uncovered pixels; occupancy must not depend on color alpha. */
-    public static float depthClearValue() {
-        if (!LOADED) return Float.NaN;
-        try {
-            return RenderApi.INSTANCE.depthClearValue();
-        } catch (Throwable ignored) {
-            return Float.NaN;
-        }
-    }
-
-    /** Copy DH's exact inverse projection/model-view matrix into {@code dest}. */
-    public static boolean inverseViewProjection(Matrix4f dest) {
-        if (!LOADED) return false;
-        try {
-            return RenderApi.INSTANCE.inverseViewProjection(dest);
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    /** Query the bounding corner of a DH section position. */
-    public static int[] minCorner(long pos, Object levelHint) {
-        if (!LOADED) return null;
-        try {
-            return Api.INSTANCE.minCorner(pos, levelHint);
-        } catch (Throwable ignored) {
-            return null;
+    public static void forgetActiveContainer(Object container) {
+        if (container == null) return;
+        synchronized (ACTIVE_MESH_LOCK) {
+            BOUND_ACTIVE_MESHES.remove(container);
         }
     }
 
     /** Isolated from the terrain API so a DH renderer-internal change cannot disable terrain capture. */
     private static final class RenderApi {
         static final RenderApi INSTANCE = new RenderApi();
-        private final Field metaInstanceField;
-        private final Field depthWrapperField;
-        private final Field colorWrapperField;
-        private final Field clearDepthField;
-        private final Method getTextureView;
         private final Field renderParamsField;
         private final Field clientApiInstanceField;
         private final Field rendererDisabledBecauseOfExceptions;
         private final Field validatedField;
-        private final Field inverseMatrixField;
-        private final Method matrixValues;
-        private final Field renderBufferHandlerField;
-        private final Field lodQuadTreeField;
-        private final Method populateEnabledSections;
-        private final Field lodRenderSectionPos;
 
         private RenderApi() {
             try {
-                Class<?> meta = Class.forName("com.seibel.distanthorizons.common.render.blaze.BlazeDhMetaRenderer");
-                metaInstanceField = meta.getField("INSTANCE");
-                depthWrapperField = meta.getField("dhDepthTextureWrapper");
-                colorWrapperField = meta.getField("dhColorTextureWrapper");
-                clearDepthField = meta.getDeclaredField("clearDepth");
-                clearDepthField.setAccessible(true);
-                Class<?> wrapper = Class.forName(
-                        "com.seibel.distanthorizons.common.render.blaze.wrappers.texture.BlazeTextureWrapper");
-                getTextureView = wrapper.getMethod("getTextureView");
-
                 Class<?> clientApi = Class.forName("com.seibel.distanthorizons.core.api.internal.ClientApi");
                 clientApiInstanceField = clientApi.getField("INSTANCE");
                 rendererDisabledBecauseOfExceptions = clientApi.getField("rendererDisabledBecauseOfExceptions");
@@ -502,17 +685,6 @@ public final class DistantHorizonsCompat {
                 renderParamsField.setAccessible(true);
                 Class<?> renderParams = Class.forName("com.seibel.distanthorizons.core.render.RenderParams");
                 validatedField = renderParams.getField("hasBeenValidated");
-                renderBufferHandlerField = renderParams.getField("renderBufferHandler");
-                Class<?> handler = Class.forName("com.seibel.distanthorizons.core.render.RenderBufferHandler");
-                lodQuadTreeField = handler.getField("lodQuadTree");
-                Class<?> quadTree = Class.forName("com.seibel.distanthorizons.core.render.QuadTree.LodQuadTree");
-                populateEnabledSections = quadTree.getMethod("populateListWithEnabledRenderSections", ArrayList.class);
-                Class<?> section = Class.forName("com.seibel.distanthorizons.core.render.QuadTree.LodRenderSection");
-                lodRenderSectionPos = section.getField("pos");
-                Class<?> apiParams = renderParams.getSuperclass();
-                inverseMatrixField = apiParams.getField("dhInverseMvmProjectionMatrix");
-                Class<?> matrix = Class.forName("com.seibel.distanthorizons.api.objects.math.DhApiMat4f");
-                matrixValues = matrix.getMethod("getValuesAsArray");
             } catch (ReflectiveOperationException e) {
                 throw new IllegalStateException("Unsupported Distant Horizons Blaze renderer", e);
             }
@@ -537,52 +709,6 @@ public final class DistantHorizonsCompat {
             }
         }
 
-        long depthTextureView() throws ReflectiveOperationException {
-            Object meta = metaInstanceField.get(null);
-            if (meta == null) return 0L;
-            Object wrapper = depthWrapperField.get(meta);
-            Object view = wrapper == null ? null : getTextureView.invoke(wrapper);
-            return view instanceof VulkanGpuTextureView vkView ? vkView.vkImageView() : 0L;
-        }
-
-        long colorTextureView() throws ReflectiveOperationException {
-            Object meta = metaInstanceField.get(null);
-            if (meta == null) return 0L;
-            Object wrapper = colorWrapperField.get(meta);
-            Object view = wrapper == null ? null : getTextureView.invoke(wrapper);
-            return view instanceof VulkanGpuTextureView vkView ? vkView.vkImageView() : 0L;
-        }
-
-        float depthClearValue() throws ReflectiveOperationException {
-            Object meta = metaInstanceField.get(null);
-            return meta == null ? Float.NaN : clearDepthField.getFloat(meta);
-        }
-
-        boolean inverseViewProjection(Matrix4f dest) throws ReflectiveOperationException {
-            Object params = renderParamsField.get(null);
-            if (params == null || !validatedField.getBoolean(params)) return false;
-            Object matrix = inverseMatrixField.get(params);
-            float[] rowMajor = (float[]) matrixValues.invoke(matrix);
-            // DhApiMat4f exposes row-major values; JOML/GLSL push data is column-major.
-            dest.set(rowMajor).transpose();
-            return dest.isFinite();
-        }
-
-        Set<Long> activeLodPositions() throws ReflectiveOperationException {
-            Object params = renderParamsField.get(null);
-            if (params == null || !validatedField.getBoolean(params)) return Set.of();
-            Object handler = renderBufferHandlerField.get(params);
-            if (handler == null) return Set.of();
-            Object tree = lodQuadTreeField.get(handler);
-            if (tree == null) return Set.of();
-            ArrayList<Object> sections = new ArrayList<>();
-            populateEnabledSections.invoke(tree, sections);
-            HashSet<Long> result = new HashSet<>(Math.max(16, sections.size() * 2));
-            for (Object section : sections) {
-                if (section != null) result.add(lodRenderSectionPos.getLong(section));
-            }
-            return result;
-        }
     }
 
     /** Public DH render-cache reload API, isolated so optional-version drift cannot disable capture. */

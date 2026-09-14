@@ -17,9 +17,9 @@ import math;
 [[vk::push_constant]] WorldPushConstants pc;
 
 [[vk::binding(2, 0)]] Sampler2D blockAlbedoAtlas;
+[[vk::binding(13, 0)]] Sampler2D dhBlockAtlas;
 [[vk::binding(0, 1)]] Sampler2D entityAlbedoTex[];
 
-static const float ALPHA_CUTOFF = 0.5;        // terrain (matches the cutout block models)
 // Entities: only discard near-fully-transparent texels. For enchantment glint this is exactly
 // vanilla's own discard (rendertype glint shaders drop texels below 0.1) — glint texels above it are
 // real, self-lit streak surfaces shaded by world.rchit's PRIM_GLINT branch.
@@ -76,6 +76,34 @@ bool vanillaRtSectionReady(float3 hitPos) {
     return word < mask[6] && (mask[8 + word] & (1u << (bit & 31u))) != 0u;
 }
 
+float2 dhAnyHitFaceUv(DhSection sec, uint primitiveId, float3 bary) {
+    ConstPtr<float2> uvs = ConstPtr<float2>(sec.uvAddr);
+    uint uvBase = primitiveId * 3u;
+    return frac(bary.x * uvs[uvBase] + bary.y * uvs[uvBase + 1u]
+            + bary.z * uvs[uvBase + 2u]);
+}
+
+float dhRecipeLeafAlpha(DhSection sec, uint recipeId, float2 faceUv) {
+    DhFaceRecipe recipe = ConstPtr<DhFaceRecipe>(sec.faceRecipeAddr)[recipeId - 1u];
+    DhFaceLayer layer = recipe.layers[0];
+    uint materialId = asuint(layer.materialTint.x);
+    MaterialHeader header = ConstPtr<MaterialHeader>(pc.materialTableAddr)[materialId];
+    float3 p = float3(faceUv, 1.0);
+    float2 localUv = float2(dot(p, layer.uTransform.xyz), dot(p, layer.vTransform.xyz));
+    float2 atlasUv = header.albedoUv.xy + clamp(localUv, 0.0, 1.0) / header.albedoUv.zw;
+    return blockAlbedoAtlas.SampleLevel(atlasUv, 0.0).a;
+}
+
+float dhFallbackLeafAlpha(float2 faceUv, uint tileId) {
+    if (tileId == 0u) return 1.0;
+    uint width, height;
+    dhBlockAtlas.GetDimensions(width, height);
+    uint2 tileOrigin = uint2(tileId % 256u, tileId / 256u) * 16u;
+    uint2 texel = tileOrigin + uint2(clamp(faceUv * 16.0, 0.0, 15.0));
+    float2 atlasUv = (float2(texel) + 0.5) / float2(max(width, 1u), max(height, 1u));
+    return dhBlockAtlas.SampleLevel(atlasUv, 0.0).a;
+}
+
 [shader("anyhit")]
 void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) {
     uint pid = PrimitiveIndex();
@@ -92,11 +120,28 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             return;
         }
 
-        Section sec = ConstPtr<Section>(pc.dhTableAddr)[InstanceID() & IDX_MASK];
+        DhSection sec = ConstPtr<DhSection>(pc.dhTableAddr)[InstanceID() & IDX_MASK];
         uint tri = pid + sec.triBase[GeometryIndex()];
         TerrainPrim pr = ConstPtr<TerrainPrim>(sec.primAddr)[tri];
         bool shadowRay = (RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u;
         uint dhSurface = uint(pr.tint.w + 0.5);
+        uint dhMaterial = pr.flags & 0xFFu;
+        // A solid DH voxel face cannot match a Near leaf canopy in the albedo guide: transparent Near
+        // texels see the geometry behind them, while the old fill path painted leaf colour there. Restore
+        // the canonical terrain cutoff for LOD leaves. View 16 deliberately keeps the old opaque coverage
+        // so it can still reveal recipe-fill texels (red) and DH-atlas fallback faces (yellow).
+        if (dhMaterial == DH_MATERIAL_LEAVES && pc.debugView != 16u) {
+            float2 faceUv = dhAnyHitFaceUv(sec, tri, bary);
+            uint recipeId = pr.aux0;
+            bool hasRecipe = recipeId != 0u && sec.faceRecipeAddr != 0u;
+            uint tileId = (pr.flags >> 16u) & 0xFFFFu;
+            float alpha = hasRecipe ? dhRecipeLeafAlpha(sec, recipeId, faceUv)
+                    : dhFallbackLeafAlpha(faceUv, tileId);
+            if (alpha < TERRAIN_ALPHA_CUTOFF) {
+                IgnoreHit();
+                return;
+            }
+        }
         if (dhSurface == DH_SURFACE_WATER && shadowRay) {
             payload.albedo *= half3(lerp(float3(1.0, 1.0, 1.0), pr.tint.rgb, WATER_SHADOW_TINT));
             payload.hitT = payload.hitT < 0.0 ? RayTCurrent() : min(payload.hitT, RayTCurrent());
@@ -285,7 +330,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     // bucket's triangle base to index the section's packed corner-UV array (3 UVs per triangle).
     ConstPtr<float2> uvs = ConstPtr<float2>(sec.uvAddr);
     float2 uv = bary.x * uvs[3u * tri + 0u] + bary.y * uvs[3u * tri + 1u] + bary.z * uvs[3u * tri + 2u];
-    if (blockAlbedoAtlas.SampleLevel(uv, 0.0).a < ALPHA_CUTOFF) {
+    if (blockAlbedoAtlas.SampleLevel(uv, 0.0).a < TERRAIN_ALPHA_CUTOFF) {
         IgnoreHit();
     }
 }

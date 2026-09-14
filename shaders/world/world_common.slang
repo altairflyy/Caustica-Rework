@@ -313,7 +313,7 @@ public struct Payload {
     public float  hitT;        // >= 0 on hit, < 0 on miss.
     public half3  motionPrev;  // per-vertex world displacement since last frame.
     public half3  f0;          // specular F0.
-    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit.
+    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit, bit 11 FAR geometry debug.
     public uint   roughMetal;  // packHalf2x16(roughness, metalness)
     public uint   emissionSss; // packHalf2x16(emission, sss)
     public uint   iorTransmission; // packHalf2x16(IOR, transmission factor)
@@ -330,6 +330,8 @@ public static const uint PAYLOAD_WEATHER = 512u;
 // ends. No NEE, no hand light, no RIS, no SHaRC and no indirect bounce, so no scene light (a
 // nearby torch, the sun, GI) can ever illuminate or reflect off the portal's starfield.
 public static const uint PAYLOAD_END_PORTAL_UNLIT = 1024u;
+// Temporary geometry-only diagnostic, set only for debug views 14/15.
+public static const uint PAYLOAD_FAR_GEOMETRY_DEBUG = 2048u;
 // Set by world.rchit on a terrain hit whose prim carries TERRAIN_PRIM_IN_LIGHT_BUFFER: this emitter is
 // RIS-sampled, so raygen gates its direct-hit emission on diffuse continuation rays (no double count).
 public static const uint PAYLOAD_EMITTER_IN_LIST = 128u;
@@ -425,6 +427,8 @@ public static const uint MATERIAL_FEATURE_SPEC = 1u;
 public static const uint MATERIAL_FEATURE_NORMAL = 2u;
 public static const uint MATERIAL_FEATURE_HEURISTIC_EMISSION = 4u;
 public static const uint MATERIAL_FEATURE_STOCHASTIC_ALPHA = 16u;
+// Canonical Minecraft terrain cutout threshold, shared by Near any-hit and solid DH foliage recipes.
+public static const float TERRAIN_ALPHA_CUTOFF = 0.5;
 // Final HDR emission strength baseline (EMISSIVE_STRENGTH * any JSON override multiplier), baked in
 // Java at material-compile time (RtMaterialRegistry) and packed here as a 16-bit fraction of the max.
 // Runtime global scales are separate WorldPush values so players can tune block and dynamic lights live.
@@ -443,6 +447,27 @@ public struct Section {
     public uint64_t primAddr;
     public uint64_t uvAddr;
     public uint triBase[4]; // fixed bucket order: solid/cutout/translucent/water
+};
+
+// FAR DH extends the ordinary section record with a table of compact, deduplicated Near face recipes.
+// The first 32 bytes intentionally mirror Section; only DH_INSTANCE_KIND indexes this 40-byte array.
+public struct DhSection {
+    public uint64_t primAddr;
+    public uint64_t uvAddr;
+    public uint triBase[4];
+    public uint64_t faceRecipeAddr;
+};
+
+// One immutable Near layer: material header id + authored/biome tint and a face-local affine UV map.
+// Two adjacent layers form one DhFaceRecipe (opaque base, optional alpha overlay).
+public struct DhFaceLayer {
+    public float4 materialTint; // x = material id bits, yzw = linear multiplier
+    public float4 uTransform;   // dot(float3(faceUv,1), xyz)
+    public float4 vTransform;
+};
+
+public struct DhFaceRecipe {
+    public DhFaceLayer layers[2];
 };
 
 // Entity geometry record: packed buffer addresses, motion, and per-geometry triangle bases. Entity BLAS

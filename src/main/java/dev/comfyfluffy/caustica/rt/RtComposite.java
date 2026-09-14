@@ -8,6 +8,7 @@ import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.client.CausticaJitter;
+import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.mixin.CommandEncoderAccessor;
 import dev.comfyfluffy.caustica.rt.gen.RestirReservoirData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushConstantsData;
@@ -240,11 +241,6 @@ public final class RtComposite {
                 flags |= FEATURE_VIEWZ;
             }
         }
-        // Hybrid compositing samples view-Z to distinguish near RT hits from misses that should reveal
-        // the native DH raster already drawn into the main target.
-        if (nativeRasterVisible) {
-            flags |= FEATURE_VIEWZ;
-        }
         return flags;
     }
 
@@ -352,22 +348,6 @@ public final class RtComposite {
     private boolean waterWaveTimeValid;
     private boolean failed;
     private boolean loggedActive;
-    /** Whether native DH raster was rendered into the main target for the current frame. */
-    private boolean nativeRasterVisible;
-    /** VkImageView of DH's native color target, retained for the hybrid display descriptor. */
-    private long nativeColorView;
-    /** VkImageView and exact clear value of DH's depth target; depth is the occupancy authority. */
-    private long nativeDepthView;
-    /** Same-frame native-DH RGBA8 compact surface data and its backing image. */
-    private long nativeWaterMaskView;
-    private long nativeWaterMaskImage;
-    private float nativeDepthClear;
-    private boolean nativeDhMatrixValid;
-    private final Matrix4f nativeDhInverseViewProjection = new Matrix4f();
-    private float nativeDhLightX;
-    private float nativeDhLightY;
-    private float nativeDhLightZ;
-    private float nativeDhLightLuminance;
 
     // Camera captured each frame from GameRenderer (unjittered level projection + camera rotation + pos).
     private final Matrix4f frameProjection = new Matrix4f();
@@ -402,18 +382,6 @@ public final class RtComposite {
     private ReconstructionResult pipelineReconstructionResult;
     private UpscaleInput pipelineUpscaleInput;
     private long pipelinePostPresentTarget;
-    private long pipelinePostPresentNativeColorView;
-    private long pipelinePostPresentNativeDepthView;
-    private long pipelinePostPresentNativeWaterMaskView;
-    private long pipelinePostPresentNativeWaterMaskImage;
-    private float pipelinePostPresentNativeDepthClear;
-    private boolean pipelinePostPresentHybrid;
-    private boolean pipelinePostPresentDhLighting;
-    private final Matrix4f pipelinePostPresentDhInverseViewProjection = new Matrix4f();
-    private float pipelinePostPresentDhLightX;
-    private float pipelinePostPresentDhLightY;
-    private float pipelinePostPresentDhLightZ;
-    private float pipelinePostPresentDhLightLuminance;
     private double previousFrameCamX;
     private double previousFrameCamY;
     private double previousFrameCamZ;
@@ -527,6 +495,10 @@ public final class RtComposite {
             RtFrameStats.FRAME.count("lodInstanceCount", RtLodTerrain.frameInstanceCount());
             RtFrameStats.FRAME.count("dhSourceCount", RtLodTerrain.dhSourceCount());
             RtFrameStats.FRAME.count("dhBlasCount", RtLodTerrain.dhBlasCount());
+            RtFrameStats.FRAME.count("dhActiveRasterContainers",
+                    DistantHorizonsCompat.activeRasterContainerCount());
+            RtFrameStats.FRAME.count("dhUnmatchedRasterContainers",
+                    DistantHorizonsCompat.activeUnmatchedContainerCount());
             RtFrameStats.FRAME.count("dhTlasInstanceCount", RtLodTerrain.frameInstanceCount());
             RtFrameStats.FRAME.count("dhFullyVanillaCoveredCount", RtLodTerrain.dhFullyVanillaCoveredCount());
             RtFrameStats.FRAME.count("dhPartiallyCoveredCount", RtLodTerrain.dhPartiallyCoveredCount());
@@ -540,13 +512,6 @@ public final class RtComposite {
             RtFrameStats.FRAME.count("lodBuildSession", RtLodTerrain.buildSessionActive() ? 1 : 0);
         }
         postProcessing.beginFrame();
-        nativeRasterVisible = false;
-        nativeColorView = 0L;
-        nativeDepthView = 0L;
-        nativeWaterMaskView = 0L;
-        nativeWaterMaskImage = 0L;
-        nativeDepthClear = Float.NaN;
-        nativeDhMatrixValid = false;
     }
 
     /** This frame's completion token, valid until {@link #finishGraphicsUse()} signals it. */
@@ -575,25 +540,10 @@ public final class RtComposite {
         RtFrameStats.FRAME.end();
     }
 
-    public boolean composite(GpuTexture nativeColor, int width, int height,
-                             long nativeColorView, long nativeDepthView,
-                             long nativeWaterMaskView, long nativeWaterMaskImage, float nativeDepthClear,
-                             Matrix4f nativeDhInverseViewProjection, boolean nativeRasterVisible) {
+    public boolean composite(GpuTexture nativeColor, int width, int height) {
         frameCounter++; // global frame serial used by remaining per-frame/entity rings and diagnostics
         VulkanDiagnostics.setInFlight("graphics-latest", "frame=" + frameCounter + " size=" + width + "x" + height);
         postProcessing.beginFrame(); // set true again once this frame's HDR display image is written
-        this.nativeRasterVisible = nativeRasterVisible && nativeColorView != 0L && nativeDepthView != 0L
-                && Float.isFinite(nativeDepthClear);
-        this.nativeColorView = nativeColorView;
-        this.nativeDepthView = nativeDepthView;
-        this.nativeWaterMaskView = nativeWaterMaskView;
-        this.nativeWaterMaskImage = nativeWaterMaskImage;
-        this.nativeDepthClear = nativeDepthClear;
-        this.nativeDhMatrixValid = nativeDhInverseViewProjection != null
-                && nativeDhInverseViewProjection.isFinite();
-        if (this.nativeDhMatrixValid) {
-            this.nativeDhInverseViewProjection.set(nativeDhInverseViewProjection);
-        }
         if (failed) {
             return false;
         }
@@ -852,7 +802,7 @@ public final class RtComposite {
             waterWaveTimeValid = false;
         });
         worldTraceResources.bindFrameViews(traceFrameViews());
-        postProcessing.bind(views.rrOutput(), views.viewZ());
+        postProcessing.bind(views.rrOutput());
     }
 
     /**
@@ -1053,15 +1003,8 @@ public final class RtComposite {
         }
         boolean postHdr = CausticaConfig.Rt.Hdr.enabled();
         postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, frameViews().rrOutput(),
-                frameViews().renderWidth(), frameViews().renderHeight(),
                 frameViews().displayWidth(), frameViews().displayHeight(), pipelinePostPresentTarget,
-                pipelinePostPresentNativeColorView, pipelinePostPresentNativeDepthView,
-                pipelinePostPresentNativeWaterMaskView, pipelinePostPresentNativeWaterMaskImage,
-                pipelinePostPresentNativeDepthClear, pipelinePostPresentHybrid,
-                pipelinePostPresentDhLighting, pipelinePostPresentDhInverseViewProjection,
-                pipelinePostPresentDhLightX, pipelinePostPresentDhLightY, pipelinePostPresentDhLightZ,
-                pipelinePostPresentDhLightLuminance, postHdr, pipelineGpuProfile,
-                camX, camY, camZ, pendingGraphicsUse);
+                postHdr, pipelineGpuProfile);
     }
 
     private FrameInputs prepareFrameInputs() {
@@ -1256,23 +1199,6 @@ public final class RtComposite {
             // Dimension + weather drive the sky model and the celestial light, so both are resolved
             // together, once, from the same level and partial tick.
             EnvironmentParameters environment = environmentParameters(level);
-            Float4 dhLightDir = environment.sky().lightDir();
-            Float4 dhLightRadiance = environment.sky().lightRadiance();
-            float dhLightLength = (float) Math.sqrt(dhLightDir.x() * dhLightDir.x()
-                    + dhLightDir.y() * dhLightDir.y() + dhLightDir.z() * dhLightDir.z());
-            if (dhLightLength > 1.0e-6f) {
-                nativeDhLightX = dhLightDir.x() / dhLightLength;
-                nativeDhLightY = dhLightDir.y() / dhLightLength;
-                nativeDhLightZ = dhLightDir.z() / dhLightLength;
-            } else {
-                nativeDhLightX = nativeDhLightY = nativeDhLightZ = 0.0f;
-            }
-            // Rec.709 luminance of the same weather-attenuated celestial radiance used by RT NEE.
-            // Keep it in the RT radiance domain so the LOD Lambert term and near-field path tracer
-            // enter one exposure/tonemap transform with comparable energy.
-            float dhLightLuminance = 0.2126f * dhLightRadiance.x()
-                    + 0.7152f * dhLightRadiance.y() + 0.0722f * dhLightRadiance.z();
-            nativeDhLightLuminance = Math.max(dhLightLuminance, 0.0f);
             // Analytic held-item light: position + intensity lane and the item's RGB tint; w == 0
             // disables the shader term (toggle off, no luminous item, or no player).
             HandLightState hand = handLightState(terrain);
@@ -1516,36 +1442,12 @@ public final class RtComposite {
             pipelineCommand = cmd;
             pipelineStack = stack;
             pipelinePostPresentTarget = dstImage;
-            // The view is supplied by WorldRenderScaler from DH's own color wrapper; the VkImage handle
-            // above is still resolved separately for the final copy into Minecraft's main target.
-            pipelinePostPresentNativeColorView = this.nativeColorView;
-            pipelinePostPresentNativeDepthView = this.nativeDepthView;
-            pipelinePostPresentNativeWaterMaskView = this.nativeWaterMaskView;
-            pipelinePostPresentNativeWaterMaskImage = this.nativeWaterMaskImage;
-            pipelinePostPresentNativeDepthClear = this.nativeDepthClear;
-            pipelinePostPresentHybrid = nativeRasterVisible;
-            pipelinePostPresentDhLighting = nativeRasterVisible && nativeDhMatrixValid
-                    && CausticaConfig.Rt.Terrain.DH_FAR_LIGHTING.value();
-            if (pipelinePostPresentDhLighting) {
-                pipelinePostPresentDhInverseViewProjection.set(this.nativeDhInverseViewProjection);
-            }
-            pipelinePostPresentDhLightX = nativeDhLightX;
-            pipelinePostPresentDhLightY = nativeDhLightY;
-            pipelinePostPresentDhLightZ = nativeDhLightZ;
-            pipelinePostPresentDhLightLuminance = nativeDhLightLuminance;
             try {
                 pipelineCursor.executeNext();
             } finally {
                 pipelineCommand = null;
                 pipelineStack = null;
                 pipelinePostPresentTarget = 0L;
-                pipelinePostPresentNativeColorView = 0L;
-                pipelinePostPresentNativeDepthView = 0L;
-                pipelinePostPresentNativeWaterMaskView = 0L;
-                pipelinePostPresentNativeWaterMaskImage = 0L;
-                pipelinePostPresentNativeDepthClear = Float.NaN;
-                pipelinePostPresentHybrid = false;
-                pipelinePostPresentDhLighting = false;
             }
         }
         gpuProfile.finish();

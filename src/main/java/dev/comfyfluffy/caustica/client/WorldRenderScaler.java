@@ -1,9 +1,7 @@
 package dev.comfyfluffy.caustica.client;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.rt.RtComposite;
-import org.joml.Matrix4f;
 
 /**
  * RT composite seam. Brackets vanilla's level-rendering section in {@code GameRenderer.render}: the
@@ -20,7 +18,6 @@ public final class WorldRenderScaler {
 
 	// Tracks that the level-render window is open so the safety-net end() does not composite twice.
 	private boolean rtWindowOpen;
-	private final Matrix4f dhInverseViewProjection = new Matrix4f();
 
 	private WorldRenderScaler() {
 	}
@@ -53,20 +50,8 @@ public final class WorldRenderScaler {
 				VanillaRenderController.INSTANCE.markMissedBeforeHandSeam();
 				return;
 			}
-			boolean nativeRaster = VanillaRenderController.INSTANCE.wasNativeDhHookObservedThisFrame()
-					&& DistantHorizonsCompat.nativeRasterActive();
-			// DH's native apply pass has already run. Its private color/depth targets remain the minimum safe
-			// background source because Caustica's final copy replaces the Minecraft main color target.
-			long nativeColorView = nativeRaster ? DistantHorizonsCompat.colorTextureView() : 0L;
-			long nativeDepthView = nativeRaster ? DistantHorizonsCompat.depthTextureView() : 0L;
-			long nativeWaterMaskView = nativeRaster ? DistantHorizonsCompat.waterMaskTextureView() : 0L;
-			long nativeWaterMaskImage = nativeRaster ? DistantHorizonsCompat.waterMaskTextureImage() : 0L;
-			float nativeDepthClear = nativeRaster ? DistantHorizonsCompat.depthClearValue() : Float.NaN;
-			boolean nativeMatrixValid = nativeRaster
-					&& DistantHorizonsCompat.inverseViewProjection(this.dhInverseViewProjection);
-			boolean success = RtComposite.INSTANCE.composite(mainTarget.getColorTexture(), mainTarget.width, mainTarget.height,
-					nativeColorView, nativeDepthView, nativeWaterMaskView, nativeWaterMaskImage, nativeDepthClear,
-					nativeMatrixValid ? this.dhInverseViewProjection : null, nativeRaster);
+			boolean success = RtComposite.INSTANCE.composite(
+					mainTarget.getColorTexture(), mainTarget.width, mainTarget.height);
 			VanillaRenderController.INSTANCE.markRtCompositeResult(success);
 		}
 	}

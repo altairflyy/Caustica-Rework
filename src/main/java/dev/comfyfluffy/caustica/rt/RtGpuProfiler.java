@@ -44,8 +44,6 @@ public final class RtGpuProfiler {
         EXPOSURE_HISTOGRAM("exposureHistogram"),
         EXPOSURE_RESOLVE("exposureResolve"),
         DISPLAY("display"),
-        DH_FAR_LIGHTING("dhFarLighting"),
-        DH_RT_REFLECTION("dhRtReflection"),
         COPY("copy");
 
         final String label;

@@ -20,6 +20,8 @@ public static bool gv_motionUseRefracted = false; // true when the MV tracks the
 // World-space displacement of the motion-guide surface since the previous frame (0 for static
 // terrain/sky, an entity's per-vertex/object motion for a dynamic hit).
 public static float3 gv_motionObjDisp = float3(0.0, 0.0, 0.0);
+public static bool gv_farGeometryDebug = false;
+public static float3 gv_farGeometryDebugColor = float3(0.0, 0.0, 0.0);
 // Transmission replaces the ordinary guide tuple with the visible destination, so RR's specular inputs
 // (specular albedo + reflection MV) need the foreground glass/water interface kept separately. This is
 // the surface the reflection physically lives on; for an opaque primary hit it is that hit itself.
@@ -333,9 +335,15 @@ public void writeGuides(int2 pix, float3 primaryDir, float2 jndc, float2 size, f
 public void writeDebugView(int2 pix) {
     float4 normalRough = gNormal[pix];
     float3 dbg;
-    if (pc.debugView == 1u) {
+    if (pc.debugView == 14u) {
+        dbg = gv_farGeometryDebug ? clamp(gv_farGeometryDebugColor, 0.0, 1.0) : float3(0.0, 0.0, 0.0);
+    } else if (pc.debugView == 15u) {
+        dbg = gv_farGeometryDebug ? float3(1.0, 1.0, 1.0) : float3(0.0, 0.0, 0.0);
+    } else if (pc.debugView == 1u) {
         dbg = normalRough.xyz * 0.5 + 0.5;
-    } else if (pc.debugView == 2u) {
+    } else if (pc.debugView == 2u || pc.debugView == 16u
+            || pc.debugView == 17u || pc.debugView == 18u || pc.debugView == 19u
+            || pc.debugView == 20u) {
         dbg = gAlbedo[pix].rgb;
     } else if (pc.debugView == 3u) {
         dbg = float3(gDepth[pix], gDepth[pix], gDepth[pix]);

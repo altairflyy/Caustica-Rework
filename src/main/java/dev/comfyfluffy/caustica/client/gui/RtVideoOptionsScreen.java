@@ -90,10 +90,9 @@ public class RtVideoOptionsScreen extends OptionsSubScreen {
         // --- Advanced ---
         list.addHeader(ADVANCED_HEADER);
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.streamingHeader", RtSubScreens::streaming));
-        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.debugHeader", RtSubScreens::debug));
 
         // --- Distant Horizons (if present) ---
-        if (DistantHorizonsCompat.enabled()) {
+        if (DistantHorizonsCompat.dhRtRingEnabled()) {
             list.addHeader(DH_HEADER);
             list.addBig(RtVideoOptions.distantHorizonsRefreshButton());
         }
@@ -104,6 +103,9 @@ public class RtVideoOptionsScreen extends OptionsSubScreen {
             list.addSmall(RtVideoOptions.voxyOptions());
             list.addBig(RtVideoOptions.voxyRefreshButton());
         }
+
+        // Keep diagnostics immediately reachable as the final entry in Video Settings.
+        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.debugHeader", RtSubScreens::debug));
     }
 
     /**

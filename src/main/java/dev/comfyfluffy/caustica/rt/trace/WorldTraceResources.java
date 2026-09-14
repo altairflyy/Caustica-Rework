@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.rt.trace;
 
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
+import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
@@ -50,6 +51,7 @@ public final class WorldTraceResources {
 
     private volatile boolean reloadRebindRequested;
     private long boundBlockAlbedoAtlasHandle;
+    private long boundDhBlockAtlasHandle;
     private int bindlessTextureCapacity;
     private boolean materialBindingsReady;
     private boolean materialEpochTraceGate;
@@ -91,6 +93,7 @@ public final class WorldTraceResources {
     public void ensureForFrame(RtContext ctx, FrameViews frameViews) {
         refreshPipelineShapeIfNeeded(ctx);
         ensureWorld(ctx, frameViews);
+        refreshDhBlockAtlasIfNeeded(ctx);
     }
 
     /** Whether a pending reload has published a fresh non-zero block-atlas view. */
@@ -265,6 +268,9 @@ public final class WorldTraceResources {
         long atlasView = blockAlbedoAtlasView();
         boundBlockAlbedoAtlasHandle = atlasView;
         worldPipeline.setBlockAlbedoAtlas(atlasView, sampler);
+        long dhAtlasView = DistantHorizonsCompat.blockAtlasTextureView();
+        boundDhBlockAtlasHandle = dhAtlasView != 0L ? dhAtlasView : atlasView;
+        worldPipeline.setDhBlockAtlas(boundDhBlockAtlasHandle, sampler);
         RtBlockMaterials.INSTANCE.reset();
         RtMaterialOverrides materialOverrides = RtMaterialOverrides.load();
         RtEmissionSemantics emissionSemantics = RtEmissionSemantics.analyze();
@@ -283,12 +289,26 @@ public final class WorldTraceResources {
         materialEpochTraceGate = true;
     }
 
+    /** DH can allocate or resize its authoritative tile atlas after pipeline creation. */
+    private void refreshDhBlockAtlasIfNeeded(RtContext ctx) {
+        if (worldPipeline == null) return;
+        long dhAtlasView = DistantHorizonsCompat.blockAtlasTextureView();
+        long effectiveView = dhAtlasView != 0L ? dhAtlasView : blockAlbedoAtlasView();
+        if (effectiveView == 0L || effectiveView == boundDhBlockAtlasHandle) return;
+        // All descriptor-ring entries can still be referenced by submitted RT work. Atlas creation or
+        // resizing is rare, so use an explicit resource epoch instead of mutating an in-flight descriptor.
+        ctx.waitIdle();
+        worldPipeline.setDhBlockAtlas(effectiveView, atlasSampler(ctx));
+        boundDhBlockAtlasHandle = effectiveView;
+    }
+
     private void destroyPipeline() {
         if (worldPipeline != null) {
             worldPipeline.destroy();
             worldPipeline = null;
         }
         bindlessTextureCapacity = 0;
+        boundDhBlockAtlasHandle = 0L;
         materialBindingsReady = false;
     }
 

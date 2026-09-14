@@ -94,13 +94,13 @@ public final class VanillaRenderController {
 	public void markTerrainGroupSuppressed(ChunkSectionLayerGroup group) {
 		this.terrainSuppressed = true;
 		RtFrameStats.FRAME.count("suppressedVanillaTerrainLayerCalls", 1);
-
-		// DH 3.2.0's order=800 HEAD injection has already executed when our order=1000 callback runs.
-		if (DistantHorizonsCompat.nativeHookInstalled()) {
-			this.nativeDhHookObserved = true;
-			RtFrameStats.FRAME.count("nativeDhHookExecutions", 1);
-		}
 		logHybridState();
+	}
+
+	/** Called only from DH's real terrain-render entry point; never infer execution from mod presence. */
+	public void markNativeDhHookObserved() {
+		this.nativeDhHookObserved = true;
+		RtFrameStats.FRAME.count("nativeDhHookExecutions", 1);
 	}
 
 	public boolean wasNativeDhHookObservedThisFrame() {
@@ -138,7 +138,7 @@ public final class VanillaRenderController {
 				+ " nativeDhHookObserved=" + this.nativeDhHookObserved
 				+ " manualDhRender=false"
 				+ " rtRing=" + (DistantHorizonsCompat.dhRtRingEnabled() ? "ON" : "OFF")
-				+ " mode=RT_NEAR_NATIVE_DH_FAR";
+				+ " mode=CANONICAL_RT_NEAR_AND_DH_FAR";
 		if (!state.equals(this.lastLoggedHybridState)) {
 			this.lastLoggedHybridState = state;
 			CausticaMod.LOGGER.info("[Caustica DH Hybrid] {}", state);

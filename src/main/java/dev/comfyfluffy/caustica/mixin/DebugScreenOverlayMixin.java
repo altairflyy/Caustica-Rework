@@ -23,11 +23,20 @@ public abstract class DebugScreenOverlayMixin {
                     "Caustica FG: real %.1f + generated %.1f = presented %.1f FPS",
                     rate.realFps(), rate.generatedFps(), rate.totalPresentFps()));
         }
+        var dhQuality = dev.comfyfluffy.caustica.compat.DistantHorizonsCompat.dhLodQuality();
         lines.add(String.format(Locale.ROOT,
-                "Caustica DH RT: dispatched=%b, proxyBLAS=%d, proxyInstances=%d",
-                dev.comfyfluffy.caustica.rt.post.PostProcessing.isDhReflectionDispatchedThisFrame(),
-                dev.comfyfluffy.caustica.rt.proxy.DhFarFieldProxy.get().activeTileCount(),
-                dev.comfyfluffy.caustica.rt.proxy.DhFarFieldProxy.get().lastInstanceCount()));
+                "Caustica DH canonical RT: hook=%s ring=%s distance=%d quality=%s/%s active=%d unmatched=%d sources=%d BLAS=%d instances=%d state=%s",
+                dev.comfyfluffy.caustica.client.VanillaRenderController.INSTANCE
+                        .wasNativeDhHookObservedThisFrame() ? "YES" : "NO",
+                dev.comfyfluffy.caustica.compat.DistantHorizonsCompat.dhRtRingEnabled() ? "ON" : "OFF",
+                dev.comfyfluffy.caustica.compat.DistantHorizonsCompat.dhRenderDistanceChunks(),
+                dhQuality.maxHorizontalResolution(), dhQuality.horizontalQuality(),
+                dev.comfyfluffy.caustica.compat.DistantHorizonsCompat.activeRasterContainerCount(),
+                dev.comfyfluffy.caustica.compat.DistantHorizonsCompat.activeUnmatchedContainerCount(),
+                dev.comfyfluffy.caustica.rt.terrain.RtLodTerrain.dhSourceCount(),
+                dev.comfyfluffy.caustica.rt.terrain.RtLodTerrain.dhBlasCount(),
+                dev.comfyfluffy.caustica.rt.terrain.RtLodTerrain.frameInstanceCount(),
+                dev.comfyfluffy.caustica.rt.terrain.RtLodTerrain.schedulerState()));
         return lines;
     }
 }

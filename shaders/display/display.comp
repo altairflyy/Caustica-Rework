@@ -6,11 +6,6 @@ layout(binding = 0, set = 0, rgba8) uniform writeonly image2D outputImage; // LD
 layout(binding = 1, set = 0, rgba16f) uniform readonly image2D rtImage; // HDR RT radiance
 layout(binding = 2, set = 0, r32f) uniform readonly image2D exposureImage; // 1x1 linear exposure scale
 layout(binding = 3, set = 0, rgba16f) uniform writeonly image2D hdrImage; // PQ-encoded ([0,1], ST.2084) HDR display
-layout(binding = 4, set = 0, r32f) uniform readonly image2D rtViewZ; // render-res primary view depth; sky = large
-layout(binding = 5, set = 0) uniform sampler2D nativeBackground; // native DH color target
-layout(binding = 6, set = 0) uniform sampler2D nativeBackgroundDepth; // native DH depth target
-layout(binding = 7, set = 0) uniform sampler2D nativeSurfaceData; // RGB unlit albedo; A packed face/material/light
-layout(binding = 8, set = 0) uniform sampler2D dhReflection; // DH water RT reflection image
 
 // HDR display parameters. hdrEnabled gates the parallel PQ write; the SDR tonemap path always runs because
 // vanilla main-target presentation still consumes LDR.
@@ -23,13 +18,6 @@ layout(push_constant) uniform Push {
     float tonemapGamma;
     float tonemapSaturation;
     float tonemapContrast;
-    int hybridEnabled;    // 1 = preserve native DH pixels on RT misses
-    int renderWidth;      // render-res guide width (view-Z)
-    int renderHeight;     // render-res guide height (view-Z)
-    float nativeDepthClear; // exact DH far-depth clear value; non-clear means covered
-    mat4 nativeInvViewProj; // exact DH inverse combined matrix; reconstructs camera-relative world
-    // xyz = Caustica celestial direction. w = radiance luminance; -1 disables relighting, -2 is surface debug.
-    vec4 nativeLight;
 } pc;
 
 // Tonemap seam: map HDR RT radiance to displayable LDR before copying back to the main target.
@@ -252,132 +240,6 @@ vec3 tonemapHdr(vec3 hdr, float exposure) {
     return vec3(pqEncode(nits2020.r), pqEncode(nits2020.g), pqEncode(nits2020.b));
 }
 
-// DH's RGBA8_UNORM target contains display-referred LDR code values. Preserve those values verbatim
-// when the feature is disabled; the relit path below instead starts from the same-pass unlit surface
-// attachment and remains scene-linear until the common exposure/tonemap seam.
-vec3 nativeLdrToHdr(vec3 ldr) {
-    vec3 nits709 = clamp(ldr, 0.0, 1.0) * pc.paperWhiteNits;
-    vec3 nits2020 = BT709_TO_BT2020 * nits709;
-    return vec3(pqEncode(nits2020.r), pqEncode(nits2020.g), pqEncode(nits2020.b));
-}
-
-vec3 srgbToLinear(vec3 encoded) {
-    bvec3 low = lessThanEqual(encoded, vec3(0.04045));
-    return mix(pow((encoded + 0.055) / 1.055, vec3(2.4)), encoded / 12.92, low);
-}
-
-bool reconstructDhPosition(ivec2 depthPix, ivec2 depthSize, out vec3 position) {
-    if (any(lessThan(depthPix, ivec2(0))) || any(greaterThanEqual(depthPix, depthSize))) return false;
-    vec2 uv = (vec2(depthPix) + vec2(0.5)) / vec2(depthSize);
-    float depth = texelFetch(nativeBackgroundDepth, depthPix, 0).r;
-    if (abs(depth - pc.nativeDepthClear) <= 1.0e-6) return false;
-    vec4 homogeneous = pc.nativeInvViewProj * vec4(uv * 2.0 - 1.0, depth, 1.0);
-    if (abs(homogeneous.w) <= 1.0e-8) return false;
-    position = homogeneous.xyz / homogeneous.w;
-    return !any(isnan(position)) && !any(isinf(position));
-}
-
-uint surfaceKey(vec4 surface) {
-    return uint(round(clamp(surface.a, 0.0, 1.0) * 255.0));
-}
-
-vec3 dhFaceNormal(uint key) {
-    uint face = key & 7u;
-    if (face == 0u) return vec3(0.0, -1.0, 0.0);
-    if (face == 1u) return vec3(0.0, 1.0, 0.0);
-    if (face == 2u) return vec3(0.0, 0.0, -1.0);
-    if (face == 3u) return vec3(0.0, 0.0, 1.0);
-    if (face == 4u) return vec3(-1.0, 0.0, 0.0);
-    return vec3(1.0, 0.0, 0.0);
-}
-
-float dhSkyLight(uint key) {
-    return float((key >> 4u) & 3u) / 3.0;
-}
-
-float dhBlockLight(uint key) {
-    return float((key >> 6u) & 3u) / 3.0;
-}
-
-bool dhWater(uint key) {
-    return (key & 8u) != 0u;
-}
-
-bool rtHitAtOutputPixel(ivec2 outputPix, ivec2 outputSize) {
-    outputPix = clamp(outputPix, ivec2(0), outputSize - ivec2(1));
-    vec2 uv = (vec2(outputPix) + vec2(0.5)) / vec2(outputSize);
-    ivec2 rtSize = ivec2(pc.renderWidth, pc.renderHeight);
-    ivec2 rtPix = clamp(ivec2(floor(uv * vec2(rtSize))), ivec2(0), rtSize - ivec2(1));
-    return imageLoad(rtViewZ, rtPix).r < 1.0e5;
-}
-
-// Weighted, resolution-scaled coverage turns the binary RT/DH ownership edge into a narrow,
-// temporally stable cross-fade. Both inputs describe the same world in DH's overlap band; keeping
-// this in the final display pass avoids an extra history image or a second full-screen dispatch.
-float rtCoverage(ivec2 pix, ivec2 size) {
-    int outer = clamp(size.y / 160, 4, 12);
-    int inner = max(2, outer / 2);
-    float hits = rtHitAtOutputPixel(pix, size) ? 4.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(inner, 0), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(-inner, 0), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(0, inner), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(0, -inner), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(outer, 0), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(-outer, 0), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(0, outer), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(0, -outer), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(outer, outer), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(-outer, outer), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(outer, -outer), size) ? 1.0 : 0.0;
-    hits += rtHitAtOutputPixel(pix + ivec2(-outer, -outer), size) ? 1.0 : 0.0;
-    return smoothstep(0.08, 0.92, hits / 16.0);
-}
-
-vec3 directionalRadiance(float lightLuminance) {
-    // The CPU passes the exact Rec.709 luminance used by the RT celestial light. Its normalized
-    // colour is stable enough to reconstruct from intensity: sun is bright/warm, moon is dim/cool.
-    vec3 tint = lightLuminance > 1.0 ? vec3(1.0, 0.965, 0.91) : vec3(0.77, 0.84, 1.0);
-    float tintLuminance = dot(tint, vec3(0.2126, 0.7152, 0.0722));
-    return tint * (lightLuminance / max(tintLuminance, 1.0e-4));
-}
-
-vec3 shadeDhTerrain(vec3 albedo, uint key, vec3 skyRadiance) {
-    float sky = dhSkyLight(key);
-    float block = dhBlockLight(key);
-    vec3 normal = dhFaceNormal(key);
-    float lightLength = length(pc.nativeLight.xyz);
-    float ndotl = lightLength > 1.0e-6
-            ? max(dot(normal, pc.nativeLight.xyz / lightLength), 0.0) : 0.0;
-    float sunVisibility = smoothstep(0.35, 0.85, sky);
-
-    // Lambert direct lighting uses the same celestial radiance scale as the path tracer. The
-    // current RT miss colour supplies a same-frame sky/environment proxy (including time/weather),
-    // while DH's own light levels retain cave/overhang and block-light information.
-    vec3 ambient = max(skyRadiance, vec3(0.0)) * (0.08 + 0.72 * sky);
-    vec3 direct = directionalRadiance(max(pc.nativeLight.w, 0.0))
-            * (ndotl * 0.31830988618 * sunVisibility);
-    vec3 blockEmission = vec3(1.0, 0.47, 0.16) * (1.35 * block * block);
-    return max(albedo * (ambient + direct + blockEmission), vec3(0.0));
-}
-
-vec3 shadeDhWater(vec3 waterAlbedo, uint key, vec3 position, bool positionValid,
-                  vec3 skyRadiance, vec4 reflected) {
-    float sky = dhSkyLight(key);
-    vec3 body = waterAlbedo * (0.12 + 0.22 * sky);
-    vec3 reflection = max(skyRadiance, vec3(0.0));
-    if (reflected.a > 0.0) {
-        reflection = mix(reflection, max(reflected.rgb, vec3(0.0)), 0.72);
-    }
-    float cosTheta = positionValid
-            ? clamp(dot(-normalize(position), vec3(0.0, 1.0, 0.0)), 0.0, 1.0)
-            : 0.5;
-    float fresnel = 0.02 + 0.98 * pow(1.0 - cosTheta, 5.0);
-    // A small rough-surface floor keeps distant water from collapsing into flat biome colour while
-    // retaining the physically dominant grazing-angle reflection.
-    float reflectionWeight = clamp(fresnel + 0.06, 0.0, 0.96);
-    return mix(body, reflection, reflectionWeight);
-}
-
 void main() {
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(outputImage);
@@ -387,58 +249,16 @@ void main() {
 
     vec4 rt = imageLoad(rtImage, pix);
     float exposure = max(imageLoad(exposureImage, ivec2(0)).r, 0.0);
-    bool legacyNative = false;
-    vec3 nativeColor = vec3(0.0);
-    vec3 sceneRadiance = rt.rgb;
-    if (pc.hybridEnabled != 0 && pc.renderWidth > 0 && pc.renderHeight > 0) {
-        bool rtHit = rtHitAtOutputPixel(pix, size);
-        vec2 uv = (vec2(pix) + vec2(0.5)) / vec2(size);
-        vec4 native = texture(nativeBackground, uv);
-        nativeColor = native.rgb;
-        ivec2 nativeDepthSize = textureSize(nativeBackgroundDepth, 0);
-        ivec2 nativeDepthPix = clamp(ivec2(floor(uv * vec2(nativeDepthSize))),
-                ivec2(0), nativeDepthSize - ivec2(1));
-        float nativeDepth = texelFetch(nativeBackgroundDepth, nativeDepthPix, 0).r;
-        bool nativeCovered = abs(nativeDepth - pc.nativeDepthClear) > 1.0e-6;
-        bool relightingEnabled = pc.nativeLight.w >= 0.0;
-        bool surfaceDebug = pc.nativeLight.w <= -1.5;
-        if (surfaceDebug) {
-            uint key = nativeCovered ? surfaceKey(texelFetch(nativeSurfaceData, nativeDepthPix, 0)) : 0u;
-            vec3 debugColor = nativeCovered && dhWater(key) ? vec3(1.0) : vec3(0.0);
-            imageStore(outputImage, pix, vec4(debugColor, 1.0));
-            if (pc.hdrEnabled != 0) imageStore(hdrImage, pix, vec4(nativeLdrToHdr(debugColor), 1.0));
-            return;
-        }
-        if (!relightingEnabled) {
-            legacyNative = !rtHit && nativeCovered;
-            nativeColor = native.rgb;
-        } else if (nativeCovered) {
-            vec4 surface = texelFetch(nativeSurfaceData, nativeDepthPix, 0);
-            uint key = surfaceKey(surface);
-            vec3 albedo = srgbToLinear(surface.rgb);
-            vec3 P = vec3(0.0);
-            bool positionValid = reconstructDhPosition(nativeDepthPix, nativeDepthSize, P);
-            // At native-only pixels the RT miss is the exact same-frame environment. Inside the
-            // narrow RT-side overlap, avoid treating an already shaded RT surface as skylight;
-            // use a conservative celestial-derived ambient proxy instead.
-            vec3 skyRadiance = rtHit
-                    ? directionalRadiance(max(pc.nativeLight.w, 0.0)) * 0.04 + vec3(0.01)
-                    : rt.rgb;
-            vec3 nativeRadiance = dhWater(key)
-                    ? shadeDhWater(albedo, key, P, positionValid, skyRadiance,
-                            texelFetch(dhReflection, pix, 0))
-                    : shadeDhTerrain(albedo, key, skyRadiance);
-            // Feather only on pixels where both renderers actually have geometry. Mixing the
-            // native-only side toward the RT miss would reveal sky through the terrain boundary.
-            sceneRadiance = rtHit
-                    ? mix(nativeRadiance, rt.rgb, rtCoverage(pix, size))
-                    : nativeRadiance;
-        }
-    }
-    imageStore(outputImage, pix, vec4(legacyNative ? nativeColor : tonemap(sceneRadiance, exposure), 1.0));
+    // Near and FAR radiance share rtImage: both came through the main TLAS, canonical guide export and
+    // temporal/reconstruction path. There is no second native-DH display authority.
+    // -3 is the pure linear-albedo diagnostic. gAlbedo was written before lighting; bypass every
+    // display look here as well so exposure, tone mapping, gamma, saturation and contrast cannot
+    // manufacture or hide a Near/FAR seam. The ordinary and other debug paths remain unchanged.
+    vec3 displayRgb = tonemap(rt.rgb, exposure);
+    imageStore(outputImage, pix, vec4(displayRgb, 1.0));
 
     if (pc.hdrEnabled != 0) {
-        vec3 hdr = legacyNative ? nativeLdrToHdr(nativeColor) : tonemapHdr(sceneRadiance, exposure);
+        vec3 hdr = tonemapHdr(rt.rgb, exposure);
         imageStore(hdrImage, pix, vec4(hdr, 1.0));
     }
 }

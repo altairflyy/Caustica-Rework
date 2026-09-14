@@ -20,6 +20,8 @@ final class LodMeshContractTest {
         assertEquals(List.of(mesh), snapshot.meshes());
         assertSame(opaque, snapshot.meshes().get(0).opaque());
         assertSame(transparent, snapshot.meshes().get(0).transparent());
+        assertEquals(opaque.length / 64, snapshot.meshes().get(0).opaqueProvenance().length);
+        assertEquals(transparent.length / 64, snapshot.meshes().get(0).transparentProvenance().length);
         assertThrows(UnsupportedOperationException.class,
                 () -> snapshot.meshes().add(mesh));
     }

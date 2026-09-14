@@ -90,7 +90,6 @@ public final class CausticaClient implements ClientModInitializer {
 		WorldRenderScaler.INSTANCE.destroy();
 		RtUiOverlay.destroy(); // GUI redirect is not gated by rtInitDone; always release its TextureTarget
 		if (!rtInitDone) {
-			dev.comfyfluffy.caustica.compat.DistantHorizonsWaterMask.destroy();
 			RtWorkerPool.INSTANCE.shutdown();
 			return;
 		}
@@ -108,7 +107,6 @@ public final class CausticaClient implements ClientModInitializer {
 			ctx.quiesceForOwnerShutdown();
 			RtEntities.INSTANCE.shutdown(ctx);
 		}
-		dev.comfyfluffy.caustica.compat.DistantHorizonsWaterMask.destroy();
 		RtComposite.INSTANCE.destroy();
 		dev.comfyfluffy.caustica.rt.upscale.UpscalerRuntime.INSTANCE.destroy();
 		RtEntityTextures.INSTANCE.reset();

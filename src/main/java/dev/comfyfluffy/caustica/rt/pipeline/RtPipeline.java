@@ -95,10 +95,12 @@ public final class RtPipeline {
     private final long bindlessPool;
     private final long bindlessSet;
     private final int skyAtlasBinding;
+    private final int dhBlockAtlasBinding;
     private boolean destroyed;
 
     private RtPipeline(RtContext ctx, long dsl, long pool, long[] sets, long layout, long pipeline, RtBuffer sbt, long stride, int raygenCount, int missCount, int hitGroupCount, int pushConstantSize, int pushConstantStages, int firstExtraBinding,
-                       long bindlessLayout, long bindlessPool, long bindlessSet, int skyAtlasBinding) {
+                       long bindlessLayout, long bindlessPool, long bindlessSet, int skyAtlasBinding,
+                       int dhBlockAtlasBinding) {
         this.ctx = ctx;
         this.descriptorSetLayout = dsl;
         this.descriptorPool = pool;
@@ -122,6 +124,7 @@ public final class RtPipeline {
         this.bindlessPool = bindlessPool;
         this.bindlessSet = bindlessSet;
         this.skyAtlasBinding = skyAtlasBinding;
+        this.dhBlockAtlasBinding = dhBlockAtlasBinding;
     }
 
     /**
@@ -142,7 +145,7 @@ public final class RtPipeline {
         if (bindlessTextures > 0) {
             long requiredCombinedSamplers = Math.addExact(
                     Math.multiplyExact((long) bindlessTextures, BINDLESS_BINDINGS),
-                    withBlockAlbedoAtlas ? 1L : 0L);
+                    withBlockAlbedoAtlas ? 2L : 0L);
             long deviceLimit = ctx.updateAfterBindCombinedImageSamplerLimit();
             if (requiredCombinedSamplers > deviceLimit) {
                 throw new UnsupportedOperationException("Configured bindless texture capacity " + bindlessTextures
@@ -157,7 +160,9 @@ public final class RtPipeline {
             // draw the sun/moon discs. Canonical material pages live in the bindless set, not set 0.
             int skyBinding = skyAtlas ? materialBase : -1;
             int skySamplers = skyAtlas ? 1 : 0;
-            int bindingCount = firstExtraBinding + extraStorageImages + skySamplers;
+            int dhAtlasBinding = withBlockAlbedoAtlas ? materialBase + skySamplers : -1;
+            int dhAtlasSamplers = withBlockAlbedoAtlas ? 1 : 0;
+            int bindingCount = firstExtraBinding + extraStorageImages + skySamplers + dhAtlasSamplers;
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(bindingCount, stack);
             binds.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
                     .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
@@ -176,13 +181,19 @@ public final class RtPipeline {
                 binds.get(skyBinding).binding(skyBinding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                         .descriptorCount(1).stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR);
             }
+            if (withBlockAlbedoAtlas) {
+                binds.get(dhAtlasBinding).binding(dhAtlasBinding)
+                        .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                        .descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+                                | (hasAhit ? VK_SHADER_STAGE_ANY_HIT_BIT_KHR : 0));
+            }
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout");
             long dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
 
-            int combinedSamplers = (withBlockAlbedoAtlas ? 1 : 0) + skySamplers;
+            int combinedSamplers = (withBlockAlbedoAtlas ? 1 : 0) + skySamplers + dhAtlasSamplers;
             int poolSizeCount = 2 + (combinedSamplers > 0 ? 1 : 0);
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(poolSizeCount, stack);
             poolSizes.get(0).type(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(RING);
@@ -367,7 +378,7 @@ public final class RtPipeline {
             }
             sbt.flush();
             return new RtPipeline(ctx, dsl, pool, sets, layout, pipeline, sbt, stride, raygenCount, missCount, hitGroupCount, pushConstantSize, pcStages, firstExtraBinding,
-                    bindlessLayout, bindlessPool, bindlessSet, skyBinding);
+                    bindlessLayout, bindlessPool, bindlessSet, skyBinding, dhAtlasBinding);
         }
     }
 
@@ -450,6 +461,11 @@ public final class RtPipeline {
     /** Bind the vanilla celestials atlas (sun + moon phases), sampled by world.rmiss for the discs. */
     public void setSkyAtlas(long imageView, long sampler) {
         writeAtlasBinding(skyAtlasBinding, imageView, sampler);
+    }
+
+    /** Bind DH's authoritative block-tile atlas, sampled only by FAR closest-hit records. */
+    public void setDhBlockAtlas(long imageView, long sampler) {
+        writeAtlasBinding(dhBlockAtlasBinding, imageView, sampler);
     }
 
     public boolean hasSkyAtlas() {

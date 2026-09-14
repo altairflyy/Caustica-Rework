@@ -32,7 +32,7 @@ class PostProcessingOwnershipTest {
                 "svgfBackend.ensureResources(ctx", "traceFrameResources.createReconstructionOutputs(ctx)",
                 "nrdBackend.bindCombine(ctx", "postProcessing.ensureExposure(ctx)",
                 "broadcastTemporalReset", "worldTraceResources.bindFrameViews(traceFrameViews())",
-                "postProcessing.bind(views.rrOutput(), views.viewZ())");
+                "postProcessing.bind(views.rrOutput())");
         ordered(source.substring(source.indexOf("public void destroy()")),
                 "postProcessing.destroyImages()", "RtWorldOverlay.INSTANCE.destroy()",
                 "traceFrameResources.release()", "restirSystem.destroy()",

@@ -25,41 +25,78 @@ final class DhNativeHookHybridContractTest {
         String source = read("src/main/java/dev/comfyfluffy/caustica/mixin/ChunkSectionsToRenderMixin.java");
         assertTrue(source.contains("method = \"renderGroup\""));
         assertTrue(source.contains("order = 1000"));
-        assertTrue(source.contains("ChunkSectionLayerGroup.OPAQUE"));
-        assertTrue(source.contains("ChunkSectionLayerGroup.TRANSLUCENT"));
         assertTrue(source.contains("shouldSuppressVanillaTerrain()"));
         assertTrue(source.contains("ci.cancel()"));
-        assertFalse(source.contains("LevelRenderer" + ".render"));
     }
 
     @Test
-    void manualDhRenderPathIsAbsentAndF6RemainsObservationOnly() throws IOException {
+    void nativeHookStatComesFromTheRealDhRenderEntryPoint() throws IOException {
+        String observer = read("src/main/java/dev/comfyfluffy/caustica/mixin/DistantHorizonsActiveRenderMixin.java");
+        String controller = read("src/main/java/dev/comfyfluffy/caustica/client/VanillaRenderController.java");
+        assertTrue(observer.contains("markNativeDhHookObserved()"));
+        assertTrue(observer.contains("publishActiveRasterContainers"));
+        assertTrue(controller.contains("count(\"nativeDhHookExecutions\", 1)"));
+        int suppression = controller.indexOf("public void markTerrainGroupSuppressed");
+        int observation = controller.indexOf("public void markNativeDhHookObserved", suppression);
+        assertFalse(controller.substring(suppression, observation).contains("nativeDhHookExecutions"));
+    }
+
+    @Test
+    void dhSettingsRemainAuthoritativeAndLivePolled() throws IOException {
         String compat = read("src/main/java/dev/comfyfluffy/caustica/compat/DistantHorizonsCompat.java");
-        String seam = read("src/main/java/dev/comfyfluffy/caustica/client/WorldRenderScaler.java");
-        assertFalse(compat.contains("getMethod(\"renderLods\")"));
-        assertFalse(compat.contains("void renderNativeRaster"));
-        assertFalse(seam.contains("renderNativeRaster"));
-        assertTrue(compat.contains("nativeRasterActive()"));
-        assertTrue(compat.contains("rendererMode"));
-        assertFalse(compat.contains("rendererMode.set"));
+        String lod = read("src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtLodTerrain.java");
+        String config = read("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
+        String options = read("src/main/java/dev/comfyfluffy/caustica/client/RtVideoOptions.java");
+        String screen = read("src/main/java/dev/comfyfluffy/caustica/client/gui/RtVideoOptionsScreen.java");
+        assertTrue(compat.contains("chunkRenderDistance"));
+        assertTrue(compat.contains("maxHorizontalResolution"));
+        assertTrue(compat.contains("horizontalQuality"));
+        assertTrue(compat.contains("lodShading"));
+        assertTrue(lod.contains("DistantHorizonsCompat.lodQuality()"));
+        assertTrue(lod.contains("DistantHorizonsCompat.renderDistanceChunks()"));
+        assertTrue(options.contains("reloadRenderDataCache()"));
+        assertTrue(options.contains("DistantHorizonsCompat.dhRtRingEnabled()"));
+        assertTrue(screen.contains("if (DistantHorizonsCompat.dhRtRingEnabled())"));
+        assertFalse(compat.substring(compat.indexOf("public static boolean reloadRenderDataCache()"),
+                compat.indexOf("public static LodQuality lodQuality()"))
+                .contains("VoxyCompat.reset()"));
+        assertFalse(config.contains("terrain.dh-rt-enabled"));
+        assertFalse(config.contains("terrain.dh-rt-distance-chunks"));
+        assertFalse(config.contains("terrain.dh-far-lighting"));
+        assertFalse(config.contains("terrain.dh-water-mask-debug"));
     }
 
     @Test
-    void dhRtRingAndNativeRasterAreIndependent() throws IOException {
-        String compat = read("src/main/java/dev/comfyfluffy/caustica/compat/DistantHorizonsCompat.java");
-        assertTrue(compat.contains("if (!dhRtRingEnabled())"));
-        assertTrue(compat.contains("public static boolean nativeHookInstalled()"));
-        assertTrue(compat.contains("return LOADED;"));
-    }
-
-    @Test
-    void hybridCoverageUsesDhDepthNotColorAlphaOrTwoByTwoHeuristic() throws IOException {
+    void canonicalFarUsesOneRtAndDisplayAuthority() throws IOException {
         String shader = read("shaders/display/display.comp");
-        assertTrue(shader.contains("nativeBackgroundDepth"));
-        assertTrue(shader.contains("nativeDepthClear"));
-        assertTrue(shader.contains("abs(nativeDepth - pc.nativeDepthClear)"));
-        assertFalse(shader.contains("native.a"));
-        assertFalse(shader.contains("for (int y = 0; y <= 1"));
+        String compat = read("src/main/java/dev/comfyfluffy/caustica/compat/DistantHorizonsCompat.java");
+        String lod = read("src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtLodTerrain.java");
+        assertTrue(shader.contains("tonemap(rt.rgb, exposure)"));
+        assertFalse(shader.contains("nativeBackground"));
+        assertFalse(shader.contains("nativeWaterMask"));
+        assertFalse(shader.contains("dhReflection"));
+        assertTrue(compat.contains("return ACTIVE_FAR_MESHES"));
+        assertTrue(lod.contains("MAX_ACTIVE_BLAS = 64"));
+        assertTrue(lod.contains("DH is the sole authority for FAR distance"));
+        assertFalse(Files.exists(ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/proxy/DhFarFieldProxy.java")));
+        assertFalse(Files.exists(ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDhReflectionPipeline.java")));
+    }
+
+    @Test
+    void dhDiagnosticsHaveLiveProducers() throws IOException {
+        String stats = read("src/main/java/dev/comfyfluffy/caustica/rt/RtFrameStats.java");
+        String composite = read("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
+        String overlay = read("src/main/java/dev/comfyfluffy/caustica/mixin/DebugScreenOverlayMixin.java");
+        assertTrue(stats.contains("dhActiveRasterContainers"));
+        assertTrue(stats.contains("dhUnmatchedRasterContainers"));
+        assertTrue(composite.contains("count(\"dhActiveRasterContainers\""));
+        assertTrue(composite.contains("count(\"dhUnmatchedRasterContainers\""));
+        assertTrue(overlay.contains("wasNativeDhHookObservedThisFrame()"));
+        assertTrue(overlay.contains("DistantHorizonsCompat.dhRenderDistanceChunks()"));
+        assertTrue(overlay.contains("DistantHorizonsCompat.dhLodQuality()"));
+        assertFalse(stats.contains("manualDhRenderCalls"));
     }
 
     @Test
@@ -70,31 +107,6 @@ final class DhNativeHookHybridContractTest {
         String gate = controller.substring(method, next);
         assertTrue(gate.contains("if (!this.rtActive)"));
         assertTrue(gate.contains("return false;"));
-    }
-
-    @Test
-    void farLightingUsesSamePassSurfaceDataAndOneDisplayTransform() throws IOException {
-        String shader = read("shaders/display/display.comp");
-        String scaler = read("src/main/java/dev/comfyfluffy/caustica/client/WorldRenderScaler.java");
-        String config = read("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
-        String pipeline = read("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDisplayPipeline.java");
-        assertTrue(shader.contains("nativeInvViewProj"));
-        assertTrue(shader.contains("reconstructDhPosition"));
-        assertTrue(shader.contains("nativeSurfaceData"));
-        assertTrue(shader.contains("dhFaceNormal"));
-        assertTrue(shader.contains("dhSkyLight"));
-        assertTrue(shader.contains("dhBlockLight"));
-        assertTrue(shader.contains("? mix(nativeRadiance, rt.rgb, rtCoverage"));
-        assertTrue(shader.contains(": nativeRadiance;"));
-        assertTrue(shader.contains("tonemap(sceneRadiance, exposure)"));
-        assertTrue(shader.contains("tonemapHdr(sceneRadiance, exposure)"));
-        assertFalse(shader.contains("Temporary inspection"));
-        assertFalse(shader.contains("rayQueryEXT"));
-        assertFalse(shader.contains("traceRayEXT"));
-        assertTrue(pipeline.contains("PUSH_BYTES = 32 * Integer.BYTES"));
-        assertFalse(pipeline.contains("push.putInt(128"));
-        assertTrue(scaler.contains("DistantHorizonsCompat.inverseViewProjection"));
-        assertTrue(config.contains("terrain.dh-far-lighting"));
     }
 
     private static String read(String relative) throws IOException {
