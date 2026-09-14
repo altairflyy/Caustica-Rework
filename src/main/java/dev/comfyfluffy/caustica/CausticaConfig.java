@@ -60,7 +60,12 @@ public final class CausticaConfig {
             Rt.Composite.WEATHER_LIGHTING, Rt.Composite.DENOISER, Rt.Composite.METALLIC_SHININESS,
             Rt.Composite.WATER_WAVE_STRENGTH, Rt.Composite.WATER_WAVE_SPEED, Rt.Composite.WATER_WAVE_DETAIL,
             Rt.Composite.PARALLAX_QUALITY,
-            Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
+            Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Terrain.RESIDENCY_ENABLED,
+            Rt.Terrain.SAFETY_HEADROOM_MIB, Rt.Terrain.PROTECTED_NEAR_RADIUS,
+            Rt.Terrain.PRESSURE_HYSTERESIS_MIB, Rt.Terrain.AS_PACING_ENABLED,
+            Rt.Terrain.AS_PACING_BUSY_ENTER_MS, Rt.Terrain.AS_PACING_BUSY_EXIT_MS,
+            Rt.Terrain.AS_PACING_RESUME_STABLE_MS, Rt.Terrain.AS_PACING_BUSY_INTERVAL_MS,
+            Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES,
             Rt.DlssRr.ENABLED, Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.Fg.ENABLED,
             Rt.Fsr.ENABLED, Rt.Fsr.QUALITY, Rt.Xess.ENABLED, Rt.Xess.QUALITY,
@@ -114,7 +119,13 @@ public final class CausticaConfig {
         FILE.setComment("terrain",
                 " Render-thread terrain work is bounded by dispatch/result counts per streaming pass.\n"
                         + " Buffer fill and BLAS/OMM preparation run on workers. max-inflight-sections bounds\n"
-                        + " the complete snapshot -> worker -> GPU build -> publication lifecycle.");
+                        + " the complete snapshot -> worker -> GPU build -> publication lifecycle.\n"
+                        + " residency-enabled gates new terrain builds on global Vulkan heap pressure;\n"
+                        + " safety-headroom-mib reserves space for the rest of the renderer and driver.\n"
+                        + " protected-near-radius is reserved for the future provider-aware eviction policy;\n"
+                        + " no-LOD mode never evicts visible full terrain.\n"
+                        + " Distant Horizons is authoritative for FAR enable state, render distance and LOD quality.\n"
+                        + " Caustica converts only DH's current native active set and adds no independent FAR cap.");
         FILE.setComment("frame-generation",
                 " DLSS Frame Generation. Default off; gated additionally by hardware/driver availability\n"
                         + " (the driver's NGX capability query reports FrameGeneration_Available; RTX 40/50 series only).\n"
@@ -931,7 +942,25 @@ public final class CausticaConfig {
                     intAtLeast("caustica.rt.rebaseDistanceBlocks", "terrain.rebase-distance-blocks", 128, 0);
             public static final BooleanSetting BLAS_COMPACTION =
                     bool("caustica.rt.blasCompaction", "terrain.blas-compaction", true);
-
+            public static final BooleanSetting RESIDENCY_ENABLED =
+                    bool("caustica.rt.terrainResidency", "terrain.residency-enabled", true);
+            public static final IntSetting SAFETY_HEADROOM_MIB =
+                    intAtLeast("caustica.rt.terrainSafetyHeadroomMiB", "terrain.safety-headroom-mib", 2048, 256);
+            public static final IntSetting PROTECTED_NEAR_RADIUS =
+                    intAtLeast("caustica.rt.terrainProtectedNearRadius", "terrain.protected-near-radius", 2, 0);
+            public static final IntSetting PRESSURE_HYSTERESIS_MIB =
+                    intAtLeast("caustica.rt.terrainPressureHysteresisMiB", "terrain.pressure-hysteresis-mib", 512, 0);
+            /** Producer-level AS pacing driven by the profiler's last completed non-blocking GPU window. */
+            public static final BooleanSetting AS_PACING_ENABLED =
+                    bool("caustica.rt.asPacing", "terrain.as-pacing", true);
+            public static final FloatSetting AS_PACING_BUSY_ENTER_MS =
+                    finiteFloat("caustica.rt.asPacingBusyEnterMs", "terrain.as-pacing-busy-enter-ms", 14.0f);
+            public static final FloatSetting AS_PACING_BUSY_EXIT_MS =
+                    finiteFloat("caustica.rt.asPacingBusyExitMs", "terrain.as-pacing-busy-exit-ms", 11.0f);
+            public static final IntSetting AS_PACING_RESUME_STABLE_MS =
+                    intAtLeast("caustica.rt.asPacingResumeStableMs", "terrain.as-pacing-resume-stable-ms", 1500, 0);
+            public static final IntSetting AS_PACING_BUSY_INTERVAL_MS =
+                    intAtLeast("caustica.rt.asPacingBusyIntervalMs", "terrain.as-pacing-busy-interval-ms", 250, 1);
             private Terrain() {
             }
         }

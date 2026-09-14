@@ -165,9 +165,16 @@ abstract class CompileShaders extends DefaultTask {
 				if (worldIndirectRaygen) {
 					// Keep a capability-free TraceRay fallback for devices without EXT SER, and
 					// publish the reordered variant separately when the extension is available.
+					// The lean DLSS-RR variant compiles out NRD-only signal bookkeeping. SHaRC,
+					// ReSTIR, RIS and all path-tracing quality work remain identical.
 					compileOneSlang(src, spv, [])
+					compileOneSlang(src, new File(scratchDir, "world_lean.rgen.spv"),
+							["-DCAUSTICA_INDIRECT_NO_NRD"])
 					compileOneSlang(src, new File(scratchDir, "world_ser.rgen.spv"),
 							["-DCAUSTICA_ENABLE_EXT_SER", "-capability", "spvShaderInvocationReorderEXT"])
+					compileOneSlang(src, new File(scratchDir, "world_ser_lean.rgen.spv"),
+							["-DCAUSTICA_ENABLE_EXT_SER", "-DCAUSTICA_INDIRECT_NO_NRD",
+							 "-capability", "spvShaderInvocationReorderEXT"])
 				} else {
 					// Pass A intentionally uses ordinary TraceRay.
 					compileOneSlang(src, spv, [])

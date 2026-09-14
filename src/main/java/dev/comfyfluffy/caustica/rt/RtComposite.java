@@ -8,6 +8,7 @@ import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.client.CausticaJitter;
+import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.mixin.CommandEncoderAccessor;
 import dev.comfyfluffy.caustica.rt.gen.RestirReservoirData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushConstantsData;
@@ -104,6 +105,8 @@ public final class RtComposite {
     public static final RtComposite INSTANCE = new RtComposite();
 
     public static boolean enabled() {
+        // Caustica replaces ordinary chunk terrain while LevelRenderer and DH keep native orchestration.
+        // Disabling the optional DH RT ring must never disable Caustica RT itself.
         return CausticaConfig.Rt.ENABLED.value();
     }
 
@@ -318,6 +321,7 @@ public final class RtComposite {
     private final SvgfReconstructionBackend svgfBackend = new SvgfReconstructionBackend();
     private final DlssRrReconstructionBackend dlssRrBackend = new DlssRrReconstructionBackend();
     private final ExperimentalNrdBackend nrdBackend = new ExperimentalNrdBackend();
+    private int vramDiagnosticTransition;
     private final UpscalerRuntime upscalers = UpscalerRuntime.INSTANCE;
     // Experimental SHaRC (Spatially Hashed Radiance Cache). Shader-only — the host only owns the
     // persistent cache buffer and publishes its device address (no native lib, no extra binding).
@@ -371,6 +375,8 @@ public final class RtComposite {
     private FrameInputs pipelineInputs;
     private VkCommandBuffer pipelineCommand;
     private MemoryStack pipelineStack;
+    private RtGpuProfiler.Session pipelineGpuProfile;
+    private dev.comfyfluffy.caustica.rt.trace.IndirectShaderVariant loggedIndirectShaderVariant;
     private ByteBuffer pipelinePushConstants;
     private ReconstructionInput pipelineReconstructionInput;
     private ReconstructionResult pipelineReconstructionResult;
@@ -485,6 +491,25 @@ public final class RtComposite {
         RtContext ctx = RtContext.currentOrNull();
         if (ctx != null) {
             ctx.accelerationStructures().recordDiagnostics(RtFrameStats.FRAME);
+            RtFrameStats.FRAME.count("queuedGpuBuildCount", ctx.gpuExecutor().pendingJobCount());
+            RtFrameStats.FRAME.count("lodInstanceCount", RtLodTerrain.frameInstanceCount());
+            RtFrameStats.FRAME.count("dhSourceCount", RtLodTerrain.dhSourceCount());
+            RtFrameStats.FRAME.count("dhBlasCount", RtLodTerrain.dhBlasCount());
+            RtFrameStats.FRAME.count("dhActiveRasterContainers",
+                    DistantHorizonsCompat.activeRasterContainerCount());
+            RtFrameStats.FRAME.count("dhUnmatchedRasterContainers",
+                    DistantHorizonsCompat.activeUnmatchedContainerCount());
+            RtFrameStats.FRAME.count("dhTlasInstanceCount", RtLodTerrain.frameInstanceCount());
+            RtFrameStats.FRAME.count("dhFullyVanillaCoveredCount", RtLodTerrain.dhFullyVanillaCoveredCount());
+            RtFrameStats.FRAME.count("dhPartiallyCoveredCount", RtLodTerrain.dhPartiallyCoveredCount());
+            RtFrameStats.FRAME.count("dhUncoveredCount", RtLodTerrain.dhUncoveredCount());
+            RtFrameStats.FRAME.count("fullTerrainInstanceCount", RtTerrain.terrainPublishedSections());
+            RtFrameStats.FRAME.count("totalTlasInstanceCount",
+                    RtTerrain.terrainPublishedSections() + RtLodTerrain.frameInstanceCount());
+            RtFrameStats.FRAME.count("lodPending", RtLodTerrain.pending() ? 1 : 0);
+            RtFrameStats.FRAME.count("lodCpuPending", RtLodTerrain.cpuPending() ? 1 : 0);
+            RtFrameStats.FRAME.count("lodPackPending", RtLodTerrain.packPending() ? 1 : 0);
+            RtFrameStats.FRAME.count("lodBuildSession", RtLodTerrain.buildSessionActive() ? 1 : 0);
         }
         postProcessing.beginFrame();
     }
@@ -683,10 +708,21 @@ public final class RtComposite {
         TraceFrameResources.Configuration configuration = new TraceFrameResources.Configuration(
                 new FrameContext.Extent(width, height), rrEnabled, rrQuality, fsrEnabled, fsrQuality,
                 xessEnabled, xessQuality, svgfEnabled, nrdEnabled);
+        TraceFrameResources.TraceFrameViews previousViews = traceFrameResources.views();
+        int previousRrQuality = previousViews == null
+                ? Integer.MIN_VALUE : previousViews.sizingKey().configuration().rrQuality();
+        boolean rrQualityTransition = rrEnabled && previousRrQuality != Integer.MIN_VALUE
+                && previousRrQuality != rrQuality;
         if (traceFrameResources.matches(configuration)
                 && postProcessing.imagesReady() && postProcessing.exposureReady()) {
             syncRestirResources(ctx);
             return;
+        }
+        if (rrQualityTransition) {
+            vramDiagnosticTransition++;
+            CausticaMod.LOGGER.info("[Caustica VRAM][DLSS quality {}->{}][transition {}][A before] {}",
+                    previousRrQuality, rrQuality, vramDiagnosticTransition,
+                    VulkanDiagnostics.vramSnapshot(ctx));
         }
         recordTemporalReset(TemporalResetReason.RESOLUTION_CHANGE);
         ctx.waitIdle(); // resize is rare; no in-flight frame may use the old image/descriptor
@@ -702,6 +738,11 @@ public final class RtComposite {
         traceFrameResources.releaseGuidesAfterIdle();
         svgfBackend.releaseResources();
         traceFrameResources.releaseReconstructionOutputsAfterIdle();
+        if (rrQualityTransition) {
+            CausticaMod.LOGGER.info("[Caustica VRAM][DLSS quality {}->{}][transition {}][B afterRelease] {}",
+                    previousRrQuality, rrQuality, vramDiagnosticTransition,
+                    VulkanDiagnostics.vramSnapshot(ctx));
+        }
 
         // The path tracer + its guide buffers run at render res; the active upscaler — DLSS-RR
         // (denoise + upscale) or FSR 3 (upscale only) — or a fallback blit brings the image to
@@ -742,6 +783,11 @@ public final class RtComposite {
                     views.viewZ().view, views.specularAlbedo().view, views.normal().view));
         }
         postProcessing.ensureExposure(ctx);
+        if (rrQualityTransition) {
+            CausticaMod.LOGGER.info("[Caustica VRAM][DLSS quality {}->{}][transition {}][C afterTraceCreate render={}x{}] {}",
+                    previousRrQuality, rrQuality, vramDiagnosticTransition,
+                    views.renderWidth(), views.renderHeight(), VulkanDiagnostics.vramSnapshot(ctx));
+        }
 
         broadcastTemporalReset(() -> {
             if (svgfEnabled) {
@@ -810,7 +856,9 @@ public final class RtComposite {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world primary trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.tracePrimary")) {
+            pipelineGpuProfile.begin(RtGpuProfiler.Region.PRIMARY);
             worldTraceResources.trace(pipelineCommand, frameViews().renderWidth(), frameViews().renderHeight(), pipelinePushConstants, 0);
+            pipelineGpuProfile.end(RtGpuProfiler.Region.PRIMARY);
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
@@ -818,7 +866,16 @@ public final class RtComposite {
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(
                 pipelineContext, pipelineCommand, "world indirect trace");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
-            worldTraceResources.trace(pipelineCommand, frameViews().renderWidth(), frameViews().renderHeight(), pipelinePushConstants, 1);
+            pipelineGpuProfile.begin(RtGpuProfiler.Region.INDIRECT);
+            var indirectVariant = dev.comfyfluffy.caustica.rt.trace.IndirectShaderVariant
+                    .select(pipelineInputs.rrPath(), pipelineInputs.nrdPath());
+            if (indirectVariant != loggedIndirectShaderVariant) {
+                CausticaMod.LOGGER.info("Indirect shader variant: {}", indirectVariant);
+                loggedIndirectShaderVariant = indirectVariant;
+            }
+            worldTraceResources.trace(pipelineCommand, frameViews().renderWidth(), frameViews().renderHeight(),
+                    pipelinePushConstants, indirectVariant.raygenIndex());
+            pipelineGpuProfile.end(RtGpuProfiler.Region.INDIRECT);
         }
         dev.comfyfluffy.caustica.rt.graph.PathTraceBarriers.before(
                 pipelineCommand, pipelineStack, barrierPlan,
@@ -844,11 +901,13 @@ public final class RtComposite {
                 ? pipelineReconstructionInput.denoisedSource() : frameViews().output();
 
         if (pipelineInputs.rrPath()) {
+            pipelineGpuProfile.begin(RtGpuProfiler.Region.DLSS_RR);
             dev.comfyfluffy.caustica.rt.reconstruction.ReconstructionResult result = dlssRrBackend.execute(
                     new DlssRrReconstructionBackend.Request(ctx, cmd, frameViews().output(), frameViews().depth(), frameViews().motion(), frameViews().albedo(),
                             frameViews().specularAlbedo(), frameViews().normal(), frameViews().specularMotion(), frameViews().rrOutput(),
                             frameViews().renderWidth(), frameViews().renderHeight(), frameViews().displayWidth(), frameViews().displayHeight(),
                             -frame.jitter().x(), -frame.jitter().y(), frameViewRotation, frameProjection));
+            pipelineGpuProfile.end(RtGpuProfiler.Region.DLSS_RR);
             rrDone = result.executed();
             if (rrDone) {
                 upscaleSource = result.output();
@@ -860,11 +919,13 @@ public final class RtComposite {
         if (pipelineInputs.svgfPath() && !pipelineReconstructionInput.nrdDone()
                 && !pipelineReconstructionInput.nrdValidationOn()
                 && svgfBackend.available() && frameViews().viewZ() != null) {
+            pipelineGpuProfile.begin(RtGpuProfiler.Region.SVGF);
             dev.comfyfluffy.caustica.rt.reconstruction.ReconstructionResult result = svgfBackend.execute(
                     new SvgfReconstructionBackend.Request(ctx, cmd, stack, upscaleSource,
                             frameViews().motion(), frameViews().viewZ(), frameViews().normal(), frameViews().albedo(), frameViews().renderWidth(), frameViews().renderHeight(),
                             svgfDebugView ? pipelineReconstructionInput.debugView() : 0,
                             frameViewRotation, camX, camY, camZ));
+            pipelineGpuProfile.end(RtGpuProfiler.Region.SVGF);
             upscaleSource = result.output();
             svgfRan = result.executed();
         }
@@ -879,6 +940,7 @@ public final class RtComposite {
         RtContext ctx = pipelineContext;
         VkCommandBuffer cmd = pipelineCommand;
         MemoryStack stack = pipelineStack;
+        pipelineGpuProfile.begin(RtGpuProfiler.Region.UPSCALE);
         boolean rrDone = pipelineUpscaleInput.rrDone();
         dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend barrierBackend =
                 dev.comfyfluffy.caustica.rt.graph.UpscalerBarrierPlan.Backend.DLSS_RR;
@@ -931,6 +993,7 @@ public final class RtComposite {
             CausticaMod.LOGGER.info("AER-083 upscaler barriers: path={}, scope=legacy-conservative", barrierMode);
             loggedUpscalerBarrierMode = barrierMode;
         }
+        pipelineGpuProfile.end(RtGpuProfiler.Region.UPSCALE);
     }
 
     private void postPresentFrame(FrameContext frame) {
@@ -940,7 +1003,8 @@ public final class RtComposite {
         }
         boolean postHdr = CausticaConfig.Rt.Hdr.enabled();
         postProcessing.record(pipelineContext, pipelineCommand, pipelineStack, frameViews().rrOutput(),
-                frameViews().displayWidth(), frameViews().displayHeight(), pipelinePostPresentTarget, postHdr);
+                frameViews().displayWidth(), frameViews().displayHeight(), pipelinePostPresentTarget,
+                postHdr, pipelineGpuProfile);
     }
 
     private FrameInputs prepareFrameInputs() {
@@ -995,6 +1059,8 @@ public final class RtComposite {
         RtEntities.EntitySceneContribution entityContribution = null;
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
         RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_COMMAND_BUFFER, cmd.address(), "composite command buffer");
+        RtGpuProfiler.Session gpuProfile = ctx.gpuProfiler().beginGraphicsFrame(cmd);
+        pipelineGpuProfile = gpuProfile;
         int debugView = debugView();
         RtTerrain terrain = RtTerrain.currentOrNull();
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope frameLabel = RtDebugLabels.scope(ctx, cmd, "composite frame")) {
@@ -1222,7 +1288,9 @@ public final class RtComposite {
             // Barriers separate each stage; the graphics-use timeline guards resource reuse.
             if (!fe.blas().isEmpty()) {
                 try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.blasRecord")) {
+                    gpuProfile.begin(RtGpuProfiler.Region.ENTITY_BLAS);
                     ctx.accelerationStructures().recordBuilds(ctx, cmd, fe.blas());
+                    gpuProfile.end(RtGpuProfiler.Region.ENTITY_BLAS);
                 }
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // entity BLAS writes visible to the TLAS build
             }
@@ -1235,7 +1303,9 @@ public final class RtComposite {
             worldTraceResources.bindTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
             currentTlasHandle = frameTlas.accel.handle;
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.recordTlas")) {
+                gpuProfile.begin(RtGpuProfiler.Region.TLAS);
                 ctx.accelerationStructures().recordTlas(ctx, cmd, frameTlas);
+                gpuProfile.end(RtGpuProfiler.Region.TLAS);
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
 
@@ -1294,6 +1364,7 @@ public final class RtComposite {
             boolean nrdDone = false;
             RtImage denoisedSource = null;
             if (nrdPath && frameViews().viewZ() != null && frameViews().nrdDiffuseOutput() != null) {
+                gpuProfile.begin(RtGpuProfiler.Region.NRD);
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "NRD denoise");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrd")) {
                     // The camera goes in as ABSOLUTE world coordinates plus the terrain anchor the
@@ -1327,6 +1398,7 @@ public final class RtComposite {
                     }
                     denoisedSource = frameViews().nrdCombined();
                 }
+                gpuProfile.end(RtGpuProfiler.Region.NRD);
             }
 
             // Validation mode: REBLUR's 16-viewport diagnostic overlay replaces the image (set the
@@ -1378,10 +1450,19 @@ public final class RtComposite {
                 pipelinePostPresentTarget = 0L;
             }
         }
+        gpuProfile.finish();
         if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
+            gpuProfile.abort();
+            pipelineGpuProfile = null;
             throw new IllegalStateException("vkEndCommandBuffer(rt composite) failed");
         }
-        encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
+        pipelineGpuProfile = null;
+        try {
+            encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
+        } catch (Throwable failure) {
+            gpuProfile.abort();
+            throw failure;
+        }
         // Submission order on the one graphics queue is the history dependency: next frame reads the half
         // this frame just wrote and writes the other half. Advance only after execute accepted the command.
         restirSystem.advance();

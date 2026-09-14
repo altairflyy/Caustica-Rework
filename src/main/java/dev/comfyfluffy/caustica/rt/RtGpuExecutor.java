@@ -177,6 +177,11 @@ public final class RtGpuExecutor {
         }
     }
 
+    /** Number of queued jobs not yet consumed by the executor thread. */
+    public int pendingJobCount() {
+        return jobs.size();
+    }
+
     public int pendingPublishedRetirementCount() {
         synchronized (destroyJobs) {
             int count = 0;
@@ -427,9 +432,11 @@ public final class RtGpuExecutor {
             VkCommandBufferBeginInfo bi = VkCommandBufferBeginInfo.calloc(stack).sType$Default()
                     .flags(VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
             RtContext.check(VK10.vkBeginCommandBuffer(cmd, bi), "vkBeginCommandBuffer(RT GPU executor)");
+            RtGpuProfiler.ComputeSession gpuProfile = ctx.gpuProfiler().beginTerrainBatch(cmd);
             for (Job job : batch) {
                 job.record.accept(cmd);
             }
+            gpuProfile.finishRecording();
             RtContext.check(VK10.vkEndCommandBuffer(cmd), "vkEndCommandBuffer(RT GPU executor)");
             VkCommandBufferSubmitInfo.Buffer command = VkCommandBufferSubmitInfo.calloc(1, stack)
                     .sType$Default().commandBuffer(cmd);
@@ -455,6 +462,7 @@ public final class RtGpuExecutor {
                     "submitted builds=" + firstValue + ".." + signalValue + " batch=" + batch.size());
             waitTimeline(buildTimeline, signalValue);
             completed = true;
+            ctx.gpuProfiler().collectTerrainBatch(gpuProfile);
             VulkanDiagnostics.breadcrumb("async-compute completed buildTimeline=" + signalValue);
         } finally {
             // Never retry a failed host wait while unwinding: propagate its original error. A command

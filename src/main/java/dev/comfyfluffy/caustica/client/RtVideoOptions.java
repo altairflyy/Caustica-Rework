@@ -1329,8 +1329,11 @@ public final class RtVideoOptions {
             // 10-12 inspect the SVGF denoiser's internal state and, unlike 1-7, leave the denoiser
             // running (see RtComposite.SVGF_DEBUG_FIRST). 8/9 are not exposed here. 13 is the SHaRC
             // cache query overlay (see sharc.slang): pass B paints it so it reflects real queries.
-            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13), Codec.INT),
-            Math.clamp(setting.value(), 0, 13),
+            // 14/15 are temporary FAR geometry-only proof views (hash identity / valid FAR white).
+            // 16 diagnoses LOD foliage provenance/fill; 17-19 isolate raw texture, tint and pre-AO
+            // albedo; 20 hashes the canonical material id identically in Near and FAR.
+            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20), Codec.INT),
+            Math.clamp(setting.value(), 0, 20),
             setting::set);
     }
 
@@ -1415,7 +1418,7 @@ public final class RtVideoOptions {
                     ? "caustica.options.rt.dhRefresh.queued"
                     : "caustica.options.rt.dhRefresh.rtOnly"));
         }).width(310).build();
-        button.active = DistantHorizonsCompat.enabled() && Minecraft.getInstance().level != null;
+        button.active = DistantHorizonsCompat.dhRtRingEnabled() && Minecraft.getInstance().level != null;
         return button;
     }
 

@@ -299,6 +299,10 @@ public final class RtDeviceBringup {
         return serBackend.worldRaygenShader;
     }
 
+    public static String worldLeanRaygenShader() {
+        return serBackend == SerBackend.EXT ? "world_ser_lean.rgen.spv" : "world_lean.rgen.spv";
+    }
+
     public static String worldPrimaryRaygenShader() {
         return serBackend.worldPrimaryRaygenShader;
     }

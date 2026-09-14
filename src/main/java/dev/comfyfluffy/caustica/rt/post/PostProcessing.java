@@ -6,6 +6,7 @@ import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
+import dev.comfyfluffy.caustica.rt.RtGpuProfiler;
 import dev.comfyfluffy.caustica.rt.RtUiOverlay;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.gpu.FrameTailRetirement;
@@ -15,6 +16,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.graph.PostBarrierPlan;
 import dev.comfyfluffy.caustica.rt.graph.PostImageBarriers;
+
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.KHRSynchronization2;
 import org.lwjgl.vulkan.VK10;
@@ -78,7 +80,9 @@ public final class PostProcessing implements GeneratedFrameUiComposer {
 
     /** Signal display completion at the original boundary, even if the later copy fails. */
     public void record(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage rrOutput,
-                       int displayW, int displayH, long dstImage, boolean postHdr) {
+                       int displayW, int displayH, long dstImage,
+                       boolean postHdr,
+                       RtGpuProfiler.Session gpuProfile) {
         PostBarrierPlan postPlan;
         // Auto-exposure meters rrOutput (the post-RR, denoised/converged image), not the raw
         // pre-RR trace: RR has no notion of exposure (DLSS-RR Integration Guide §3.7 — ignore
@@ -89,12 +93,17 @@ public final class PostProcessing implements GeneratedFrameUiComposer {
         // regardless of SPP, keeping exposure consistent.
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
-            postPlan = exposure.record(ctx, cmd, stack, rrOutput, postHdr);
+            gpuProfile.begin(RtGpuProfiler.Region.EXPOSURE);
+            postPlan = exposure.record(ctx, cmd, stack, rrOutput, postHdr, gpuProfile);
+            gpuProfile.end(RtGpuProfiler.Region.EXPOSURE);
         }
         PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.DISPLAY);
 
+        displayPipeline.setImages(displayImage.view, rrOutput.view, exposure.image().view, hdrDisplayImage.view);
+
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
+            gpuProfile.begin(RtGpuProfiler.Region.DISPLAY);
             displayPipeline.dispatch(cmd, displayW, displayH, postHdr,
                     CausticaConfig.Rt.Hdr.paperWhiteNits(), CausticaConfig.Rt.Hdr.headroom(),
                     CausticaConfig.Rt.Tonemapping.operatorIndex(),
@@ -102,14 +111,17 @@ public final class PostProcessing implements GeneratedFrameUiComposer {
                     CausticaConfig.Rt.Tonemapping.GAMMA.value(),
                     CausticaConfig.Rt.Tonemapping.SATURATION.value(),
                     CausticaConfig.Rt.Tonemapping.CONTRAST.value());
+            gpuProfile.end(RtGpuProfiler.Region.DISPLAY);
         }
         hdrWrittenThisFrame = postHdr;
         PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.COPY);
 
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "copy composite to main target");
              RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.copyOutput")) {
+            gpuProfile.begin(RtGpuProfiler.Region.COPY);
             VK10.vkCmdCopyImage(cmd, displayImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
                     dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
+            gpuProfile.end(RtGpuProfiler.Region.COPY);
         }
         PostImageBarriers.before(cmd, stack, postPlan, PostBarrierPlan.EXPORT);
         int postMode = 4 | (postPlan.automaticExposure() ? 2 : 0) | (postHdr ? 1 : 0);

@@ -2,25 +2,30 @@ package dev.comfyfluffy.caustica.client;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtContext;
+import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
+import net.minecraft.client.renderer.chunk.ChunkSectionLayerGroup;
 
+/** Coordinates the selective vanilla-terrain fallback around the RT composite. */
 public final class VanillaRenderController {
 	public static final VanillaRenderController INSTANCE = new VanillaRenderController();
 
 	private boolean frameStarted;
 	private boolean baseReady;
 	private boolean projectionCaptured;
-	private boolean worldSkipped;
+	private boolean levelRendererObserved;
+	private boolean terrainSuppressed;
+	private boolean nativeDhHookObserved;
 	private boolean failureLatched;
 	private boolean loggedActive;
-	private boolean loggedWaitingForRtPlayerSection;
-	private boolean loggedRtPlayerSectionReady;
 	private boolean rtActive = true;
 	private Boolean lastLoggedRtActive;
 	private String inactiveReason;
 	private String lastLoggedInactiveReason;
+	private String lastLoggedHybridState;
 
 	private VanillaRenderController() {
 	}
@@ -28,7 +33,9 @@ public final class VanillaRenderController {
 	public void beginFrame(RenderTarget mainTarget) {
 		this.frameStarted = true;
 		this.projectionCaptured = false;
-		this.worldSkipped = false;
+		this.levelRendererObserved = false;
+		this.terrainSuppressed = false;
+		this.nativeDhHookObserved = false;
 		this.baseReady = false;
 		this.inactiveReason = null;
 		this.rtActive = RtComposite.enabled();
@@ -47,7 +54,7 @@ public final class VanillaRenderController {
 		if (this.baseReady) {
 			if (!this.loggedActive) {
 				this.loggedActive = true;
-				CausticaMod.LOGGER.info("Vanilla world rendering cancellation active; using existing RT composite seam");
+				CausticaMod.LOGGER.info("Selective vanilla terrain suppression active; LevelRenderer orchestration preserved");
 			}
 		} else {
 			logInactive(this.inactiveReason);
@@ -58,11 +65,11 @@ public final class VanillaRenderController {
 		this.projectionCaptured = true;
 	}
 
-	public boolean shouldCancelLevelRenderer() {
-		return this.shouldCancelLevelRenderer(false);
+	public void markLevelRendererObserved() {
+		this.levelRendererObserved = true;
 	}
 
-	public boolean shouldCancelLevelRenderer(boolean waitingForRtPlayerSection) {
+	public boolean shouldSuppressVanillaTerrain() {
 		if (!this.rtActive) {
 			return false;
 		}
@@ -77,26 +84,31 @@ public final class VanillaRenderController {
 			logInactive("level projection was not captured");
 			return false;
 		}
-		if (waitingForRtPlayerSection && !this.loggedWaitingForRtPlayerSection) {
-			this.loggedWaitingForRtPlayerSection = true;
-			CausticaMod.LOGGER.info("Keeping vanilla LevelRenderer canceled while waiting for RT player section residency");
+		if (!this.levelRendererObserved) {
+			logInactive("LevelRenderer orchestration was not observed");
+			return false;
 		}
 		return true;
 	}
 
-	public void markRtPlayerSectionReady() {
-		if (!this.loggedRtPlayerSectionReady) {
-			this.loggedRtPlayerSectionReady = true;
-			CausticaMod.LOGGER.info("Satisfied vanilla terrain-load callback from RT player section residency");
-		}
+	public void markTerrainGroupSuppressed(ChunkSectionLayerGroup group) {
+		this.terrainSuppressed = true;
+		RtFrameStats.FRAME.count("suppressedVanillaTerrainLayerCalls", 1);
+		logHybridState();
 	}
 
-	public void markWorldSkipped() {
-		this.worldSkipped = true;
+	/** Called only from DH's real terrain-render entry point; never infer execution from mod presence. */
+	public void markNativeDhHookObserved() {
+		this.nativeDhHookObserved = true;
+		RtFrameStats.FRAME.count("nativeDhHookExecutions", 1);
 	}
 
-	public boolean wasWorldSkippedThisFrame() {
-		return this.worldSkipped;
+	public boolean wasNativeDhHookObservedThisFrame() {
+		return this.nativeDhHookObserved;
+	}
+
+	public boolean wasTerrainSuppressedThisFrame() {
+		return this.terrainSuppressed;
 	}
 
 	public boolean shouldCompositeRt() {
@@ -109,14 +121,27 @@ public final class VanillaRenderController {
 	}
 
 	public void markRtCompositeResult(boolean success) {
-		if (this.worldSkipped && !success) {
+		if (this.terrainSuppressed && !success) {
 			latchFailure("RT composite did not produce a replacement frame");
 		}
 	}
 
 	public void markMissedBeforeHandSeam() {
-		if (this.worldSkipped) {
-			latchFailure("missed before-hand RT composite seam after vanilla world was skipped");
+		if (this.terrainSuppressed) {
+			latchFailure("missed before-hand RT composite seam after vanilla terrain was suppressed");
+		}
+	}
+
+	private void logHybridState() {
+		String state = "levelRendererCancelled=false"
+				+ " vanillaTerrainSuppressed=" + this.terrainSuppressed
+				+ " nativeDhHookObserved=" + this.nativeDhHookObserved
+				+ " manualDhRender=false"
+				+ " rtRing=" + (DistantHorizonsCompat.dhRtRingEnabled() ? "ON" : "OFF")
+				+ " mode=CANONICAL_RT_NEAR_AND_DH_FAR";
+		if (!state.equals(this.lastLoggedHybridState)) {
+			this.lastLoggedHybridState = state;
+			CausticaMod.LOGGER.info("[Caustica DH Hybrid] {}", state);
 		}
 	}
 
@@ -144,7 +169,7 @@ public final class VanillaRenderController {
 
 	private void latchFailure(String reason) {
 		if (!this.failureLatched) {
-			CausticaMod.LOGGER.warn("Disabling vanilla world cancellation: {}", reason);
+			CausticaMod.LOGGER.warn("Disabling vanilla terrain suppression: {}", reason);
 		}
 		this.failureLatched = true;
 		this.baseReady = false;
@@ -155,7 +180,7 @@ public final class VanillaRenderController {
 		if (reason == null || reason.equals(this.lastLoggedInactiveReason)) {
 			return;
 		}
-		CausticaMod.LOGGER.info("Vanilla world cancellation inactive: {}", reason);
+		CausticaMod.LOGGER.info("Vanilla terrain suppression inactive: {}", reason);
 		this.lastLoggedInactiveReason = reason;
 	}
 }

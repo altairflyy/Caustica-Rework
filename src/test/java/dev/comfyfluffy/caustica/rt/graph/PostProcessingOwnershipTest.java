@@ -54,7 +54,7 @@ class PostProcessingOwnershipTest {
     @Test void postOwnerPreservesExposureDispatchBarrierAndCompletionOrder() throws Exception {
         String owner = Files.readString(ROOT.resolve("post/PostProcessing.java"));
         ordered(owner.substring(owner.indexOf("public void record(")),
-                "exposure.record(ctx, cmd, stack, rrOutput, postHdr)", "PostBarrierPlan.DISPLAY",
+                "exposure.record(ctx, cmd, stack, rrOutput, postHdr, gpuProfile)", "PostBarrierPlan.DISPLAY",
                 "displayPipeline.dispatch(cmd, displayW, displayH, postHdr",
                 "hdrWrittenThisFrame = postHdr", "PostBarrierPlan.COPY", "VK10.vkCmdCopyImage",
                 "PostBarrierPlan.EXPORT");

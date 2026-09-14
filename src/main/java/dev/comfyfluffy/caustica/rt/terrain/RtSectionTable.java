@@ -198,6 +198,8 @@ final class RtSectionTable {
         final long key;
         final RtBuffer uvs;
         final RtBuffer material;
+        /** FAR-only face recipe table appended after primitive records; zero for ordinary terrain. */
+        final long dhFaceRecipeAddress;
         final RtAccel blas;
         final int[] triBase;
         final int sx;
@@ -210,9 +212,15 @@ final class RtSectionTable {
 
         SectionGeom(long key, RtBuffer uvs, RtBuffer material,
                     RtAccel blas, int[] triBase, int sx, int sy, int sz, float[] lights) {
+            this(key, uvs, material, 0L, blas, triBase, sx, sy, sz, lights);
+        }
+
+        SectionGeom(long key, RtBuffer uvs, RtBuffer material, long dhFaceRecipeAddress,
+                    RtAccel blas, int[] triBase, int sx, int sy, int sz, float[] lights) {
             this.key = key;
             this.uvs = uvs;
             this.material = material;
+            this.dhFaceRecipeAddress = dhFaceRecipeAddress;
             this.blas = blas;
             this.triBase = triBase;
             this.sx = sx;

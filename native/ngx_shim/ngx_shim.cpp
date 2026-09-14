@@ -301,6 +301,9 @@ NGX_SHIM_EXPORT int ngxshim_evaluate(VkCommandBuffer cmd, void* feature,
     eval.InMVScaleX = mvScaleX;
     eval.InMVScaleY = mvScaleY;
     eval.InReset = reset;
+    // Caustica's Vulkan presentation blit flips Y. Tell NGX to counter-flip only its
+    // registry-enabled DLSS diagnostic indicator; the reconstructed image is unchanged.
+    eval.InIndicatorInvertYAxis = 1;
     eval.InRenderSubrectDimensions.Width = renderWidth;
     eval.InRenderSubrectDimensions.Height = renderHeight;
     eval.InFrameTimeDeltaInMsec = frameTimeMs;
@@ -475,6 +478,9 @@ NGX_SHIM_EXPORT int ngxshim_evaluate_dlssd(VkCommandBuffer cmd, void* feature,
     eval.InMVScaleX = mvScaleX;
     eval.InMVScaleY = mvScaleY;
     eval.InReset = reset;
+    // Same Vulkan Y-flip contract as the DLSS-SR path above. This affects only
+    // NVIDIA's registry-enabled diagnostic indicator, not RR reconstruction.
+    eval.InIndicatorInvertYAxis = 1;
     eval.InRenderSubrectDimensions.Width = renderWidth;
     eval.InRenderSubrectDimensions.Height = renderHeight;
     eval.InFrameTimeDeltaInMsec = frameTimeMs;

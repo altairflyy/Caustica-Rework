@@ -249,10 +249,16 @@ void main() {
 
     vec4 rt = imageLoad(rtImage, pix);
     float exposure = max(imageLoad(exposureImage, ivec2(0)).r, 0.0);
-    vec3 ldr = tonemap(rt.rgb, exposure);
-    imageStore(outputImage, pix, vec4(ldr, 1.0));
+    // Near and FAR radiance share rtImage: both came through the main TLAS, canonical guide export and
+    // temporal/reconstruction path. There is no second native-DH display authority.
+    // -3 is the pure linear-albedo diagnostic. gAlbedo was written before lighting; bypass every
+    // display look here as well so exposure, tone mapping, gamma, saturation and contrast cannot
+    // manufacture or hide a Near/FAR seam. The ordinary and other debug paths remain unchanged.
+    vec3 displayRgb = tonemap(rt.rgb, exposure);
+    imageStore(outputImage, pix, vec4(displayRgb, 1.0));
 
     if (pc.hdrEnabled != 0) {
-        imageStore(hdrImage, pix, vec4(tonemapHdr(rt.rgb, exposure), 1.0));
+        vec3 hdr = tonemapHdr(rt.rgb, exposure);
+        imageStore(hdrImage, pix, vec4(hdr, 1.0));
     }
 }

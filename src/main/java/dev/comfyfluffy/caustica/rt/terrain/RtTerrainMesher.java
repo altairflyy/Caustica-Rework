@@ -197,7 +197,8 @@ final class RtTerrainMesher {
             vertBase += vertSize / 3;
             triAcc += bucketTris[b];
         }
-        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase, lights);
+        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase, lights,
+                new float[0]);
     }
 
     private static void tessellate(BlockAndTintGetter region, BlockStateModelSet modelSet,
@@ -265,7 +266,7 @@ final class RtTerrainMesher {
     /** Worker-packed terrain payload; native preparation allocates buffers and bulk-copies these arrays.
      *  {@code lights} = packed section-local RIS light records (possibly empty), CPU-side only. */
     record PackedSection(float[] positions, int[] indices, float[] uvs, float[] material,
-                         int[] bucketTris, int[] triBase, float[] lights) {
+                         int[] bucketTris, int[] triBase, float[] lights, float[] dhFaceRecipes) {
     }
 
 

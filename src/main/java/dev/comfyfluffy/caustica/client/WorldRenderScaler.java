@@ -32,7 +32,8 @@ public final class WorldRenderScaler {
 
 	/**
 	 * Run the RT composite once, at the before-hand seam (the safety-net end() then no-ops because the
-	 * window is already closed). In cancel-vanilla mode, this is where the skipped world is replaced.
+	 * window is already closed). LevelRenderer and DH have completed their native orchestration here;
+	 * only Minecraft's ordinary chunk-group bodies were suppressed.
 	 */
 	public void end(RenderTarget mainTarget) {
 		this.end(mainTarget, true);
@@ -45,11 +46,12 @@ public final class WorldRenderScaler {
 	private void end(RenderTarget mainTarget, boolean beforeHandSeam) {
 		if (this.rtWindowOpen) {
 			this.rtWindowOpen = false;
-			if (!beforeHandSeam && VanillaRenderController.INSTANCE.wasWorldSkippedThisFrame()) {
+			if (!beforeHandSeam && VanillaRenderController.INSTANCE.wasTerrainSuppressedThisFrame()) {
 				VanillaRenderController.INSTANCE.markMissedBeforeHandSeam();
 				return;
 			}
-			boolean success = RtComposite.INSTANCE.composite(mainTarget.getColorTexture(), mainTarget.width, mainTarget.height);
+			boolean success = RtComposite.INSTANCE.composite(
+					mainTarget.getColorTexture(), mainTarget.width, mainTarget.height);
 			VanillaRenderController.INSTANCE.markRtCompositeResult(success);
 		}
 	}

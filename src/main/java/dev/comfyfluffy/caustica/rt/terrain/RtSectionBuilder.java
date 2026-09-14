@@ -48,6 +48,7 @@ final class RtSectionBuilder {
             long indicesBytes = (long) packed.indices().length * Integer.BYTES;
             long uvsBytes = (long) packed.uvs().length * Float.BYTES;
             long materialBytes = (long) packed.material().length * Float.BYTES;
+            long recipeBytes = (long) packed.dhFaceRecipes().length * Float.BYTES;
             int transferDst = VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
             positions = ctx.createAsyncBuffer(positionsBytes, asInput | transferDst, false,
@@ -55,8 +56,9 @@ final class RtSectionBuilder {
             indices = ctx.createAsyncBuffer(indicesBytes, asInput | transferDst, false,
                     label + " indices");
             uvs = ctx.createAsyncBuffer(uvsBytes, storage | transferDst, false, label + " uvs");
-            material = ctx.createAsyncBuffer(materialBytes, storage | transferDst, false, label + " material");
-            upload = ctx.createUploadBuffer(positionsBytes + indicesBytes + uvsBytes + materialBytes,
+            material = ctx.createAsyncBuffer(materialBytes + recipeBytes, storage | transferDst, false,
+                    label + " material");
+            upload = ctx.createUploadBuffer(positionsBytes + indicesBytes + uvsBytes + materialBytes + recipeBytes,
                     label + " upload");
 
             long cursor = upload.mapped;
@@ -67,16 +69,21 @@ final class RtSectionBuilder {
             MemoryUtil.memFloatBuffer(cursor, packed.uvs().length).put(packed.uvs());
             cursor += uvsBytes;
             MemoryUtil.memFloatBuffer(cursor, packed.material().length).put(packed.material());
+            cursor += materialBytes;
+            if (packed.dhFaceRecipes().length > 0) {
+                MemoryUtil.memFloatBuffer(cursor, packed.dhFaceRecipes().length).put(packed.dhFaceRecipes());
+            }
             upload.flush();
 
             blas = ctx.accelerationStructures().prepareStaticBlas(ctx, positions, vertCount, indices,
                     packed.bucketTris(), ommInput, compactBlas, label + " BLAS");
-            return new PreparedSection(key, positions, indices, uvs, material, upload, blas,
+            long recipeAddress = recipeBytes == 0L ? 0L : material.deviceAddress + materialBytes;
+            return new PreparedSection(key, positions, indices, uvs, material, recipeAddress, upload, blas,
                     ctx.accelerationStructures(),
                     packed.triBase(), sox, soy, soz, packed.lights());
         } catch (Throwable t) {
             if (blas != null) {
-                destroy(new PreparedSection(key, positions, indices, uvs, material, upload, blas,
+                destroy(new PreparedSection(key, positions, indices, uvs, material, 0L, upload, blas,
                         ctx.accelerationStructures(),
                         packed.triBase(), sox, soy, soz, packed.lights()));
             } else {
@@ -141,7 +148,8 @@ final class RtSectionBuilder {
     /** Worker-owned native section state paired with its prepared BLAS. {@code lights} = packed
      *  section-local RIS light records (CPU-side, flattened into the global buffer at publish). */
     record PreparedSection(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs,
-                           RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas,
+                           RtBuffer material, long dhFaceRecipeAddress,
+                           RtBuffer upload, RtAccel.PreparedBlas blas,
                            dev.comfyfluffy.caustica.rt.gpu.AccelerationStructureManager accelerationStructures,
                            int[] triBase,
                            int sx, int sy, int sz, float[] lights) {
@@ -155,7 +163,8 @@ final class RtSectionBuilder {
         }
 
         PreparedSection withBlas(RtAccel.PreparedBlas replacement) {
-            return new PreparedSection(key, positions, indices, uvs, material, upload, replacement,
+            return new PreparedSection(key, positions, indices, uvs, material, dhFaceRecipeAddress,
+                    upload, replacement,
                     accelerationStructures,
                     triBase, sx, sy, sz, lights);
         }

@@ -13,6 +13,8 @@ import portals;
 [[vk::push_constant]] WorldPushConstants pc;
 
 [[vk::binding(2, 0)]] Sampler2D blockAlbedoAtlas;
+// DH's own 256-column, 16x16-per-tile atlas. Binding 13 follows 9 guide images and sky at 12.
+[[vk::binding(13, 0)]] Sampler2D dhBlockAtlas;
 // Independent bindless arrays: per-draw entity albedo slots and compact canonical material-page bundles.
 [[vk::binding(0, 1)]] Sampler2D entityAlbedoTex[];
 [[vk::binding(1, 1)]] Sampler2D materialSurface0Tex[];
@@ -222,6 +224,16 @@ ParallaxHit parallaxTrace(MaterialHeader header, float2 atlasUv, float lod, floa
         return flatHit;
     }
 
+    // POM is disabled by setting the authored relief depth to zero. Test that lane before building
+    // the tangent frame or evaluating camera/grazing/edge fades so the feature-off path pays only
+    // the WorldPush load and this branch. The later reliefDepth test still handles fades that reduce
+    // an enabled effect to zero, and the enabled result is unchanged.
+    WorldPush worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
+    float4 parallaxParams = worldPush.parallaxParams;
+    if (parallaxParams.x <= 1.0e-5) {
+        return flatHit;
+    }
+
     float2 g1 = uv1 - uv0;
     float2 g2 = uv2 - uv0;
     float det = g1.x * g2.y - g1.y * g2.x;
@@ -239,8 +251,6 @@ ParallaxHit parallaxTrace(MaterialHeader header, float2 atlasUv, float lod, floa
 
     float2 localUv = clamp((atlasUv - header.albedoUv.xy) * header.albedoUv.zw,
             float2(0.0, 0.0), float2(1.0, 1.0));
-    WorldPush worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
-    float4 parallaxParams = worldPush.parallaxParams;
     float maxDistance = max(parallaxParams.w, 1.0);
     float3 hitPosition = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
     float cameraDistance = length(hitPosition - worldPush.camOffset);
@@ -450,23 +460,10 @@ float3 applyBreaking(float3 albedo, uint rayCone, float3 rayOrigin, float3 rayDi
     return albedo;
 }
 
-// Distant Horizons / Voxy mini-material shading defaults. The coarse VBO retains only a one-byte
-// material class, so these map that class onto plausible PBR parameters.
+// DH retains only a mini-material class, not the block's authored LabPBR surface. Use the canonical
+// Caustica material profile selected by the CPU instead of inventing a second roughness table here.
 float dhMaterialRoughness(uint material, float fallbackRoughness) {
-    if (material == DH_MATERIAL_METAL) return 0.28;
-    if (material == DH_MATERIAL_SNOW) return 0.38;
-    if (material == DH_MATERIAL_WOOD) return 0.72;
-    if (material == DH_MATERIAL_STONE) return 0.78;
-    if (material == DH_MATERIAL_DEEPSLATE) return 0.84;
-    if (material == DH_MATERIAL_TERRACOTTA) return 0.76;
-    if (material == DH_MATERIAL_LEAVES) return 0.84;
-    if (material == DH_MATERIAL_GRASS) return 0.92;
-    if (material == DH_MATERIAL_DIRT) return 0.96;
-    if (material == DH_MATERIAL_SAND) return 0.98;
-    if (material == DH_MATERIAL_NETHER_STONE) return 0.88;
-    if (material == DH_MATERIAL_LAVA) return 0.68;
-    if (material == DH_MATERIAL_ILLUMINATED) return clamp(fallbackRoughness, 0.18, 0.90);
-    return clamp(fallbackRoughness, 0.25, 1.0);
+    return clamp(fallbackRoughness, 0.0, 1.0);
 }
 
 float dhMaterialMetalness(uint material, float fallbackMetalness) {
@@ -480,6 +477,102 @@ float dhMaterialSss(uint material) {
     if (material == DH_MATERIAL_GRASS) return 0.055;
     if (material == DH_MATERIAL_SNOW) return 0.08;
     return 0.0;
+}
+
+float3 linearToSrgb(float3 c) {
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(max(c, 0.0), float3(1.0 / 2.4)) - 0.055;
+    return lerp(lo, hi, step(float3(0.0031308), c));
+}
+
+float3 materialIdDebugColor(uint materialId) {
+    uint h = materialId + 0x9E3779B9u;
+    h ^= h >> 16u;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15u;
+    h *= 0x846CA68Bu;
+    h ^= h >> 16u;
+    // Keep every identity visible against black while retaining 24 bits of deterministic variation.
+    return 0.2 + 0.8 * float3(h & 255u, (h >> 8u) & 255u, (h >> 16u) & 255u) / 255.0;
+}
+
+// Reproduce DH's native tile-ratio operation in sRGB space, then return canonical linear albedo.
+// The per-triangle UV stream stores DH's unwrapped face projection so coarse cells still repeat every block.
+float2 dhFaceUv(DhSection sec, uint primitiveId, float2 attribs) {
+    ConstPtr<float2> uvs = ConstPtr<float2>(sec.uvAddr);
+    uint uvBase = primitiveId * 3u;
+    float3 bary = float3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+    return frac(bary.x * uvs[uvBase] + bary.y * uvs[uvBase + 1u]
+            + bary.z * uvs[uvBase + 2u]);
+}
+
+float3 dhAtlasAlbedo(TerrainPrim prim, DhSection sec, uint primitiveId, float2 attribs, uint tileId) {
+    if (tileId == 0u) return prim.tint.rgb;
+    float2 faceUv = dhFaceUv(sec, primitiveId, attribs);
+    uint width, height;
+    dhBlockAtlas.GetDimensions(width, height);
+    uint2 tileOrigin = uint2(tileId % 256u, tileId / 256u) * 16u;
+    uint2 texel = tileOrigin + uint2(clamp(faceUv * 16.0, 0.0, 15.0));
+    float2 atlasUv = (float2(texel) + 0.5) / float2(max(width, 1u), max(height, 1u));
+    float4 tile = dhBlockAtlas.SampleLevel(atlasUv, 0.0);
+    float3 baseSrgb = linearToSrgb(clamp(prim.tint.rgb, 0.0, 1.0));
+    float3 texturedSrgb = clamp(baseSrgb * (tile.rgb * 2.0), 0.0, 1.0);
+    return srgbToLinear(lerp(baseSrgb, texturedSrgb, tile.a));
+}
+
+float2 dhNearLayerGradientUv(DhFaceLayer layer, MaterialHeader header, float2 projectedUv) {
+    // Translation does not affect a texture gradient. Keep the projected UV unwrapped here: wrapping
+    // each coarse-DH vertex would collapse integer-sized faces to a zero gradient.
+    float2 localUv = float2(dot(projectedUv, layer.uTransform.xy),
+            dot(projectedUv, layer.vTransform.xy));
+    return localUv / max(header.albedoUv.zw, float2(1.0, 1.0));
+}
+
+float dhNearLayerLod(DhSection sec, uint primitiveId, DhFaceLayer layer,
+        MaterialHeader header, uint rayCone) {
+    ConstPtr<float2> uvs = ConstPtr<float2>(sec.uvAddr);
+    uint uvBase = primitiveId * 3u;
+    float2 uv0 = dhNearLayerGradientUv(layer, header, uvs[uvBase]);
+    float2 uv1 = dhNearLayerGradientUv(layer, header, uvs[uvBase + 1u]);
+    float2 uv2 = dhNearLayerGradientUv(layer, header, uvs[uvBase + 2u]);
+    return rayConeTextureLod(rayCone, texSizePx(blockAlbedoAtlas),
+            HitTriangleVertexPosition(0), HitTriangleVertexPosition(1), HitTriangleVertexPosition(2),
+            uv0, uv1, uv2);
+}
+
+float4 dhNearLayer(DhSection sec, uint primitiveId, DhFaceLayer layer, float2 faceUv,
+        uint rayCone, out float3 rawRgb) {
+    uint materialId = asuint(layer.materialTint.x);
+    MaterialHeader header = ConstPtr<MaterialHeader>(pc.materialTableAddr)[materialId];
+    float3 p = float3(faceUv, 1.0);
+    float2 localUv = float2(dot(p, layer.uTransform.xyz), dot(p, layer.vTransform.xyz));
+    float2 atlasUv = header.albedoUv.xy + clamp(localUv, 0.0, 1.0) / header.albedoUv.zw;
+    float4 texel = blockAlbedoAtlas.SampleLevel(atlasUv,
+            dhNearLayerLod(sec, primitiveId, layer, header, rayCone));
+    rawRgb = srgbToLinear(texel.rgb);
+    return float4(rawRgb * layer.materialTint.yzw, texel.a);
+}
+
+float3 dhNearFaceAlbedo(DhSection sec, uint recipeId, uint primitiveId, float2 attribs,
+        uint rayCone, out bool filledCutout, out float3 baseRawRgb, out float3 baseTint) {
+    filledCutout = false;
+    DhFaceRecipe recipe = ConstPtr<DhFaceRecipe>(sec.faceRecipeAddr)[recipeId - 1u];
+    float2 faceUv = dhFaceUv(sec, primitiveId, attribs);
+    baseTint = recipe.layers[0].materialTint.yzw;
+    float4 base = dhNearLayer(sec, primitiveId, recipe.layers[0], faceUv, rayCone, baseRawRgb);
+    uint secondKind = asuint(recipe.layers[1].materialTint.x);
+    if (secondKind == 0xFFFFFFFFu) return base.rgb;
+    if (secondKind == 0xFFFFFFFEu) {
+        // Native DH foliage is deliberately solid at coarse LOD. Preserve the actual Near texel where
+        // covered, and fill transparent holes with the alpha-covered sprite mean stored in the unused
+        // overlay slot; this fixes albedo without turning the LOD canopy into sparse cutout geometry.
+        float3 coveredMean = recipe.layers[1].materialTint.yzw * recipe.layers[0].materialTint.yzw;
+        filledCutout = base.a < TERRAIN_ALPHA_CUTOFF;
+        return filledCutout ? coveredMean : base.rgb;
+    }
+    float3 overlayRawRgb;
+    float4 overlay = dhNearLayer(sec, primitiveId, recipe.layers[1], faceUv, rayCone, overlayRawRgb);
+    return lerp(base.rgb, overlay.rgb, overlay.a);
 }
 
 // ---- Enchantment glint --------------------------------------------------------------------------
@@ -508,24 +601,81 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     // Native DH/Voxy LOD triangles participate in camera, GI, reflection and shadow rays through the
     // same TLAS. They carry no sprite: shading comes from vertex colour + the mini-material class.
     if ((InstanceID() & DH_INSTANCE_KIND) == DH_INSTANCE_KIND) {
-        Section sec = ConstPtr<Section>(pc.dhTableAddr)[InstanceID() & IDX_MASK];
+        DhSection sec = ConstPtr<DhSection>(pc.dhTableAddr)[InstanceID() & IDX_MASK];
         uint dpid = PrimitiveIndex() + sec.triBase[GeometryIndex()];
         TerrainPrim dpr = ConstPtr<TerrainPrim>(sec.primAddr)[dpid];
         float3 sourceNormal = normalize(dpr.normal.xyz);
         float3 dn = sourceNormal;
         if (dot(dn, -WorldRayDirection()) < 0.0) dn = -dn;
         uint dhSurface = uint(dpr.tint.w + 0.5);
-        uint dhMaterial = dpr.flags;
+        uint dhMaterial = dpr.flags & 0xFFu;
+        uint dhTextureTileId = (dpr.flags >> 16u) & 0xFFFFu;
         bool dhWater = dhSurface == DH_SURFACE_WATER;
         bool dhGlass = dhSurface == DH_SURFACE_GLASS;
         bool dhEmissive = dhSurface == DH_SURFACE_EMISSIVE;
         bool dhEmissiveGlass = dhSurface == DH_SURFACE_EMISSIVE_GLASS;
+        uint dhFaceRecipeId = (!dhWater && !dhGlass && !dhEmissive && !dhEmissiveGlass)
+                ? dpr.aux0 : 0u;
+        bool dhHasRecipe = dhFaceRecipeId != 0u && sec.faceRecipeAddr != 0u;
+        bool dhFilledCutout = false;
+        float3 dhBaseRawRgb = float3(0.0, 0.0, 0.0);
+        float3 dhBaseTint = float3(1.0, 1.0, 1.0);
+        float3 dhAlbedo = dhHasRecipe ? dhNearFaceAlbedo(sec, dhFaceRecipeId, dpid, attribs,
+                rayCone, dhFilledCutout, dhBaseRawRgb, dhBaseTint)
+                : dhAtlasAlbedo(dpr, sec, dpid, attribs, dhTextureTileId);
+        if (pc.debugView == 16u && dhMaterial == DH_MATERIAL_LEAVES) {
+            if (!dhHasRecipe) {
+                // Magenta: provenance is absent. Yellow: identity exists but its Near recipe failed.
+                dhAlbedo = dpr.aux1 == 1u ? float3(1.0, 0.0, 1.0)
+                        : float3(1.0, 1.0, 0.0);
+            } else if (dhFilledCutout) {
+                // Red only where a transparent foliage texel was replaced by the covered tile mean.
+                dhAlbedo = float3(1.0, 0.0, 0.0);
+            }
+        }
+        if (dhMaterial == DH_MATERIAL_LEAVES) {
+            if (pc.debugView == 17u) dhAlbedo = dhHasRecipe
+                    ? dhBaseRawRgb : float3(1.0, 0.0, 1.0);
+            else if (pc.debugView == 18u) dhAlbedo = dhHasRecipe
+                    ? dhBaseTint : float3(1.0, 0.0, 1.0);
+            // View 19 deliberately keeps dhAlbedo: texture times tint, before material AO.
+            else if (pc.debugView == 20u) {
+                if (dhHasRecipe) {
+                    DhFaceRecipe debugRecipe = ConstPtr<DhFaceRecipe>(sec.faceRecipeAddr)[dhFaceRecipeId - 1u];
+                    dhAlbedo = materialIdDebugColor(asuint(debugRecipe.layers[0].materialTint.x));
+                } else {
+                    dhAlbedo = float3(1.0, 0.0, 1.0);
+                }
+            }
+        }
         float dhEmission = (dhEmissive || dhEmissiveGlass) ? clamp(asfloat(dpr.aux0), 0.0, 4.0) : 0.0;
         MaterialHeader dhHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[dpr.materialId];
 
+        // Geometry-only proof path. The aggregate custom index is the identity used by the canonical
+        // section table; no light, water, or material shading is evaluated. Normal rendering never
+        // enters this branch.
+        if (pc.debugView == 14u || pc.debugView == 15u) {
+            uint h = (InstanceID() & IDX_MASK) + 0x9E3779B9u;
+            h ^= h >> 16;
+            h *= 0x7FEB352Du;
+            h ^= h >> 15;
+            h *= 0x846CA68Bu;
+            h ^= h >> 16;
+            float3 debugColor = float3((h & 255u), ((h >> 8) & 255u), ((h >> 16) & 255u)) / 255.0;
+            payload.albedo = half3(0.0h, 0.0h, 0.0h);
+            payload.normal = half3(dn);
+            payload.hitT = RayTCurrent();
+            payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
+            payload.f0 = half3(debugColor);
+            payloadSetPacked(payload, MATERIAL_OPAQUE, 1.0, 0.0, 0.0, 0.0,
+                    1.0, 0.0, EMISSION_SOURCE_NONE);
+            payload.flags |= PAYLOAD_FAR_GEOMETRY_DEBUG;
+            return;
+        }
+
         if (dhGlass || dhEmissiveGlass) {
             float opticalAlpha = clamp(asfloat(dhEmissiveGlass ? dpr.aux1 : dpr.aux0), 0.04, 0.80);
-            float3 glassTint = glassTransmissionFilter(dpr.tint.rgb, opticalAlpha);
+            float3 glassTint = glassTransmissionFilter(dhAlbedo, opticalAlpha);
             float ior = max(dhHeader.params.z, 1.45);
             float f0Base = (ior - 1.0) / (ior + 1.0);
             float f0Scalar = f0Base * f0Base;
@@ -544,30 +694,29 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
 
         if (dhWater) {
-            // A coarse LOD voxel is a sparse surface approximation, not a watertight column: pushing a
-            // real water medium here would accumulate Beer-Lambert absorption through generated
-            // bottom/side faces and turn distant lakes into black sheets (the fork's voxy-compat bug).
-            // Our unified dielectric raygen derives the medium from the payload, so the safe adaptation
-            // is a glossy opaque water-tinted surface: correct colour and a plausible sun highlight at
-            // horizon distances, with zero medium-stack interaction.
-            payload.albedo = half3(dpr.tint.rgb);
+            // FAR water is a canonical Caustica water hit, not an opaque blue proxy. Pass A therefore
+            // writes the actual surface depth, animated procedural normal and water specular guides;
+            // the ordinary Caustica dielectric continuation supplies reflection/environment radiance.
+            payload.albedo = half3(dhAlbedo);
             payload.normal = half3(dn);
             payload.hitT = RayTCurrent();
             payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
             payload.f0 = half3(0.02h, 0.02h, 0.02h);
-            payloadSetPacked(payload, MATERIAL_OPAQUE, 0.075, 0.0, 0.0, 0.0,
-                    1.333, 0.0, EMISSION_SOURCE_NONE);
+            payloadSetPacked(payload, MATERIAL_WATER, 0.0, 0.0, 0.0, 0.0,
+                    1.333, 1.0, EMISSION_SOURCE_NONE);
+            payloadSetDielectric(payload, MATERIAL_WATER,
+                    dot(WorldRayDirection(), sourceNormal) < 0.0);
             return;
         }
 
-        payload.albedo = half3(dpr.tint.rgb);
+        payload.albedo = half3(dhAlbedo);
         payload.normal = half3(dn);
         payload.hitT = RayTCurrent();
         payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
         float dhRoughness = dhMaterialRoughness(dhMaterial, dhHeader.params.x);
         float dhMetalness = dhMaterialMetalness(dhMaterial, dhHeader.params.y);
         float dhSss = dhMaterialSss(dhMaterial);
-        payload.f0 = half3(lerp(float3(0.04, 0.04, 0.04), dpr.tint.rgb, dhMetalness));
+        payload.f0 = half3(lerp(float3(0.04, 0.04, 0.04), dhAlbedo, dhMetalness));
         payloadSetPacked(payload, MATERIAL_OPAQUE, dhRoughness, dhMetalness, dhEmission, dhSss,
                 max(dhHeader.params.z, 1.0), 0.0,
                 dhEmissive ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE);
@@ -934,7 +1083,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         return;
     }
 
-    payload.albedo = half3(srgbToLinear(blockAlbedoAtlas.SampleLevel(uv, blockLod).rgb) * tint);
+    float3 terrainRawRgb = srgbToLinear(blockAlbedoAtlas.SampleLevel(uv, blockLod).rgb);
+    float3 terrainPreAoAlbedo = terrainRawRgb * tint;
+    payload.albedo = half3(terrainPreAoAlbedo);
     payload.hitT = RayTCurrent();
     payload.motionPrev = half3(0.0h, 0.0h, 0.0h); // static terrain: camera-only motion vector
 
@@ -947,7 +1098,11 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             tp0, tp1, tp2, uv0, uv1, uv2, vdir,
             materialHeader.params.x, materialHeader.params.y, emission, nonSolid);
     n = surface.normal;
-    payload.albedo *= half(surface.ao);
+    if (pc.debugView == 17u) payload.albedo = half3(terrainRawRgb);
+    else if (pc.debugView == 18u) payload.albedo = half3(tint);
+    else if (pc.debugView == 19u) payload.albedo = half3(terrainPreAoAlbedo);
+    else if (pc.debugView == 20u) payload.albedo = half3(materialIdDebugColor(pr.materialId));
+    else payload.albedo *= half(surface.ao);
     payload.albedo = half3(applyBreaking(float3(payload.albedo), rayCone, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), n));
     // Column side walls replace the mapped normal only after the decal, so the crack projection keeps
     // choosing its axis from the face the block is actually broken on.

@@ -4,6 +4,7 @@ import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
+import dev.comfyfluffy.caustica.rt.RtGpuProfiler;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.graph.PostBarrierPlan;
@@ -54,13 +55,13 @@ public final class RtExposure {
     }
 
     public PostBarrierPlan record(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage traceColor,
-                                  boolean hdr) {
+                                  boolean hdr, RtGpuProfiler.Session gpuProfile) {
         if (image == null) {
             throw new IllegalStateException("RT exposure image not created");
         }
         PostBarrierPlan plan = PostBarrierPlan.of(mode() == Mode.AUTO, hdr);
         if (plan.automaticExposure()) {
-            recordAuto(ctx, cmd, stack, traceColor, plan);
+            recordAuto(ctx, cmd, stack, traceColor, plan, gpuProfile);
             return plan;
         }
         try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure manual write")) {
@@ -100,7 +101,7 @@ public final class RtExposure {
     }
 
     private void recordAuto(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage traceColor,
-                            PostBarrierPlan plan) {
+                            PostBarrierPlan plan, RtGpuProfiler.Session gpuProfile) {
         if (pipeline == null || histogram == null || state == null) {
             throw new IllegalStateException("RT auto exposure resources not created");
         }
@@ -109,9 +110,13 @@ public final class RtExposure {
             VK10.vkCmdFillBuffer(cmd, histogram.handle, 0, histogram.size, 0);
         }
         PostImageBarriers.before(cmd, stack, plan, PostBarrierPlan.HISTOGRAM);
+        gpuProfile.begin(RtGpuProfiler.Region.EXPOSURE_HISTOGRAM);
         pipeline.dispatchHistogram(cmd, traceColor.width, traceColor.height);
+        gpuProfile.end(RtGpuProfiler.Region.EXPOSURE_HISTOGRAM);
         PostImageBarriers.before(cmd, stack, plan, PostBarrierPlan.RESOLVE);
+        gpuProfile.begin(RtGpuProfiler.Region.EXPOSURE_RESOLVE);
         pipeline.dispatchResolve(cmd, Math.max(1, traceColor.width * traceColor.height), autoConfig(), frameTimeSeconds());
+        gpuProfile.end(RtGpuProfiler.Region.EXPOSURE_RESOLVE);
     }
 
     private float frameTimeSeconds() {

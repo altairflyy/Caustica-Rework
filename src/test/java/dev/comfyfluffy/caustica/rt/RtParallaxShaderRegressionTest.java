@@ -125,6 +125,10 @@ final class RtParallaxShaderRegressionTest {
                 "a disabled POM must push a zero relief depth, which the shader treats as \"no effect\"");
 
         String trace = slice(Files.readString(WORLD_RCHIT), "ParallaxHit parallaxTrace(", "\n}\n");
+        assertInOrder(trace,
+                "float4 parallaxParams = worldPush.parallaxParams;",
+                "if (parallaxParams.x <= 1.0e-5)",
+                "float2 g1 = uv1 - uv0;");
         assertInOrder(trace, "if (reliefDepth <= 1.0e-5)", "return flatHit;");
         assertTrue(trace.contains("if ((header.features & MATERIAL_FEATURE_NORMAL) == 0u)"),
                 "a material without an _n page has no height field and must keep its flat UV");

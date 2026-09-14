@@ -61,6 +61,8 @@ public PathSegment tracePrimary(PathSegment seg,
         float3 n = payload.normal;
         float3 hitPos = ro + rd * payload.hitT;
         uint material = payloadMaterial();
+        gv_farGeometryDebug = (payload.flags & PAYLOAD_FAR_GEOMETRY_DEBUG) != 0u;
+        gv_farGeometryDebugColor = float3(payload.f0);
         if (material != MATERIAL_WATER && material != MATERIAL_DIELECTRIC) {
             float metal = material == MATERIAL_PARTICLE
                     ? 0.0 : clamp(payloadMetalness(), 0.0, 1.0);

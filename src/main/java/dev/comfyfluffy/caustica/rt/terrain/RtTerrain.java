@@ -6,6 +6,8 @@ import com.mojang.blaze3d.vertex.QuadInstance;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
+import dev.comfyfluffy.caustica.compat.VoxyCompat;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
@@ -13,6 +15,7 @@ import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
 import dev.comfyfluffy.caustica.rt.RtGpuExecutor.GraphicsUse;
+import dev.comfyfluffy.caustica.rt.VulkanDiagnostics;
 import dev.comfyfluffy.caustica.rt.lighting.SharcRadianceCache;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.scene.TerrainSceneContribution;
@@ -61,6 +64,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static dev.comfyfluffy.caustica.rt.terrain.RtTerrainMesher.WORKER_TESS;
 import static dev.comfyfluffy.caustica.rt.terrain.RtTerrainMesher.buildCpuSection;
@@ -70,6 +74,9 @@ import dev.comfyfluffy.caustica.rt.terrain.RtTerrainMesher.WorkerTessState;
 import dev.comfyfluffy.caustica.rt.terrain.RtSectionBuilder.PreparedSection;
 import dev.comfyfluffy.caustica.rt.terrain.RtSectionTable.Generation;
 import dev.comfyfluffy.caustica.rt.terrain.RtSectionTable.SectionGeom;
+import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver;
+import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver.CoverageRect;
+import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver.VanillaCoverage;
 /**
  * Per-section terrain residency synced to vanilla's loaded chunks. A singleton manager
  * keeps a map of resident 16³ sections. The 20 TPS tick maintains the desired window around the player
@@ -131,9 +138,16 @@ public final class RtTerrain {
         return CausticaConfig.Rt.Terrain.REBASE_DISTANCE_BLOCKS.value();
     }
 
+    private static long mib(int value) {
+        return Math.multiplyExact((long) value, 1024L * 1024L);
+    }
+
     private static final RtTerrain INSTANCE = new RtTerrain();
 
     private final Long2ObjectOpenHashMap<SectionGeom> resident = new Long2ObjectOpenHashMap<>();
+    private final TerrainResidencyPolicy residencyPolicy = new TerrainResidencyPolicy();
+    private final AtomicLong terrainBlasLiveBytes = new AtomicLong();
+    private long lastResidencyStateLogNanos;
     // Persistent palette snapshots for tessellation regions (render-thread only); invalidated on dirty
     // sections, column unload/window-leave, and full clears.
     private final RtSectionSnapshots snapshots = new RtSectionSnapshots();
@@ -202,6 +216,8 @@ public final class RtTerrain {
     // (or known empty), so there is never a hole *or* double geometry at the transition ring.
     private int[] distantReadyMaskWords = new int[0];
     private boolean distantReadyMaskDirty = true;
+    private long distantReadyGeneration = 1L;
+    private long distantReadyFingerprint = Long.MIN_VALUE;
 
     private RtTerrain() {
         missingIndex.defaultReturnValue(NO_MISSING_INDEX);
@@ -236,6 +252,47 @@ public final class RtTerrain {
      */
     public TerrainSceneContribution sceneContribution() {
         return new TerrainSceneContribution(table.instances);
+    }
+
+    /** Generation of the semantic full/empty readiness state used to invalidate cached DH omission. */
+    public static long distantReadyGeneration() {
+        return INSTANCE.distantReadyGeneration;
+    }
+
+    /** CPU counterpart of the shader readiness mask, used only to omit completely covered DH tiles. */
+    public static VanillaCoverage distantCoverage(CoverageRect tile) {
+        RtTerrain terrain = INSTANCE;
+        if (!terrain.ready) return VanillaCoverage.PARTIAL;
+        return LodCoverageResolver.resolveVanillaCoverage(tile,
+                (sx, sy, sz) -> terrain.isReadySection(sx, sy, sz),
+                terrain::containsReadinessSection);
+    }
+
+    private boolean containsReadinessSection(int sx, int sy, int sz) {
+        return windowValid && sx >= windowPcx - windowRadius && sx <= windowPcx + windowRadius
+                && sz >= windowPcz - windowRadius && sz <= windowPcz + windowRadius
+                && sy >= windowLoY && sy <= windowHiY;
+    }
+
+    private boolean isReadySection(int sx, int sy, int sz) {
+        long key = sectionKey(sx, sy, sz);
+        return (resident.containsKey(key) && published.contains(key)) || empty.contains(key);
+    }
+
+    public static long terrainBlasLiveBytes() {
+        return INSTANCE.terrainBlasLiveBytes.get();
+    }
+
+    public static int terrainResidentSections() {
+        return INSTANCE.resident.size();
+    }
+
+    public static int terrainInFlight() {
+        return INSTANCE.inFlight.size();
+    }
+
+    public static int terrainPublishedSections() {
+        return INSTANCE.published.size();
     }
 
     /** Section table device address: {@code {u64 primAddr, u64 uvAddr, u32 triBase[4]}} per section, indexed by gl_InstanceCustomIndexEXT. */
@@ -485,6 +542,7 @@ public final class RtTerrain {
         if (level == null || mc.player == null) {
             return;
         }
+        boolean dispatchAllowed = updateResidencyPressure(ctx) && BackgroundAsPacing.allowTerrain(ctx);
         if (reextract.isEmpty() && missing.isEmpty()
                 && completedBuilds.isEmpty()
                 && !lightGrid.hasCompletions()
@@ -522,6 +580,10 @@ public final class RtTerrain {
 
         // Snapshot and dispatch a bounded number of new worker-owned section builds.
         try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.snapshotDispatch")) {
+            if (!dispatchAllowed) {
+                flushLightHierarchyUpdate(ctx);
+                return;
+            }
             DispatchContext dispatch = null;
             int dispatchSlots = Math.min(asyncDispatchPerPass(), Math.max(0, maxInflight() - inFlight.size()));
             if (dispatchSlots > 0 && !reextract.isEmpty()) {
@@ -540,6 +602,39 @@ public final class RtTerrain {
 
         flushLightHierarchyUpdate(ctx);
 
+    }
+
+    /** Gate new terrain work on global device-local heap pressure; never destroys published geometry. */
+    private boolean updateResidencyPressure(RtContext ctx) {
+        if (!CausticaConfig.Rt.Terrain.RESIDENCY_ENABLED.value()) return true;
+        VulkanDiagnostics.MemoryBudget memory = VulkanDiagnostics.memoryBudget(ctx);
+        if (memory.budget() <= 0L) return true;
+        TerrainResidencyPolicy.Decision decision = residencyPolicy.update(
+                memory.usage(), memory.budget(), mib(CausticaConfig.Rt.Terrain.SAFETY_HEADROOM_MIB.value()),
+                mib(CausticaConfig.Rt.Terrain.PRESSURE_HYSTERESIS_MIB.value()));
+        long now = System.nanoTime();
+        if (now - lastResidencyStateLogNanos >= 5_000_000_000L
+                || lastResidencyStateLogNanos == 0L) {
+            lastResidencyStateLogNanos = now;
+            CausticaMod.LOGGER.info(
+                    "[Caustica Terrain VRAM] state={} heapUsage={} heapBudget={} headroom={} terrainBlas={} resident={} published={} inFlight={} evicted=0 provider={} allocated={} compacted={} compactionRatio={}",
+                    decision.state(), VulkanDiagnostics.formatBytes(memory.usage()),
+                    VulkanDiagnostics.formatBytes(memory.budget()),
+                    VulkanDiagnostics.formatBytes(Math.max(0L, memory.budget() - memory.usage())),
+                    VulkanDiagnostics.formatBytes(terrainBlasLiveBytes.get()), resident.size(), published.size(), inFlight.size(),
+                    terrainProvider(),
+                    VulkanDiagnostics.formatBytes(RtAccel.terrainBlasAllocatedBytes()),
+                    VulkanDiagnostics.formatBytes(RtAccel.terrainBlasCompactedBytes()),
+                    RtAccel.terrainBlasAllocatedBytes() == 0L ? "n/a" : String.format(java.util.Locale.ROOT, "%.3f",
+                            (double) RtAccel.terrainBlasCompactedBytes() / RtAccel.terrainBlasAllocatedBytes()));
+        }
+        return decision.dispatchAllowed();
+    }
+
+    private static String terrainProvider() {
+        if (VoxyCompat.active()) return "VOXY";
+        if (DistantHorizonsCompat.enabled()) return "DH";
+        return "NONE";
     }
 
     private void syncDesiredWindow(ClientChunkCache chunkSource, int pcx, int psy, int pcz,
@@ -917,6 +1012,7 @@ public final class RtTerrain {
     private void rebuildReadyMask() {
         if (!windowValid) {
             distantReadyMaskWords = new int[0];
+            updateDistantReadyGeneration(0L);
             return;
         }
         int sizeX = windowRadius * 2 + 1;
@@ -945,6 +1041,25 @@ public final class RtTerrain {
             }
             int bit = readyMaskBitIndex(x, y, z, sizeX, sizeZ);
             distantReadyMaskWords[bit >>> 5] |= 1 << (bit & 31);
+        }
+        long fingerprint = 0xcbf29ce484222325L;
+        fingerprint = mixReadyFingerprint(fingerprint, windowPcx);
+        fingerprint = mixReadyFingerprint(fingerprint, windowPcz);
+        fingerprint = mixReadyFingerprint(fingerprint, windowRadius);
+        fingerprint = mixReadyFingerprint(fingerprint, windowLoY);
+        fingerprint = mixReadyFingerprint(fingerprint, windowHiY);
+        for (int word : distantReadyMaskWords) fingerprint = mixReadyFingerprint(fingerprint, word);
+        updateDistantReadyGeneration(fingerprint);
+    }
+
+    private static long mixReadyFingerprint(long value, long input) {
+        return (value ^ input) * 0x100000001b3L;
+    }
+
+    private void updateDistantReadyGeneration(long fingerprint) {
+        if (fingerprint != distantReadyFingerprint) {
+            distantReadyFingerprint = fingerprint;
+            distantReadyGeneration++;
         }
     }
 
@@ -1236,6 +1351,7 @@ public final class RtTerrain {
 
     /** Build a terrain BLAS and optionally compact-copy it before publication. */
     private void submitTerrainBuild(RtContext ctx, SectionTask task, PreparedSection prepared) {
+        RtFrameStats.FRAME.count("terrainBlasDispatched", 1);
         ctx.gpuExecutor().submit(
                 () -> !isTaskCurrent(task),
                 cmd -> {
@@ -1607,6 +1723,7 @@ public final class RtTerrain {
         for (PreparedSection ps : prepared) {
             SectionGeom g = new SectionGeom(ps.key(), ps.uvs(), ps.material(),
                     ps.blas().accel, ps.triBase(), ps.sx(), ps.sy(), ps.sz(), ps.lights());
+            terrainBlasLiveBytes.addAndGet(g.blas.backingSize());
             if (!desired.contains(ps.key())) {
                 // Left the window while its batched BLAS build was in flight (window sync keeps running
                 // during builds). Never published — retire the fresh, unreferenced geometry.
@@ -1968,6 +2085,7 @@ public final class RtTerrain {
     }
 
     private static void destroySectionGeometry(RtContext ctx, SectionGeom geometry) {
+        INSTANCE.terrainBlasLiveBytes.addAndGet(-geometry.blas.backingSize());
         ctx.accelerationStructures().destroyOwnedBlas(geometry.blas);
         geometry.material.destroy();
         geometry.uvs.destroy();

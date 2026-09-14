@@ -92,8 +92,19 @@ public final class RtFrameStats {
                     "entityFrameListsWaits", "entityTableWaits", "entitySlotWaits",
                     "entityGraphicsWaitNanos", "entityMotionFlushes", "entityTableFlushes",
                     "entityBlockEntityRetirements", "entitySlotRetirements", "entityTableRetirements",
+                    "terrainBlasAllocatedBytes", "terrainBlasCompactedBytes", "terrainBlasLiveBytes",
+                    "terrainResidentSections", "terrainPublishedSections",
+                    "terrainBlasDispatched", "lodBlasDispatched", "backgroundAsThrottleState",
+                    "queuedGpuBuildCount", "lodInstanceCount", "dhSourceCount", "dhBlasCount",
+                    "dhActiveRasterContainers", "dhUnmatchedRasterContainers",
+                    "dhTlasInstanceCount", "dhFullyVanillaCoveredCount", "dhPartiallyCoveredCount",
+                    "dhUncoveredCount", "fullTerrainInstanceCount", "totalTlasInstanceCount",
+                    "lodPending", "lodCpuPending",
+                    "lodPackPending", "lodBuildSession",
+                    "tlasBuildCount", "tlasUpdateCount", "tlasInstanceCount", "tlasCapacity",
                     "gpuRetiredResourcesPending", "gpuAsLiveCount", "gpuBlasLiveBytes",
-                    "gpuDeferredDestroyQueueDepth"},
+                    "gpuDeferredDestroyQueueDepth", "nativeDhHookExecutions",
+                    "suppressedVanillaTerrainLayerCalls"},
             true);
 
     private static final List<GarbageCollectorMXBean> GC_BEANS = ManagementFactory.getGarbageCollectorMXBeans();

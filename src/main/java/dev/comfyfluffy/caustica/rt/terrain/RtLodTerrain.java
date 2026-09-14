@@ -2,12 +2,18 @@ package dev.comfyfluffy.caustica.rt.terrain;
 
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
+import dev.comfyfluffy.caustica.compat.DhMaterialProvenance;
+import dev.comfyfluffy.caustica.compat.DhMaterialProvenance.FaceLayer;
+import dev.comfyfluffy.caustica.compat.DhMaterialProvenance.FaceRecipe;
+import dev.comfyfluffy.caustica.compat.VoxyCompat;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
+import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver;
 import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver.CoverageRect;
+import dev.comfyfluffy.caustica.rt.lod.LodCoverageResolver.VanillaCoverage;
 import dev.comfyfluffy.caustica.rt.lod.LodBatchPlanner;
 import dev.comfyfluffy.caustica.rt.lod.LodMesh;
 import dev.comfyfluffy.caustica.rt.scene.LodSceneContribution;
@@ -16,6 +22,7 @@ import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.material.RtMaterials;
 import dev.comfyfluffy.caustica.rt.terrain.RtSectionBuilder.PreparedSection;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrainMesher.PackedSection;
+import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import net.minecraft.client.Minecraft;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.VK10;
@@ -36,7 +43,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Experimental ray-traced coarse geometry sourced from DH's native render buffers. */
+/** Bounded canonical RT terrain sourced from DH's exact active LOD draw set. */
 public final class RtLodTerrain {
     public static final RtLodTerrain INSTANCE = new RtLodTerrain();
     /** ENTITY_BIT | PARTICLE_BIT is otherwise unused and still fits Vulkan's 24-bit custom index. */
@@ -45,19 +52,24 @@ public final class RtLodTerrain {
     private static final int RAY_MASK = 0x03;
     /** Rebuilding at every chunk crossing is too expensive for multi-million-triangle DH meshes. */
     private static final int ANCHOR_BLOCKS = 256;
-    /** Keep each DH section wholly outside vanilla terrain to avoid overlap at the transition. */
-    private static final int VANILLA_SEAM_GUARD_BLOCKS = 64;
     private static final int CHUNK_BLOCKS = 16;
-    private static final int MAX_PROXY_DISTANCE_CHUNKS = 512;
+    /** Legacy non-DH provider residency bound; never applied to DH's authoritative active set. */
+    private static final int MAX_ACTIVE_BLAS = 64;
+    /** Legacy non-DH provider residency bound; never applied to DH's authoritative active set. */
+    private static final int MAX_ACTIVE_QUADS = 500_000; // two triangles per DH quad
     private static final long REFRESH_NANOS = 8_000_000_000L;
     private static final long QUALITY_REFRESH_NANOS = 1_000_000_000L;
     private static final long QUALITY_SETTLE_NANOS = 15_000_000_000L;
     private static final long QUALITY_POLL_NANOS = 500_000_000L;
     private static final long RETRY_NANOS = 5_000_000_000L;
-    /** Publish a useful near-field proxy quickly, then checkpoint larger groups while the rest builds. */
     private static final int INITIAL_PROGRESS_BATCHES = 1;
-    private static final int STEADY_PROGRESS_BATCHES = 32;
-    private static final long PROGRESS_PUBLISH_NANOS = 1_000_000_000L;
+    private static final int STEADY_PROGRESS_BATCHES = 4;
+    private static final long PROGRESS_PUBLISH_NANOS = 250_000_000L;
+    /**
+     * DH commonly submits more than 256 post-cull nodes for one stable view. Keep one bounded working
+     * set large enough to survive opaque/transparent pass churn; world/reset paths still clear it.
+     */
+    private static final int MAX_SOURCE_PLAN_CACHE = 4096;
     // EDhApiBlockMaterial shader indices. Keep these explicit rather than depending on the optional
     // DH API at compile time: the native VBO stores the material as this single byte. Preserve the full
     // mini-material instead of collapsing every opaque LOD face to the generic terrain material.
@@ -81,11 +93,32 @@ public final class RtLodTerrain {
     private static final float DH_ILLUMINATED_EMISSION = 1.05f;
     private static final float[] SRGB_TO_LINEAR = makeSrgbLut();
     private static final float[] EMPTY_LIGHTS = new float[0];
+    private static final LodBatchPlanner.SliceCounter DH_SLICE_COUNTER = new LodBatchPlanner.SliceCounter() {
+        @Override
+        public LodBatchPlanner.SliceCounts count(LodMesh mesh, byte[] bytes, boolean transparentPass,
+                                                  int start, int end) {
+            int[] out = new int[4];
+            countDhQuadsInto(mesh, bytes, transparentPass, start, end, out);
+            return new LodBatchPlanner.SliceCounts(out[0], out[1], out[2], out[3]);
+        }
+
+        @Override
+        public void countInto(LodMesh mesh, byte[] bytes, boolean transparentPass,
+                              int start, int end, int[] out) {
+            countDhQuadsInto(mesh, bytes, transparentPass, start, end, out);
+        }
+    };
 
     private final ConcurrentLinkedQueue<Completed> completed = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<CpuCompleted> cpuCompleted = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<PackCompleted> packCompleted = new ConcurrentLinkedQueue<>();
     private final Object activeLock = new Object();
+    private final Object sourcePlanCacheLock = new Object();
+    /** Immutable CPU plans keyed by DH's globally monotonic source key/version. */
+    private final LinkedHashMap<SourcePlanIdentity, CachedSourcePlan> sourcePlanCache =
+            new LinkedHashMap<>(64, 0.75f, true);
+    private long sourcePlanCacheHits;
+    private long sourcePlanCacheMisses;
     private final ExecutorService cpuWorker = Executors.newSingleThreadExecutor(work -> {
         Thread thread = new Thread(work, "Caustica DH CPU worker");
         thread.setDaemon(true);
@@ -99,6 +132,13 @@ public final class RtLodTerrain {
     // camera-anchor changes and be reused by later proxy revisions.
     private Proxy instanceProxy;
     private RtAccel.Instance[] frameDhInstances = new RtAccel.Instance[0];
+    private long coverageProxyRevision = Long.MIN_VALUE;
+    private long coverageTerrainGeneration = Long.MIN_VALUE;
+    private int dhFullyVanillaCovered;
+    private int dhPartiallyCovered;
+    private int dhUncovered;
+    private long lastCoverageLogNanos;
+    private long lastLoggedActiveSignature = Long.MIN_VALUE;
 
     private Proxy current;
     private Object world;
@@ -117,16 +157,57 @@ public final class RtLodTerrain {
     private boolean pending;
     private boolean cpuPending;
     private boolean packPending;
-    private boolean bootstrapComplete;
     private final AtomicBoolean manualRefreshRequested = new AtomicBoolean();
     private boolean forceSourceRebuild;
     // Refreshes are incremental and atomic: unchanged DH source meshes reuse their existing compacted
     // BLAS, changed/new meshes are built one bounded batch at a time, and the old proxy remains the sole
-    // visible RT source until the replacement table is complete. This removes the raster-only hand-off
-    // (which lost RT shadows/materials) without recreating the old full-proxy VRAM doubling spike.
+    // visible RT source until the replacement table is complete. This keeps the exact active set
+    // stable without recreating the old full-proxy VRAM doubling spike; Caustica owns visible FAR.
     private BuildSession buildSession;
 
     private RtLodTerrain() {
+    }
+
+    public static String schedulerState() {
+        RtLodTerrain lod = INSTANCE;
+        return (lod.cpuPending ? "cpuPending," : "")
+                + (lod.packPending ? "packPending," : "")
+                + (lod.pending ? "pending," : "")
+                + (lod.buildSession != null ? "buildSession" : "idle");
+    }
+
+    public static int frameInstanceCount() {
+        return INSTANCE.frameDhInstances.length;
+    }
+
+    public static int dhBlasCount() {
+        Proxy proxy = INSTANCE.current;
+        return proxy == null ? 0 : proxy.entries.size();
+    }
+
+    public static int dhSourceCount() {
+        Proxy proxy = INSTANCE.current;
+        return proxy == null ? 0 : proxy.sources.size();
+    }
+
+    public static int dhFullyVanillaCoveredCount() { return INSTANCE.dhFullyVanillaCovered; }
+    public static int dhPartiallyCoveredCount() { return INSTANCE.dhPartiallyCovered; }
+    public static int dhUncoveredCount() { return INSTANCE.dhUncovered; }
+
+    public static boolean pending() {
+        return INSTANCE.pending;
+    }
+
+    public static boolean cpuPending() {
+        return INSTANCE.cpuPending;
+    }
+
+    public static boolean packPending() {
+        return INSTANCE.packPending;
+    }
+
+    public static boolean buildSessionActive() {
+        return INSTANCE.buildSession != null;
     }
 
     /**
@@ -139,6 +220,7 @@ public final class RtLodTerrain {
 
     public void frame(RtContext ctx, int rebaseX, int rebaseY, int rebaseZ) {
         Minecraft minecraft = Minecraft.getInstance();
+        BackgroundAsPacing.observe(ctx);
         DistantHorizonsCompat.tickOptionalSources();
         Object newWorld = minecraft.level;
         if (DistantHorizonsCompat.enabled() && newWorld != null
@@ -218,12 +300,22 @@ public final class RtLodTerrain {
             anchorZ = az;
             capturedLodRevision = lodRevision;
             nextRefresh = now + refreshDelayNanos(now);
-            // Match the shader hand-off: DH starts one chunk closer than the old +CHUNK_BLOCKS seam.
-            int vanillaRadius = minecraft.options.renderDistance().get() * CHUNK_BLOCKS
-                    + VANILLA_SEAM_GUARD_BLOCKS;
-            int dhChunks = Math.min(MAX_PROXY_DISTANCE_CHUNKS,
-                    Math.max(1, DistantHorizonsCompat.renderDistanceChunks()));
-            int proxyRadius = Math.max(vanillaRadius + CHUNK_BLOCKS, dhChunks * CHUNK_BLOCKS);
+            int providerDistanceChunks = Math.max(0, DistantHorizonsCompat.renderDistanceChunks());
+            int dhChunks;
+            if (VoxyCompat.active()) {
+                // Voxy has an independent Caustica bridge and keeps its existing provider bound.
+                dhChunks = providerDistanceChunks;
+            } else {
+                // DH is the sole authority for FAR distance. Do not introduce a second Caustica ring cap.
+                dhChunks = DistantHorizonsCompat.dhRtRingEnabled() ? providerDistanceChunks : 0;
+            }
+            if (dhChunks <= 0) {
+                reset(ctx, true);
+                return;
+            }
+            // The configured ring is the authoritative maximum. Native DH remains responsible for all
+            // geometry beyond it; never use the provider's full horizon as a fallback radius.
+            int proxyRadius = dhChunks * CHUNK_BLOCKS;
             long revision = nextRevision;
             nextRevision += 2L;
             Proxy reuseBase = forceSourceRebuild ? null : current;
@@ -237,21 +329,43 @@ public final class RtLodTerrain {
         Proxy proxy = current;
         if (proxy == null) return new LodSceneContribution(List.of(), 0L);
 
-        if (instanceProxy != proxy) {
+        long terrainGeneration = RtTerrain.distantReadyGeneration();
+        if (instanceProxy != proxy || coverageProxyRevision != proxy.revision
+                || coverageTerrainGeneration != terrainGeneration) {
             instanceProxy = proxy;
-            frameDhInstances = new RtAccel.Instance[proxy.entries.size()];
-            for (int i = 0; i < frameDhInstances.length; i++) {
+            coverageProxyRevision = proxy.revision;
+            coverageTerrainGeneration = terrainGeneration;
+            ArrayList<RtAccel.Instance> active = new ArrayList<>(proxy.entries.size());
+            dhFullyVanillaCovered = dhPartiallyCovered = dhUncovered = 0;
+            for (int i = 0; i < proxy.entries.size(); i++) {
+                GeomEntry entry = proxy.entries.get(i);
+                VanillaCoverage coverage = RtTerrain.distantCoverage(entry.coverage);
+                if (coverage == VanillaCoverage.FULL) {
+                    dhFullyVanillaCovered++;
+                    continue;
+                }
+                if (coverage == VanillaCoverage.PARTIAL) dhPartiallyCovered++;
+                else dhUncovered++;
                 RtSectionTable.SectionGeom geom = proxy.entries.get(i).geom;
                 float[] transform = {1, 0, 0, geom.sx - rebaseX,
                         0, 1, 0, geom.sy - rebaseY,
                         0, 0, 1, geom.sz - rebaseZ};
-                frameDhInstances[i] = new RtAccel.Instance(transform,
-                        geom.blas.deviceAddress, DH_INSTANCE_KIND | i, RAY_MASK);
+                active.add(new RtAccel.Instance(transform,
+                        geom.blas.deviceAddress, DH_INSTANCE_KIND | i, RAY_MASK));
+            }
+            frameDhInstances = active.toArray(RtAccel.Instance[]::new);
+            long now = System.nanoTime();
+            if (now - lastCoverageLogNanos >= 1_000_000_000L || lastCoverageLogNanos == 0L) {
+                lastCoverageLogNanos = now;
+                CausticaMod.LOGGER.info("DH RT coverage: sources={} blas={} activeTlas={} full={} partial={} none={}",
+                        proxy.sources.size(), proxy.entries.size(), frameDhInstances.length,
+                        dhFullyVanillaCovered, dhPartiallyCovered, dhUncovered);
             }
         } else {
-            for (int i = 0; i < frameDhInstances.length; i++) {
-                RtSectionTable.SectionGeom geom = proxy.entries.get(i).geom;
-                float[] transform = frameDhInstances[i].transform3x4();
+            for (RtAccel.Instance instance : frameDhInstances) {
+                int index = instance.customIndex() & 0x3FFFFF;
+                RtSectionTable.SectionGeom geom = proxy.entries.get(index).geom;
+                float[] transform = instance.transform3x4();
                 transform[3] = geom.sx - rebaseX;
                 transform[7] = geom.sy - rebaseY;
                 transform[11] = geom.sz - rebaseZ;
@@ -263,11 +377,6 @@ public final class RtLodTerrain {
     public long emissiveRevision() {
         Proxy proxy = current;
         return proxy == null ? 0L : proxy.revision;
-    }
-
-    /** Raster DH fills only the still-unbuilt horizon during the first progressive proxy stream. */
-    public boolean bootstrapComplete() {
-        return bootstrapComplete;
     }
 
     private void startCpuBuild(int originX, int originZ, int proxyRadius, long taskEpoch,
@@ -299,7 +408,26 @@ public final class RtLodTerrain {
         ArrayList<LodMesh> snapshot =
                 new ArrayList<>(DistantHorizonsCompat.lodMeshesSnapshot());
         if (snapshot.isEmpty()) return List.of();
-        snapshot = LodCoverageResolver.removeFullyCoveredCoarseMeshes(snapshot);
+        List<LodMesh> exactDh = DistantHorizonsCompat.dhLodMeshesSnapshot();
+        boolean dhOwnsSnapshot = !exactDh.isEmpty() && snapshot.equals(exactDh);
+        if (dhOwnsSnapshot) {
+            // The RT resident set deliberately spans all view directions. Remove an older/coarser node
+            // only after finer DH geometry covers its complete square, never merely because it left the
+            // raster frustum behind the camera.
+            exactDh = LodCoverageResolver.removeFullyCoveredCoarseMeshes(exactDh);
+        }
+        long activeSignature = activeSetSignature(exactDh);
+        boolean logMapping = dhOwnsSnapshot && activeSignature != lastLoggedActiveSignature;
+        // DH already supplied its exact post-cull active set. Re-resolving parent/child coverage here
+        // would silently change native selection. Voxy does not expose that active-set contract and
+        // therefore keeps the existing overlap resolver.
+        if (dhOwnsSnapshot) {
+            return planExactDhAggregates(originX, originZ, proxyRadius, taskEpoch, base, quality,
+                    exactDh, logMapping, activeSignature);
+        }
+        if (!dhOwnsSnapshot) {
+            snapshot = LodCoverageResolver.removeFullyCoveredCoarseMeshes(snapshot);
+        }
         int qualityBandBlocks = switch (Math.clamp(quality.horizontalQualityRank(), 0, 4)) {
             case 0 -> 128;
             case 1 -> 192;
@@ -327,6 +455,14 @@ public final class RtLodTerrain {
         int reusedMeshes = 0;
         int reusedBatches = 0;
         int rebuiltBatches = 0;
+        int selectedQuads = 0;
+        int budgetDroppedBatches = 0;
+        if (logMapping) {
+            lastLoggedActiveSignature = activeSignature;
+            CausticaMod.LOGGER.info("DH active LOD mapping: activeNodes={} matchedMeshes={} rejectedUnmatched={} capturedSources={}",
+                    DistantHorizonsCompat.activeRasterContainerCount(), exactDh.size(),
+                    DistantHorizonsCompat.activeUnmatchedContainerCount(), snapshot.size());
+        }
         for (LodMesh mesh : snapshot) {
             if (taskEpoch != epoch) return List.of();
             int cx = mesh.originX() + mesh.width() / 2;
@@ -338,25 +474,169 @@ public final class RtLodTerrain {
             SourceState oldSource = base == null ? null : base.sources.get(mesh.key());
             if (oldSource != null && oldSource.version == mesh.version()) {
                 reusedMeshes++;
-                reusedBatches += oldSource.entries.size();
                 for (GeomEntry entry : oldSource.entries) {
+                    if (plan.size() >= MAX_ACTIVE_BLAS
+                            || selectedQuads + entry.quadCount > MAX_ACTIVE_QUADS) {
+                        budgetDroppedBatches++;
+                        continue;
+                    }
                     plan.add(PlannedBatch.reuse(entry));
+                    selectedQuads += entry.quadCount;
+                    reusedBatches++;
+                    if (logMapping) logMapping(mesh, entry.batchKey);
                 }
                 continue;
             }
 
             LodBatchPlanner.SourcePlan sourcePlan = LodBatchPlanner.planSource(
-                    mesh, oldSource == null ? null : oldSource.version, RtLodTerrain::countDhQuads);
+                    mesh, oldSource == null ? null : oldSource.version, DH_SLICE_COUNTER);
             for (LodBatchPlanner.BatchPlan batch : sourcePlan.batches()) {
-                plan.add(PlannedBatch.build(batch.batchKey(), mesh, batch.slices()));
+                int batchQuads = batch.slices().stream().mapToInt(slice -> slice.counts().total()).sum();
+                if (plan.size() >= MAX_ACTIVE_BLAS
+                        || selectedQuads + batchQuads > MAX_ACTIVE_QUADS) {
+                    budgetDroppedBatches++;
+                    continue;
+                }
+                plan.add(PlannedBatch.build(batch.batchKey(), mesh, batch.slices(), batch.coverage()));
+                selectedQuads += batchQuads;
+                rebuiltBatches++;
+                if (logMapping) logMapping(mesh, batch.batchKey());
             }
-            rebuiltBatches += sourcePlan.batches().size();
         }
         CausticaMod.LOGGER.info(
-                "DH RT refresh plan: {} active source meshes ({} reused), {} reused + {} rebuilt bounded BLAS batches; quality {} / {}, target datapoint {} blocks",
-                selectedMeshes, reusedMeshes, reusedBatches, rebuiltBatches,
+                "DH canonical RT refresh: {} active source meshes ({} reused), {} reused + {} rebuilt BLAS, {} quads, {} budget-dropped batches; quality {} / {}, target datapoint {} blocks",
+                selectedMeshes, reusedMeshes, reusedBatches, rebuiltBatches, selectedQuads, budgetDroppedBatches,
                 quality.maxHorizontalResolution(), quality.horizontalQuality(), quality.maxDataPointWidth());
+        if (logMapping) {
+            CausticaMod.LOGGER.info("DH active LOD aggregates: sources={} aggregates={} triangles={} budgetRejected={}",
+                    snapshot.size(), plan.size(), selectedQuads * 2L, budgetDroppedBatches);
+        }
         return plan;
+    }
+
+    /** Package DH's exact post-cull meshes as bounded spatial batches without making another LOD decision. */
+    private List<PlannedBatch> planExactDhAggregates(int originX, int originZ, int proxyRadius,
+                                                     long taskEpoch, Proxy base,
+                                                     DistantHorizonsCompat.LodQuality quality,
+                                                     List<LodMesh> exactDh, boolean logMapping,
+                                                     long activeSignature) {
+        ArrayList<PlannedBatch> plan = new ArrayList<>();
+        int selectedMeshes = 0;
+        int selectedQuads = 0;
+        long cacheHitsBefore;
+        long cacheMissesBefore;
+        synchronized (sourcePlanCacheLock) {
+            cacheHitsBefore = sourcePlanCacheHits;
+            cacheMissesBefore = sourcePlanCacheMisses;
+        }
+
+        // Keep DH's post-cull/raster submission order.  In particular, do not sort by distance or detail:
+        // that would turn a bounded memory policy into a second LOD selector.
+        for (LodMesh mesh : exactDh) {
+            if (taskEpoch != epoch) return List.of();
+            int cx = mesh.originX() + mesh.width() / 2;
+            int cz = mesh.originZ() + mesh.width() / 2;
+            int distance = Math.max(Math.abs(cx - originX), Math.abs(cz - originZ));
+            if (distance > proxyRadius + mesh.width()) continue;
+
+            LodBatchPlanner.SourcePlan source = cachedSourcePlan(mesh);
+            int sourceQuads = source.batches().stream()
+                    .mapToInt(batch -> batch.slices().stream()
+                            .mapToInt(slice -> slice.counts().total()).sum())
+                    .sum();
+            if (sourceQuads == 0) continue;
+            selectedMeshes++;
+            selectedQuads += sourceQuads;
+
+            SourceState oldSource = base == null ? null : base.sources.get(mesh.key());
+            if (oldSource != null && oldSource.version == mesh.version() && oldSource.entries.size() == 1) {
+                plan.add(PlannedBatch.reuse(oldSource.entries.get(0)));
+                if (logMapping) logMapping(mesh, mesh.key());
+                continue;
+            }
+            ArrayList<LodBatchPlanner.SlicePlan> sourceSlices = new ArrayList<>();
+            CoverageRect sourceCoverage = null;
+            for (LodBatchPlanner.BatchPlan batch : source.batches()) {
+                sourceSlices.addAll(batch.slices());
+                sourceCoverage = unionCoverage(sourceCoverage, batch.coverage(), mesh.key());
+            }
+            plan.add(PlannedBatch.build(mesh.key(), mesh, sourceSlices, sourceCoverage));
+            if (logMapping) logMapping(mesh, mesh.key());
+        }
+
+        if (logMapping) {
+            lastLoggedActiveSignature = activeSignature;
+            CausticaMod.LOGGER.info("DH active LOD mapping: activeNodes={} matchedMeshes={} rejectedUnmatched={} capturedSources={}",
+                    DistantHorizonsCompat.activeRasterContainerCount(), exactDh.size(),
+                    DistantHorizonsCompat.activeUnmatchedContainerCount(), selectedMeshes);
+        }
+
+        CausticaMod.LOGGER.info(
+                "DH canonical RT refresh: {} active source meshes, {} atomic native-source BLAS, {} quads, no DH geometry dropped; quality {} / {}, target datapoint {} blocks, sourcePlanCache hit={} miss={}",
+                selectedMeshes, plan.size(), selectedQuads,
+                quality.maxHorizontalResolution(), quality.horizontalQuality(), quality.maxDataPointWidth(),
+                sourcePlanCacheHits - cacheHitsBefore, sourcePlanCacheMisses - cacheMissesBefore);
+        if (logMapping) {
+            CausticaMod.LOGGER.info("DH active LOD native-source batches: sources={} batches={} triangles={} budgetRejected=0",
+                    selectedMeshes, plan.size(), selectedQuads * 2L);
+        }
+        return plan;
+    }
+
+    private LodBatchPlanner.SourcePlan cachedSourcePlan(LodMesh mesh) {
+        SourcePlanIdentity identity = new SourcePlanIdentity(mesh.key(), mesh.version());
+        synchronized (sourcePlanCacheLock) {
+            CachedSourcePlan cached = sourcePlanCache.get(identity);
+            if (cached != null && cached.mesh == mesh) {
+                sourcePlanCacheHits++;
+                return cached.plan;
+            }
+        }
+        LodBatchPlanner.SourcePlan planned = LodBatchPlanner.planSource(mesh, null, DH_SLICE_COUNTER);
+        synchronized (sourcePlanCacheLock) {
+            sourcePlanCache.put(identity, new CachedSourcePlan(mesh, planned));
+            sourcePlanCacheMisses++;
+            while (sourcePlanCache.size() > MAX_SOURCE_PLAN_CACHE) {
+                sourcePlanCache.remove(sourcePlanCache.entrySet().iterator().next().getKey());
+            }
+        }
+        return planned;
+    }
+
+    private static CoverageRect unionCoverage(CoverageRect current, CoverageRect next, long key) {
+        if (current == null) {
+            return new CoverageRect(key, next.x(), next.z(), next.width(), next.detailWidth(),
+                    next.minY(), next.maxY());
+        }
+        int minX = Math.min(current.x(), next.x());
+        int minZ = Math.min(current.z(), next.z());
+        int maxX = Math.max(current.maxX(), next.maxX());
+        int maxZ = Math.max(current.maxZ(), next.maxZ());
+        int minY = Math.min(current.minY(), next.minY());
+        int maxY = Math.max(current.maxY(), next.maxY());
+        int detail = Math.min(current.detailWidth(), next.detailWidth());
+        return new CoverageRect(key, minX, minZ, Math.max(maxX - minX, maxZ - minZ), detail, minY, maxY);
+    }
+
+    private static void logMapping(LodMesh mesh, long aggregateKey) {
+        CausticaMod.LOGGER.info(
+                "DH LOD map: activeKey={} capturedKey={} origin=({}, {}, {}) width={} dataPointWidth={} version={} aggregate={}",
+                mesh.key(), mesh.key(), mesh.originX(), mesh.originY(), mesh.originZ(), mesh.width(),
+                mesh.dataPointWidth(), mesh.version(), aggregateKey);
+    }
+
+    private static long activeSetSignature(List<LodMesh> meshes) {
+        long h = 0xcbf29ce484222325L;
+        for (LodMesh mesh : meshes) {
+            h ^= mesh.key(); h *= 0x100000001b3L;
+            h ^= mesh.version(); h *= 0x100000001b3L;
+            h ^= mesh.originX(); h *= 0x100000001b3L;
+            h ^= mesh.originY(); h *= 0x100000001b3L;
+            h ^= mesh.originZ(); h *= 0x100000001b3L;
+            h ^= mesh.width(); h *= 0x100000001b3L;
+            h ^= mesh.dataPointWidth(); h *= 0x100000001b3L;
+        }
+        return h ^ meshes.size();
     }
 
     private long refreshDelayNanos(long now) {
@@ -391,7 +671,7 @@ public final class RtLodTerrain {
                 materials.emissiveGlassId());
         for (LodBatchPlanner.SlicePlan slice : batch) {
             decodeDhBuffer(slice.bytes(), slice.transparentPass(), slice.mesh(), originX, originZ, packed,
-                    palette, slice.start(), slice.end());
+                    palette, slice.start(), slice.end(), slice.quadOffsets());
         }
         packed.requireComplete();
 
@@ -406,11 +686,11 @@ public final class RtLodTerrain {
         return new PackedSection(packed.positions, packed.indices, packed.uvs, packed.prims,
                 new int[]{0, anyHitTris, 0, waterTris},
                 new int[]{0, 0, anyHitTris, anyHitTris},
-                EMPTY_LIGHTS);
+                EMPTY_LIGHTS, packed.recipeWords.toFloatArray());
     }
 
-    private static LodBatchPlanner.SliceCounts countDhQuads(LodMesh mesh, byte[] bytes,
-                                                              boolean transparentPass, int start, int end) {
+    private static void countDhQuadsInto(LodMesh mesh, byte[] bytes, boolean transparentPass,
+                                         int start, int end, int[] out) {
         int maxLocal = mesh.width() + 1;
         int solid = 0;
         int emissive = 0;
@@ -433,7 +713,10 @@ public final class RtLodTerrain {
                 solid++;
             }
         }
-        return new LodBatchPlanner.SliceCounts(solid, emissive, glass, water);
+        out[0] = solid;
+        out[1] = emissive;
+        out[2] = glass;
+        out[3] = water;
     }
 
     static boolean isDhEmissiveMaterial(int material) {
@@ -463,22 +746,43 @@ public final class RtLodTerrain {
                                        LodMesh mesh,
                                        int originX, int originZ, PackedMeshBuilder packed,
                                        DhMaterialPalette palette) {
-        decodeDhBuffer(bytes, transparentPass, mesh, originX, originZ, packed, palette, 0, bytes.length);
+        decodeDhBuffer(bytes, transparentPass, mesh, originX, originZ, packed, palette, 0, bytes.length, null);
     }
 
     private static void decodeDhBuffer(byte[] bytes, boolean transparentPass,
                                        LodMesh mesh,
                                        int originX, int originZ, PackedMeshBuilder packed,
-                                       DhMaterialPalette palette, int start, int end) {
-        if (start >= end) return;
+                                       DhMaterialPalette palette, int start, int end, int[] quadOffsets) {
+        if (quadOffsets == null && start >= end) return;
         float[] xyz = new float[12]; // reused for every quad; the writer copies values immediately
+        float[] faceShades = DistantHorizonsCompat.lodFaceShades();
         int offsetX = mesh.originX() - originX;
         int offsetZ = mesh.originZ() - originZ;
         int maxLocal = mesh.width() + 1;
+        if (quadOffsets != null) {
+            for (int quad : quadOffsets) {
+                decodeDhQuad(bytes, transparentPass, mesh, originX, originZ, packed, palette,
+                        quad * 64, maxLocal, xyz, faceShades);
+            }
+            return;
+        }
         for (int q = start; q < end; q += 64) {
-            if (!validDhQuad(bytes, q, maxLocal)) continue;
+            decodeDhQuad(bytes, transparentPass, mesh, originX, originZ, packed, palette,
+                    q, maxLocal, xyz, faceShades);
+        }
+    }
+
+    private static void decodeDhQuad(byte[] bytes, boolean transparentPass, LodMesh mesh,
+                                     int originX, int originZ, PackedMeshBuilder packed,
+                                     DhMaterialPalette palette, int q, int maxLocal, float[] xyz,
+                                     float[] faceShades) {
+            if (!validDhQuad(bytes, q, maxLocal)) return;
             int material = bytes[q + 12] & 0xFF;
-            if (material == DH_MATERIAL_AIR) continue;
+            if (material == DH_MATERIAL_AIR) return;
+            int normalIndex = bytes[q + 13] & 0xFF;
+            int textureTileId = u16le(bytes, q + 14);
+            int offsetX = mesh.originX() - originX;
+            int offsetZ = mesh.originZ() - originZ;
 
             for (int v = 0; v < 4; v++) {
                 int p = q + v * 16;
@@ -491,9 +795,27 @@ public final class RtLodTerrain {
             // DH has already baked source texture and biome tint into vertex colour. Material identity is
             // coarse (the EDhApiBlockMaterial mini-material), but preserving it still gives distant metal,
             // wood, stone, foliage, snow, sand, water, lava and illuminated blocks distinct RT behaviour.
-            float r = SRGB_TO_LINEAR[bytes[q + 8] & 0xFF];
-            float g = SRGB_TO_LINEAR[bytes[q + 9] & 0xFF];
-            float b = SRGB_TO_LINEAR[bytes[q + 10] & 0xFF];
+            float faceShade = normalIndex < faceShades.length ? faceShades[normalIndex] : 1.0f;
+            float r = SRGB_TO_LINEAR[unshadeDhColor(bytes[q + 8] & 0xFF, faceShade)];
+            float g = SRGB_TO_LINEAR[unshadeDhColor(bytes[q + 9] & 0xFF, faceShade)];
+            float b = SRGB_TO_LINEAR[unshadeDhColor(bytes[q + 10] & 0xFF, faceShade)];
+            FaceRecipe faceRecipe = null;
+            int provenanceId = DhMaterialProvenance.UNKNOWN;
+            boolean recipeSurface = material != DH_MATERIAL_WATER
+                    && !isDhEmissiveMaterial(material)
+                    && !(transparentPass && material != DH_MATERIAL_LEAVES);
+            if (material != DH_MATERIAL_WATER) {
+                int[] provenance = transparentPass ? mesh.transparentProvenance() : mesh.opaqueProvenance();
+                int quadIndex = q / 64;
+                provenanceId = quadIndex < provenance.length ? provenance[quadIndex] : 0;
+                faceRecipe = recipeSurface ? DhMaterialProvenance.faceRecipe(provenanceId, normalIndex) : null;
+                if (faceRecipe == null) {
+                    float gain = DhMaterialProvenance.gain(provenanceId, normalIndex, textureTileId);
+                    r *= gain;
+                    g *= gain;
+                    b *= gain;
+                }
+            }
             float alpha = (bytes[q + 11] & 0xFF) * (1.0f / 255.0f);
             int rtMaterial = dhRtMaterial(palette, material, transparentPass);
             if (material == DH_MATERIAL_WATER) {
@@ -501,33 +823,41 @@ public final class RtLodTerrain {
                 // source scale to closest-hit so multi-block cells use a thin dielectric interface instead
                 // of accumulating Beer-Lambert absorption through artificial 2/4/8-block water cubes.
                 packed.water.addQuad(xyz, r, g, b, rtMaterial, SurfaceKind.WATER,
-                        material, mesh.dataPointWidth(), 0.0f);
+                        material, normalIndex, textureTileId, mesh.dataPointWidth(), 0.0f);
             } else if (isDhEmissiveMaterial(material)) {
                 boolean lava = material == DH_MATERIAL_LAVA;
                 // The final two bytes differ slightly between DH renderer revisions but contain its packed
                 // light/face metadata. Use only their low light-range values and only for a surface already
                 // classified as an emitter; ordinary sunlit terrain can never become emissive here.
-                float lightBoost = 0.85f + 0.45f * dhPackedLight(bytes, q) * (1.0f / 15.0f);
-                float emission = (lava ? DH_LAVA_EMISSION : DH_ILLUMINATED_EMISSION) * lightBoost;
+                float emission = lava ? DH_LAVA_EMISSION : DH_ILLUMINATED_EMISSION;
                 if (transparentPass && !lava) {
                     float opticalAlpha = dhGlassInterfaceAlpha(alpha);
                     packed.solid.addQuad(xyz, r, g, b, palette.emissiveGlassId,
-                            SurfaceKind.EMISSIVE_GLASS, material, emission, opticalAlpha);
+                            SurfaceKind.EMISSIVE_GLASS, material, normalIndex, textureTileId,
+                            emission, opticalAlpha);
                 } else {
                     packed.solid.addQuad(xyz, r, g, b, rtMaterial, SurfaceKind.EMISSIVE,
-                            material, emission, 0.0f);
+                            material, normalIndex, textureTileId, emission, 0.0f);
                 }
             } else if (transparentPass && material != DH_MATERIAL_LEAVES) {
                 // Some DH/resource-pack combinations bake alpha=1 in the transparent VBO. Keep a conservative
                 // thin-glass fallback so distant panes never collapse back to opaque.
                 float opticalAlpha = dhGlassInterfaceAlpha(alpha);
                 packed.glass.addQuad(xyz, r, g, b, rtMaterial, SurfaceKind.GLASS,
-                        material, opticalAlpha, 0.0f);
+                        material, normalIndex, textureTileId, opticalAlpha, 0.0f);
             } else {
+                int faceRecipeId = faceRecipe == null ? 0 : packed.recipeId(faceRecipe);
+                int recipeFailure = faceRecipeId != 0 ? 0
+                        : (provenanceId == DhMaterialProvenance.UNKNOWN ? 1 : 2);
                 packed.solid.addQuad(xyz, r, g, b, rtMaterial, SurfaceKind.SOLID,
-                        material, 0.0f, 0.0f);
+                        material, normalIndex, textureTileId,
+                        Float.intBitsToFloat(faceRecipeId), Float.intBitsToFloat(recipeFailure));
             }
-        }
+    }
+
+    private static int unshadeDhColor(int shaded, float shade) {
+        if (shade >= 0.999f || shade <= 0.0f) return shaded;
+        return Math.min(255, Math.max(0, Math.round(shaded / shade)));
     }
 
     private static int dhRtMaterial(DhMaterialPalette palette, int material, boolean transparentPass) {
@@ -542,18 +872,6 @@ public final class RtLodTerrain {
             case DH_MATERIAL_SNOW -> palette.smoothId;
             default -> palette.defaultId;
         };
-    }
-
-    private static int dhPackedLight(byte[] bytes, int q) {
-        int strongest = 0;
-        for (int v = 0; v < 4; v++) {
-            int p = q + v * 16;
-            int a = bytes[p + 13] & 0xFF;
-            int b = bytes[p + 14] & 0xFF;
-            if (a <= 15) strongest = Math.max(strongest, a);
-            if (b <= 15) strongest = Math.max(strongest, b);
-        }
-        return strongest;
     }
 
     private static int u16le(byte[] bytes, int offset) {
@@ -617,6 +935,10 @@ public final class RtLodTerrain {
                 if (session.markBatchReady(next)) evictSupersededSources(session);
                 continue;
             }
+            if (!BackgroundAsPacing.allowLod(ctx)) {
+                session.remaining.addFirst(next);
+                return;
+            }
             session.lifecycle.beginPacking();
             schedulePack(next, session);
             return;
@@ -660,12 +982,14 @@ public final class RtLodTerrain {
     private void drainPackCompleted(RtContext ctx) {
         PackCompleted done;
         while ((done = packCompleted.poll()) != null) {
-            packPending = false;
             BuildSession session = buildSession;
             if (done.epoch != epoch || session == null || done.revision != session.revision) {
+                // This completion belongs to an abandoned pack task. Do not clear the
+                // current task's marker: a newer pack may still be running.
                 continue;
             }
             if (done.failure != null || done.mesh == null) {
+                packPending = false;
                 abortBuildSession(ctx);
                 requestRetry();
                 if (!(done.failure instanceof CancellationException)) {
@@ -673,9 +997,16 @@ public final class RtLodTerrain {
                 }
                 continue;
             }
+            if (!BackgroundAsPacing.allowLod(ctx)) {
+                // Keep packPending asserted while this completed item is held back. Clearing it here
+                // lets serviceBuildSession start a second pack and can later publish FINAL from PACKING.
+                packCompleted.add(done);
+                break;
+            }
+            packPending = false;
             session.lifecycle.beginGpuBuilding();
             schedule(ctx, done.item, done.mesh, done.epoch, done.revision);
-        }
+    }
     }
 
     private void schedule(RtContext ctx, PlannedBatch item, PackedSection mesh,
@@ -695,6 +1026,7 @@ public final class RtLodTerrain {
                 activeTasks++;
                 taskRegistered = true;
             }
+            RtFrameStats.FRAME.count("lodBlasDispatched", 1);
             ctx.gpuExecutor().submit(
                     () -> taskEpoch != epoch,
                     cmd -> {
@@ -809,10 +1141,10 @@ public final class RtLodTerrain {
             }
             PlannedBatch item = done.item;
             RtSectionTable.SectionGeom geom = new RtSectionTable.SectionGeom(item.batchKey, prepared.uvs(),
-                    prepared.material(), prepared.blas().accel, prepared.triBase(),
+                    prepared.material(), prepared.dhFaceRecipeAddress(), prepared.blas().accel, prepared.triBase(),
                     prepared.sx(), prepared.sy(), prepared.sz(), prepared.lights());
             GeomEntry entry = new GeomEntry(item.batchKey, item.sourceKey, item.sourceVersion,
-                    item.originX, item.originZ, item.sourceWidth, item.dataPointWidth, geom);
+                    item.quadCount, item.coverage, geom);
             session.workingEntries.put(item.batchKey, entry);
             session.owned.add(geom);
             session.builtCount++;
@@ -852,8 +1184,7 @@ public final class RtLodTerrain {
     private void maybePublishProgress(RtContext ctx, BuildSession session) {
         if (session != buildSession || session.workingEntries.isEmpty()) return;
         int unpublished = session.builtCount - session.publishedBuiltCount;
-        int threshold = current == null && !session.publishedAny
-                ? INITIAL_PROGRESS_BATCHES : STEADY_PROGRESS_BATCHES;
+        int threshold = session.publishedAny ? STEADY_PROGRESS_BATCHES : INITIAL_PROGRESS_BATCHES;
         long now = System.nanoTime();
         if (session.coverageChanged || unpublished >= threshold
                 || (unpublished > 0 && now - session.lastPublishNanos >= PROGRESS_PUBLISH_NANOS)) {
@@ -874,17 +1205,18 @@ public final class RtLodTerrain {
                 }
                 return;
             }
-            table = ctx.createBuffer(Math.multiplyExact(32L, count), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+            table = ctx.createBuffer(Math.multiplyExact(40L, count), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
                     "Distant Horizons RT proxy table " + count + " batches");
             long p = table.mapped;
             for (int section = 0; section < count; section++) {
                 RtSectionTable.SectionGeom geom = entries.get(section).geom;
-                long entry = p + section * 32L;
+                long entry = p + section * 40L;
                 MemoryUtil.memPutLong(entry, geom.material.deviceAddress);
                 MemoryUtil.memPutLong(entry + 8, geom.uvs.deviceAddress);
                 for (int i = 0; i < 4; i++) {
                     MemoryUtil.memPutInt(entry + 16L + i * 4L, geom.triBase[i]);
                 }
+                MemoryUtil.memPutLong(entry + 32L, geom.dhFaceRecipeAddress);
             }
             table.flush();
             if (session.lastBuild != null) {
@@ -911,7 +1243,6 @@ public final class RtLodTerrain {
 
             if (finished) {
                 session.lifecycle.publishFinal();
-                bootstrapComplete = true;
                 buildSession = null;
                 long now = System.nanoTime();
                 nextRefresh = now + refreshDelayNanos(now);
@@ -961,13 +1292,19 @@ public final class RtLodTerrain {
         qualitySettleUntilNanos = 0L;
         lodQuality = new DistantHorizonsCompat.LodQuality(0L, 16, 2, "UNKNOWN", "UNKNOWN");
         cpuPending = false;
-        bootstrapComplete = false;
         manualRefreshRequested.set(false);
         forceSourceRebuild = false;
         abortBuildSession(ctx);
         world = null;
         instanceProxy = null;
         frameDhInstances = new RtAccel.Instance[0];
+        coverageProxyRevision = Long.MIN_VALUE;
+        coverageTerrainGeneration = Long.MIN_VALUE;
+        lastLoggedActiveSignature = Long.MIN_VALUE;
+        synchronized (sourcePlanCacheLock) {
+            sourcePlanCache.clear();
+        }
+        dhFullyVanillaCovered = dhPartiallyCovered = dhUncovered = 0;
         if (clearCapturedLods) {
             DistantHorizonsCompat.clearCapturedLods();
         }
@@ -1003,10 +1340,16 @@ public final class RtLodTerrain {
         current = null;
         instanceProxy = null;
         frameDhInstances = new RtAccel.Instance[0];
+        coverageProxyRevision = Long.MIN_VALUE;
+        coverageTerrainGeneration = Long.MIN_VALUE;
+        lastLoggedActiveSignature = Long.MIN_VALUE;
+        synchronized (sourcePlanCacheLock) {
+            sourcePlanCache.clear();
+        }
+        dhFullyVanillaCovered = dhPartiallyCovered = dhUncovered = 0;
         pending = false;
         cpuPending = false;
         packPending = false;
-        bootstrapComplete = false;
         manualRefreshRequested.set(false);
         forceSourceRebuild = false;
         DistantHorizonsCompat.clearCapturedLods();
@@ -1033,22 +1376,33 @@ public final class RtLodTerrain {
                                 Throwable failure, boolean finalBatch) {
     }
 
+    private record SourcePlanIdentity(long key, long version) {
+    }
+
+    private record CachedSourcePlan(LodMesh mesh, LodBatchPlanner.SourcePlan plan) {
+    }
+
     private record PackCompleted(long epoch, long revision, PlannedBatch item,
                                  PackedSection mesh, Throwable failure) {
     }
 
-    private record PlannedBatch(long batchKey, long sourceKey, long sourceVersion, int originX, int originZ,
-                                int sourceWidth, int dataPointWidth,
+    private record PlannedBatch(long batchKey, long sourceKey, long sourceVersion, int quadCount,
+                                int originX, int originZ,
+                                int sourceWidth, int dataPointWidth, CoverageRect coverage,
                                 List<LodBatchPlanner.SlicePlan> slices, GeomEntry reused) {
         static PlannedBatch build(long batchKey, LodMesh mesh,
-                                  List<LodBatchPlanner.SlicePlan> slices) {
-            return new PlannedBatch(batchKey, mesh.key(), mesh.version(), mesh.originX(), mesh.originZ(),
-                    mesh.width(), mesh.dataPointWidth(), slices, null);
+                                  List<LodBatchPlanner.SlicePlan> slices, CoverageRect coverage) {
+            int quadCount = slices.stream().mapToInt(slice -> slice.counts().total()).sum();
+            return new PlannedBatch(batchKey, mesh.key(), mesh.version(), quadCount,
+                    mesh.originX(), mesh.originZ(),
+                    mesh.width(), mesh.dataPointWidth(), coverage, slices, null);
         }
 
         static PlannedBatch reuse(GeomEntry entry) {
             return new PlannedBatch(entry.batchKey, entry.sourceKey, entry.sourceVersion,
-                    entry.originX, entry.originZ, entry.sourceWidth, entry.dataPointWidth, null, entry);
+                    entry.quadCount,
+                    entry.geom.sx, entry.geom.sz, entry.coverage.width(), entry.coverage.detailWidth(),
+                    entry.coverage, null, entry);
         }
     }
 
@@ -1126,11 +1480,10 @@ public final class RtLodTerrain {
         }
     }
 
-    private record GeomEntry(long batchKey, long sourceKey, long sourceVersion,
-                             int originX, int originZ, int sourceWidth, int dataPointWidth,
-                             RtSectionTable.SectionGeom geom) {
+    private record GeomEntry(long batchKey, long sourceKey, long sourceVersion, int quadCount,
+                             CoverageRect coverage, RtSectionTable.SectionGeom geom) {
         CoverageRect rect() {
-            return new CoverageRect(sourceKey, originX, originZ, sourceWidth, dataPointWidth);
+            return coverage;
         }
     }
 
@@ -1157,11 +1510,13 @@ public final class RtLodTerrain {
      * Owns the exact final arrays and independent category cursors. Opaque and emissive quads share the
      * solid range, followed by glass and water, so Vulkan ranges stay contiguous without a second copy.
      */
-    private static final class PackedMeshBuilder {
+    static final class PackedMeshBuilder {
         final float[] positions;
         final int[] indices;
         final float[] uvs;
         final float[] prims;
+        final HashMap<FaceRecipe, Integer> recipeIds = new HashMap<>();
+        final FloatArrayList recipeWords = new FloatArrayList();
         final MeshWriter solid;
         final MeshWriter glass;
         final MeshWriter water;
@@ -1183,6 +1538,48 @@ public final class RtLodTerrain {
             water.requireComplete("water");
         }
 
+        int recipeId(FaceRecipe recipe) {
+            Integer existing = recipeIds.get(recipe);
+            if (existing != null) return existing;
+            int id = recipeIds.size() + 1; // zero is the scalar/DH-atlas fallback
+            recipeIds.put(recipe, id);
+            appendLayer(recipe.base());
+            if (recipe.overlay() != null) appendLayer(recipe.overlay());
+            else if (recipe.cutoutFill() != null) appendCutoutFill(recipe.cutoutFill());
+            else appendLayer(null);
+            return id;
+        }
+
+        /** Reuse the otherwise-empty overlay slot; -2 identifies solid CUTOUT fill metadata. */
+        private void appendCutoutFill(DhMaterialProvenance.CutoutFill fill) {
+            recipeWords.add(Float.intBitsToFloat(-2));
+            recipeWords.add(fill.r());
+            recipeWords.add(fill.g());
+            recipeWords.add(fill.b());
+            for (int i = 4; i < 12; i++) recipeWords.add(0.0f);
+        }
+
+        /** 12 floats/layer: {materialIdBits,tint.rgb}, {u affine}, {v affine}. */
+        private void appendLayer(FaceLayer layer) {
+            if (layer == null) {
+                recipeWords.add(Float.intBitsToFloat(-1));
+                for (int i = 1; i < 12; i++) recipeWords.add(0.0f);
+                return;
+            }
+            recipeWords.add(Float.intBitsToFloat(layer.materialId()));
+            recipeWords.add(layer.tintR());
+            recipeWords.add(layer.tintG());
+            recipeWords.add(layer.tintB());
+            recipeWords.add(layer.ua());
+            recipeWords.add(layer.ub());
+            recipeWords.add(layer.uc());
+            recipeWords.add(0.0f);
+            recipeWords.add(layer.va());
+            recipeWords.add(layer.vb());
+            recipeWords.add(layer.vc());
+            recipeWords.add(0.0f);
+        }
+
         private static int elementCount(int quads, int perQuad) {
             return Math.multiplyExact(quads, perQuad);
         }
@@ -1200,7 +1597,8 @@ public final class RtLodTerrain {
         }
 
         void addQuad(float[] p, float r, float g, float b, int materialId, int surfaceKind,
-                     int dhMaterial, float aux0Value, float aux1Value) {
+                     int dhMaterial, int normalIndex, int textureTileId,
+                     float aux0Value, float aux1Value) {
             if (nextQuad >= endQuad) {
                 throw new IllegalStateException("Distant Horizons quad count changed while packing");
             }
@@ -1218,18 +1616,12 @@ public final class RtLodTerrain {
             packed.indices[indexOffset + 5] = vertex + 3;
 
             int uvOffset = quad * 12;
-            packed.uvs[uvOffset] = 0f;
-            packed.uvs[uvOffset + 1] = 0f;
-            packed.uvs[uvOffset + 2] = 1f;
-            packed.uvs[uvOffset + 3] = 0f;
-            packed.uvs[uvOffset + 4] = 1f;
-            packed.uvs[uvOffset + 5] = 1f;
-            packed.uvs[uvOffset + 6] = 0f;
-            packed.uvs[uvOffset + 7] = 0f;
-            packed.uvs[uvOffset + 8] = 1f;
-            packed.uvs[uvOffset + 9] = 1f;
-            packed.uvs[uvOffset + 10] = 0f;
-            packed.uvs[uvOffset + 11] = 1f;
+            writeDhFaceUv(p, 0, normalIndex, packed.uvs, uvOffset);
+            writeDhFaceUv(p, 3, normalIndex, packed.uvs, uvOffset + 2);
+            writeDhFaceUv(p, 6, normalIndex, packed.uvs, uvOffset + 4);
+            writeDhFaceUv(p, 0, normalIndex, packed.uvs, uvOffset + 6);
+            writeDhFaceUv(p, 6, normalIndex, packed.uvs, uvOffset + 8);
+            writeDhFaceUv(p, 9, normalIndex, packed.uvs, uvOffset + 10);
 
             float ax = p[3] - p[0];
             float ay = p[4] - p[1];
@@ -1247,9 +1639,27 @@ public final class RtLodTerrain {
 
             int primitiveOffset = quad * 24;
             writePrimitive(packed.prims, primitiveOffset, nx, ny, nz, r, g, b,
-                    materialId, surfaceKind, dhMaterial, aux0Value, aux1Value);
+                    materialId, surfaceKind, dhMaterial, normalIndex, textureTileId,
+                    aux0Value, aux1Value);
             writePrimitive(packed.prims, primitiveOffset + 12, nx, ny, nz, r, g, b,
-                    materialId, surfaceKind, dhMaterial, aux0Value, aux1Value);
+                    materialId, surfaceKind, dhMaterial, normalIndex, textureTileId,
+                    aux0Value, aux1Value);
+        }
+
+        /** Same face projection as DH's blockFaceUv(); fract is deferred until after interpolation. */
+        private static void writeDhFaceUv(float[] positions, int positionOffset, int normalIndex,
+                                          float[] out, int offset) {
+            float x = positions[positionOffset];
+            float y = positions[positionOffset + 1];
+            float z = positions[positionOffset + 2];
+            switch (normalIndex) {
+                case 0 -> { out[offset] = x;  out[offset + 1] = -z; }
+                case 1 -> { out[offset] = x;  out[offset + 1] = z; }
+                case 2 -> { out[offset] = -x; out[offset + 1] = -y; }
+                case 3 -> { out[offset] = x;  out[offset + 1] = -y; }
+                case 4 -> { out[offset] = z;  out[offset + 1] = -y; }
+                default -> { out[offset] = -z; out[offset + 1] = -y; }
+            }
         }
 
         void requireComplete(String category) {
@@ -1261,7 +1671,8 @@ public final class RtLodTerrain {
 
         private static void writePrimitive(float[] out, int offset, float nx, float ny, float nz,
                                            float r, float g, float b, int materialId, int surfaceKind,
-                                           int dhMaterial, float aux0Value, float aux1Value) {
+                                           int dhMaterial, int normalIndex, int textureTileId,
+                                           float aux0Value, float aux1Value) {
             out[offset] = nx;
             out[offset + 1] = ny;
             out[offset + 2] = nz;
@@ -1271,7 +1682,9 @@ public final class RtLodTerrain {
             out[offset + 6] = b;
             out[offset + 7] = surfaceKind;
             out[offset + 8] = Float.intBitsToFloat(materialId);
-            out[offset + 9] = Float.intBitsToFloat(dhMaterial); // TerrainPrim.flags: original DH mini-material
+            int dhMeta = (dhMaterial & 0xFF) | ((normalIndex & 0xFF) << 8)
+                    | ((textureTileId & 0xFFFF) << 16);
+            out[offset + 9] = Float.intBitsToFloat(dhMeta);
             out[offset + 10] = aux0Value;
             out[offset + 11] = aux1Value;
         }

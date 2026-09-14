@@ -73,8 +73,34 @@ public final class RtFramePresenter {
     private int interpFallbackInWindow;
     private int acquireSkippedInWindow;
     private int loggedImageCount = -1;
+    private volatile PresentRateSnapshot presentRateSnapshot = PresentRateSnapshot.EMPTY;
+
+    public record PresentRateSnapshot(double realFps, double generatedFps, double totalPresentFps,
+            int realFrames, int generatedFrames, long sampledAtNs) {
+        private static final PresentRateSnapshot EMPTY = new PresentRateSnapshot(0.0, 0.0, 0.0, 0, 0, 0L);
+
+        public boolean isFresh(long nowNs) {
+            return sampledAtNs != 0L && nowNs - sampledAtNs <= 2_500_000_000L;
+        }
+    }
 
     private RtFramePresenter() {
+    }
+
+    public PresentRateSnapshot presentRateSnapshot() {
+        return presentRateSnapshot;
+    }
+
+    public static PresentRateSnapshot samplePresentRate(int realFrames, int generatedFrames,
+            long elapsedNs, long sampledAtNs) {
+        if (elapsedNs <= 0L) {
+            return PresentRateSnapshot.EMPTY;
+        }
+        double seconds = elapsedNs / 1.0e9;
+        double realFps = realFrames / seconds;
+        double generatedFps = generatedFrames / seconds;
+        return new PresentRateSnapshot(realFps, generatedFps, realFps + generatedFps,
+                realFrames, generatedFrames, sampledAtNs);
     }
 
     /**
@@ -232,14 +258,14 @@ public final class RtFramePresenter {
         if (elapsed < LOG_INTERVAL_NS) {
             return;
         }
-        double seconds = elapsed / 1.0e9;
-        double realFps = realFramesInWindow / seconds;
-        double totalFps = (realFramesInWindow + generatedFramesInWindow) / seconds;
+        PresentRateSnapshot sample = samplePresentRate(realFramesInWindow, generatedFramesInWindow,
+                elapsed, now);
+        presentRateSnapshot = sample;
         CausticaMod.LOGGER.info(
                 "[FG present-rate] real={} gen={} realFps={} totalPresentFps={} configuredMultiFrameCount={} "
                         + "interpOk={} interpFallbackDuplicate={} acquireSkipped={}",
                 realFramesInWindow, generatedFramesInWindow,
-                String.format("%.1f", realFps), String.format("%.1f", totalFps),
+                String.format("%.1f", sample.realFps()), String.format("%.1f", sample.totalPresentFps()),
                 RtComposite.fgGeneratedCount(), interpOkInWindow, interpFallbackInWindow,
                 acquireSkippedInWindow);
         logWindowStartNs = now;
