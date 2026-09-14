@@ -24,4 +24,15 @@ class SharcRadianceCacheTest {
         assertTrue(source.contains("return new Bindings(cacheAddress(), params(), params2(), params3(), gridOrigin(terrain));"));
         assertTrue(source.contains("public void sync(RtContext ctx, ClientLevel world, int dimension, long frameIndex)"));
     }
+
+    @Test
+    void maxDistanceFollowsTheActiveLodProvider() throws IOException {
+        String source = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/lighting/SharcRadianceCache.java"));
+
+        assertTrue(source.contains("int lodChunks = DistantHorizonsCompat.renderDistanceChunks();"));
+        assertTrue(source.contains("return Math.max(1, chunks) * 16.0f;"));
+        assertTrue(source.contains("effectiveMaxDistanceBlocks()"));
+        assertFalse(source.contains("CausticaConfig.Rt.Sharc.MAX_DISTANCE"));
+    }
 }

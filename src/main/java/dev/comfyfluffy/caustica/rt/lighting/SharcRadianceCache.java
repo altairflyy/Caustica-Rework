@@ -2,12 +2,14 @@ package dev.comfyfluffy.caustica.rt.lighting;
 
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtSharc;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float4;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Int4;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.Minecraft;
 
 /** Host-side SHaRC ownership facade; RtSharc and sharc.slang retain implementation details. */
 public final class SharcRadianceCache {
@@ -80,7 +82,7 @@ public final class SharcRadianceCache {
                 CausticaConfig.Rt.Sharc.CELL_SIZE.value(),
                 CausticaConfig.Rt.Sharc.STRENGTH.value(),
                 CausticaConfig.Rt.Sharc.TEMPORAL_BLEND.value(),
-                CausticaConfig.Rt.Sharc.MAX_DISTANCE.value());
+                effectiveMaxDistanceBlocks());
     }
 
     /** Materializes the live WorldPush.sharcParams2 values at the existing render seam. */
@@ -99,6 +101,13 @@ public final class SharcRadianceCache {
 
     /** Returns the cache address needed by the existing shader push contract. */
     public long cacheAddress() { return implementation.address(); }
+
+    /** Follows the authoritative LOD horizon every frame; without a provider, follows vanilla view distance. */
+    public float effectiveMaxDistanceBlocks() {
+        int lodChunks = DistantHorizonsCompat.renderDistanceChunks();
+        int chunks = lodChunks > 0 ? lodChunks : Minecraft.getInstance().options.renderDistance().get();
+        return Math.max(1, chunks) * 16.0f;
+    }
 
     /** Materializes the world-space cache origin without moving terrain anchoring into SHaRC. */
     public Int4 gridOrigin(RtTerrain terrain) {
@@ -121,6 +130,8 @@ public final class SharcRadianceCache {
                 + ", blend=" + CausticaConfig.Rt.Sharc.TEMPORAL_BLEND.value()
                 + ", startBounce=" + CausticaConfig.Rt.Sharc.START_BOUNCE.value()
                 + ", strength=" + CausticaConfig.Rt.Sharc.STRENGTH.value()
+                + ", maxDistance=" + effectiveMaxDistanceBlocks() + " blocks"
+                + ", farCell=2.0 blocks"
                 + ", lifetime=" + CausticaConfig.Rt.Sharc.FRAME_LIFETIME.value()
                 + ", normal=" + CausticaConfig.Rt.Sharc.NORMAL_THRESHOLD.value()
                 + ", minSamples=" + CausticaConfig.Rt.Sharc.STABLE_FRAMES.value()

@@ -669,7 +669,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             payload.f0 = half3(debugColor);
             payloadSetPacked(payload, MATERIAL_OPAQUE, 1.0, 0.0, 0.0, 0.0,
                     1.0, 0.0, EMISSION_SOURCE_NONE);
-            payload.flags |= PAYLOAD_FAR_GEOMETRY_DEBUG;
+            payload.flags |= PAYLOAD_FAR_GEOMETRY;
             return;
         }
 
@@ -690,6 +690,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                     dhEmissiveGlass ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE);
             payloadSetDielectric(payload, MATERIAL_DIELECTRIC,
                     dot(WorldRayDirection(), sourceNormal) < 0.0);
+            payload.flags |= PAYLOAD_FAR_GEOMETRY;
             return;
         }
 
@@ -706,6 +707,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                     1.333, 1.0, EMISSION_SOURCE_NONE);
             payloadSetDielectric(payload, MATERIAL_WATER,
                     dot(WorldRayDirection(), sourceNormal) < 0.0);
+            payload.flags |= PAYLOAD_FAR_GEOMETRY;
             return;
         }
 
@@ -720,6 +722,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payloadSetPacked(payload, MATERIAL_OPAQUE, dhRoughness, dhMetalness, dhEmission, dhSss,
                 max(dhHeader.params.z, 1.0), 0.0,
                 dhEmissive ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE);
+        payload.flags |= PAYLOAD_FAR_GEOMETRY;
         return;
     }
 

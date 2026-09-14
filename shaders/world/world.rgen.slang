@@ -535,6 +535,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         float sss = payloadActiveSss();
         float3 p = hitPos + n * SURF_BIAS;
         float3 v = -rd; // view direction (toward the camera / incoming ray)
+        bool sharcFarSurface = payloadFarGeometry();
+        float sharcSurfaceCellSize = sharcCellSize(worldPush, sharcFarSurface);
 
         // Material split. Metals tint F0 by albedo and have no diffuse lobe; dielectrics use a fixed
         // 0.04 F0, sourced from the chit (LabPBR custom/metal F0, or the dielectric default it applies).
@@ -594,11 +596,12 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 && !exactSpecular
                 && worldPush.sharcParams.y > 0.0
                 && !restirReceiverPending
-                && payload.hitT > worldPush.sharcParams.x * SHARC_CELL_DIAGONAL) {
+                && sharcWithinDistance(worldPush, hitPos)
+                && payload.hitT > sharcSurfaceCellSize * SHARC_CELL_DIAGONAL) {
             gv_sharcDbgQueried = 1u;
             float3 sharcCached;
             float sharcSamples;
-            if (sharcQuery(worldPush, hitPos, n, sharcCached, sharcSamples)) {
+            if (sharcQuery(worldPush, hitPos, n, sharcFarSurface, sharcCached, sharcSamples)) {
                 gv_sharcDbgHit = 1u;
                 gv_sharcDbgCount = max(gv_sharcDbgCount, sharcSamples);
                 float3 sharcGi = throughput * sharcCached * worldPush.sharcParams.y;
@@ -874,8 +877,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 float3 localOut = localAdded / throughput;
                 sharcPropagateToPath(worldPush, sharcState, hitPos, localOut, throughput);
                 uint sharcIndex;
-                if (sharcWrite(worldPush, hitPos, n, localOut, sharcIndex)) {
-                    sharcRegisterPathVertex(sharcState, sharcIndex, hitPos, throughput);
+                if (sharcWrite(worldPush, hitPos, n, sharcFarSurface, localOut, sharcIndex)) {
+                    sharcRegisterPathVertex(sharcState, sharcIndex, hitPos, throughput,
+                            sharcSurfaceCellSize);
                 }
             }
         }

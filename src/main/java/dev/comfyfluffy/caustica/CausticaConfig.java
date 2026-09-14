@@ -71,7 +71,7 @@ public final class CausticaConfig {
             Rt.Fsr.ENABLED, Rt.Fsr.QUALITY, Rt.Xess.ENABLED, Rt.Xess.QUALITY,
             Rt.Denoise.ENABLED, Rt.Nrd.ENABLED, Rt.Nrd.VALIDATION,
             Rt.Sharc.ENABLED, Rt.Sharc.CELL_SIZE, Rt.Sharc.CACHE_ENTRIES, Rt.Sharc.UPDATE_COVERAGE,
-            Rt.Sharc.TEMPORAL_BLEND, Rt.Sharc.START_BOUNCE, Rt.Sharc.STRENGTH, Rt.Sharc.MAX_DISTANCE,
+            Rt.Sharc.TEMPORAL_BLEND, Rt.Sharc.START_BOUNCE, Rt.Sharc.STRENGTH,
             Rt.Sharc.FRAME_LIFETIME, Rt.Sharc.NORMAL_THRESHOLD, Rt.Sharc.STABLE_FRAMES, Rt.Sharc.DEBUG,
             Rt.Reflex.ENABLED, Rt.Lights.HELD_ITEM_LIGHT, Rt.Lights.DYNAMIC_INTENSITY, Rt.Lights.BLOCK_INTENSITY,
             Rt.Lights.RESTIR_SAMPLING, Rt.Lights.RESTIR_TEMPORAL_HISTORY, Rt.Lights.RESTIR_SPATIAL_NEIGHBOURS,
@@ -156,8 +156,8 @@ public final class CausticaConfig {
                         + " cell-size is the voxel edge in blocks; cache-entries is the flat hash capacity;\n"
                         + " update-coverage is the fraction of warm paths that write; temporal-blend is how\n"
                         + " much a new estimate changes an existing entry; start-bounce is the first bounce\n"
-                        + " allowed to query; strength scales the cached indirect tail; max-distance bounds\n"
-                        + " how far from a cell centre a query may use it; frame-lifetime is how long an\n"
+                        + " allowed to query; strength scales the cached indirect tail. Runtime coverage follows\n"
+                        + " the active LOD provider distance (or vanilla distance without LOD); frame-lifetime is how long an\n"
                         + " entry stays fresh; normal-threshold is the minimum normal agreement for a hit;\n"
                         + " stable-frames is how many frames a freshly written cell must age before the\n"
                         + " tracer may use it (guards against the new-cell brightness flash).\n"
@@ -1282,7 +1282,7 @@ public final class CausticaConfig {
              * 256K (12 MiB) is a sane default here, and 1M (48 MiB) is available for big scenes.
              */
             public static final IntSetting CACHE_ENTRIES =
-                    clampedInt("caustica.rt.sharc.cacheEntries", "sharc.cache-entries", 1 << 18,
+                    clampedInt("caustica.rt.sharc.cacheEntries", "sharc.cache-entries", 1 << 19,
                             2048, 1 << 20);
             /** Fraction of shaded paths that actually write a cache entry. */
             public static final FloatSetting UPDATE_COVERAGE =
@@ -1305,13 +1305,6 @@ public final class CausticaConfig {
              */
             public static final FloatSetting STRENGTH =
                     clampedFloat("caustica.rt.sharc.strength", "sharc.strength", 1.0f, 0.0f, 1.0f);
-            /**
-             * Reserved. Kept (and still published in WorldPush.sharcParams.w) so existing configs
-             * keep loading, but the shader no longer reads it: a query position is always inside its
-             * own cell, so a "distance from cell centre" limit could never reject anything.
-             */
-            public static final FloatSetting MAX_DISTANCE =
-                    clampedFloat("caustica.rt.sharc.maxDistance", "sharc.max-distance", 96.0f, 4.0f, 256.0f);
             /** Frames an entry stays usable before it is treated as stale and allowed to be replaced. */
             public static final IntSetting FRAME_LIFETIME =
                     clampedInt("caustica.rt.sharc.frameLifetime", "sharc.frame-lifetime", 120, 1, 240);

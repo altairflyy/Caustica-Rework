@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Removed
 - Removed obsolete Distant Horizons rasterization fallback, dedicated reflection pipeline, and water mask passes.
 
+### Fixed
+- Fixed tonemapping when HDR is active to evaluate the selected tone curve and look operators across available display headroom while keeping paper white normalized and consistent with SDR.
+
 ## [0.1.2]
 
 ### Fixed

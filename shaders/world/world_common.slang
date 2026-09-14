@@ -313,7 +313,7 @@ public struct Payload {
     public float  hitT;        // >= 0 on hit, < 0 on miss.
     public half3  motionPrev;  // per-vertex world displacement since last frame.
     public half3  f0;          // specular F0.
-    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit, bit 11 FAR geometry debug.
+    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit, bit 11 FAR geometry.
     public uint   roughMetal;  // packHalf2x16(roughness, metalness)
     public uint   emissionSss; // packHalf2x16(emission, sss)
     public uint   iorTransmission; // packHalf2x16(IOR, transmission factor)
@@ -330,8 +330,9 @@ public static const uint PAYLOAD_WEATHER = 512u;
 // ends. No NEE, no hand light, no RIS, no SHaRC and no indirect bounce, so no scene light (a
 // nearby torch, the sun, GI) can ever illuminate or reflect off the portal's starfield.
 public static const uint PAYLOAD_END_PORTAL_UNLIT = 1024u;
-// Temporary geometry-only diagnostic, set only for debug views 14/15.
-public static const uint PAYLOAD_FAR_GEOMETRY_DEBUG = 2048u;
+// Authoritative identity set on every DH/Voxy hit. Debug views 14/15 consume the same bit, while
+// SHaRC uses it to keep its coarser FAR cells in a distinct hash domain from Near geometry.
+public static const uint PAYLOAD_FAR_GEOMETRY = 2048u;
 // Set by world.rchit on a terrain hit whose prim carries TERRAIN_PRIM_IN_LIGHT_BUFFER: this emitter is
 // RIS-sampled, so raygen gates its direct-hit emission on diffuse continuation rays (no double count).
 public static const uint PAYLOAD_EMITTER_IN_LIST = 128u;

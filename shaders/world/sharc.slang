@@ -37,8 +37,10 @@
 //   * collisions, stale entries, normal mismatch and cleared data are all treated as "no cache
 //     data", so a bad entry can never turn a pixel black.
 //
-// The cache is a single flat spatial hash: cell = floor(pos / cellSize) as int3,
-// index = hash(cell, normalOctant) % entryCount. Temporal accumulation is a sample-count-weighted
+// The cache is a single flat spatial hash with distinct Near/FAR domains. Near uses the configured
+// cell size; DH/Voxy FAR uses a fixed two-block cell. The domain participates in both hashing and
+// entry validation, so equal integer coordinates at different scales can never alias as the same cell.
+// Temporal accumulation is a sample-count-weighted
 // running mean whose effective sample count decays once per frame (the first write of a frame),
 // which reproduces NVIDIA's frame-bounded accumulation window without a separate resolve pass.
 
@@ -50,7 +52,7 @@ import world_common;
 //   cellFrame.xyz = quantised integer cell coordinate stored as int bit patterns (negatives safe)
 //   cellFrame.w   = frame stamp of the last write (for staleness eviction)
 //   normal.xyz    = accumulated mean surface normal (directional gate for queries)
-//   normal.w      = unused
+//   normal.w      = cache domain (0 Near, 1 DH/Voxy FAR)
 public struct SharcEntry {
     public float4 radiance;
     public uint4   cellFrame;
@@ -79,9 +81,11 @@ public struct SharcPathState {
     public uint v0Index;         // cache slot of the most recent registered vertex
     public float3 v0Pos;         // its terrain-rebased position (distance guards only; hashing converts)
     public float3 v0Throughput;  // path throughput when it was registered
+    public float v0CellSize;
     public uint v1Index;         // second-most-recent registered vertex
     public float3 v1Pos;
     public float3 v1Throughput;
+    public float v1CellSize;
 };
 
 public SharcPathState sharcInitPath() {
@@ -89,9 +93,11 @@ public SharcPathState sharcInitPath() {
     s.v0Index = SHARC_INVALID_INDEX;
     s.v0Pos = float3(0.0, 0.0, 0.0);
     s.v0Throughput = float3(1.0, 1.0, 1.0);
+    s.v0CellSize = 1.0;
     s.v1Index = SHARC_INVALID_INDEX;
     s.v1Pos = float3(0.0, 0.0, 0.0);
     s.v1Throughput = float3(1.0, 1.0, 1.0);
+    s.v1CellSize = 1.0;
     return s;
 }
 
@@ -135,8 +141,17 @@ public float3 sharcWorldPos(WorldPush push, float3 hitPos) {
 // Cell coordinates as int bit patterns. float->uint of a negative floor is undefined (and collapses
 // to 0 on real hardware), so the floor result goes through int3 first: int->uint wraps modulo 2^32,
 // which keeps every negative cell distinct and comparable by equality.
-public uint3 sharcCell(WorldPush push, float3 hitPos) {
-    float cellSize = push.sharcParams.x;
+public float sharcCellSize(WorldPush push, bool farGeometry) {
+    return farGeometry ? 2.0 : push.sharcParams.x;
+}
+
+public bool sharcWithinDistance(WorldPush push, float3 hitPos) {
+    float maxDistance = push.sharcParams.w;
+    return maxDistance > 0.0 && length(hitPos - push.camOffset) <= maxDistance;
+}
+
+public uint3 sharcCell(WorldPush push, float3 hitPos, bool farGeometry) {
+    float cellSize = sharcCellSize(push, farGeometry);
     float3 p = sharcWorldPos(push, hitPos);
     int3 cell = int3(int(floor(p.x / cellSize)),
                      int(floor(p.y / cellSize)),
@@ -153,8 +168,9 @@ public uint sharcNormalBits(float3 n) {
          + uint(n.z + 1.0e-3 >= 0.0 ? 0u : 4u);
 }
 
-public uint sharcIndex(WorldPush push, uint3 cell, uint normalBits) {
-    return sharcHash(cell, normalBits) % uint(push.sharcGridOrigin.w);
+public uint sharcIndex(WorldPush push, uint3 cell, uint normalBits, bool farGeometry) {
+    uint domainBits = farGeometry ? 0xA511E9B3u : 0u;
+    return (sharcHash(cell, normalBits) ^ domainBits) % uint(push.sharcGridOrigin.w);
 }
 
 // Per-frame decay of the effective sample count: the temporal blend knob is the inverse
@@ -177,19 +193,25 @@ public uint sharcFrameStamp(WorldPush push) {
 // On success `radiance` is the mean outgoing radiance of the cell's surfaces and `sampleCount` the
 // entry's effective sample count (useful for debug warmth). The value must be combined by the
 // caller as `throughput * radiance` — nothing else; it already contains the surface BRDF.
-public bool sharcQuery(WorldPush push, float3 pos, float3 n,
+public bool sharcQuery(WorldPush push, float3 pos, float3 n, bool farGeometry,
                        out float3 radiance, out float sampleCount) {
     radiance = float3(0.0, 0.0, 0.0);
     sampleCount = 0.0;
     if (!sharcReady(push)) {
         return false;
     }
-    uint3 cell = sharcCell(push, pos);
-    uint index = sharcIndex(push, cell, sharcNormalBits(n));
+    if (!sharcWithinDistance(push, pos)) {
+        return false;
+    }
+    uint3 cell = sharcCell(push, pos, farGeometry);
+    uint index = sharcIndex(push, cell, sharcNormalBits(n), farGeometry);
 
     SharcEntry entry = ConstPtr<SharcEntry>(push.sharcCacheAddr)[index];
     if (entry.cellFrame.x != cell.x || entry.cellFrame.y != cell.y || entry.cellFrame.z != cell.z) {
         return false; // spatial-hash collision with a different cell
+    }
+    if (abs(entry.normal.w - (farGeometry ? 1.0 : 0.0)) > 0.5) {
+        return false; // same integer coordinate, different cell-size domain
     }
     float samples = entry.radiance.w;
     if (samples <= 0.0 || entry.cellFrame.w == 0u) {
@@ -242,7 +264,7 @@ public bool sharcPathSelected(WorldPush push, uint pathSeed) {
 // index when the vertex was written AND registered for back-propagation; the caller then records
 // position + throughput in its SharcPathState. Callers must only invoke this on paths selected by
 // sharcPathSelected, so the vertex's downstream light reaches the entry through back-propagation.
-public bool sharcWrite(WorldPush push, float3 pos, float3 n, float3 radiance,
+public bool sharcWrite(WorldPush push, float3 pos, float3 n, bool farGeometry, float3 radiance,
                        out uint indexOut) {
     indexOut = SHARC_INVALID_INDEX;
     if (!sharcReady(push)) {
@@ -253,15 +275,19 @@ public bool sharcWrite(WorldPush push, float3 pos, float3 n, float3 radiance,
     if (any(isnan(radiance)) || any(isinf(radiance))) {
         return false;
     }
-    uint3 cell = sharcCell(push, pos);
+    if (!sharcWithinDistance(push, pos)) {
+        return false;
+    }
+    uint3 cell = sharcCell(push, pos, farGeometry);
     uint normalBits = sharcNormalBits(n);
-    uint index = sharcIndex(push, cell, normalBits);
+    uint index = sharcIndex(push, cell, normalBits, farGeometry);
 
     DevicePtr<SharcEntry> cache = DevicePtr<SharcEntry>(push.sharcCacheAddr);
     SharcEntry entry = cache[index];
     bool sameCell = entry.cellFrame.x == cell.x
             && entry.cellFrame.y == cell.y
-            && entry.cellFrame.z == cell.z;
+            && entry.cellFrame.z == cell.z
+            && abs(entry.normal.w - (farGeometry ? 1.0 : 0.0)) <= 0.5;
     bool occupied = sameCell && entry.radiance.w > 0.0 && entry.cellFrame.w != 0u;
     bool stale = entry.cellFrame.w == 0u
             || (push.frameIndex - entry.cellFrame.w > uint(push.sharcParams2.z));
@@ -278,7 +304,7 @@ public bool sharcWrite(WorldPush push, float3 pos, float3 n, float3 radiance,
         SharcEntry fresh;
         fresh.radiance = float4(clamped, 1.0);
         fresh.cellFrame = uint4(cell.x, cell.y, cell.z, frame);
-        fresh.normal = float4(normalize(n + float3(1.0e-6, 1.0e-6, 1.0e-6)), 0.0);
+        fresh.normal = float4(normalize(n + float3(1.0e-6, 1.0e-6, 1.0e-6)), farGeometry ? 1.0 : 0.0);
         cache[index] = fresh;
     } else {
         float samples = max(entry.radiance.w, 0.0);
@@ -295,7 +321,7 @@ public bool sharcWrite(WorldPush push, float3 pos, float3 n, float3 radiance,
         // zero; normalizing that would produce NaN, so fall back to this sample's normal.
         float3 blended = lerp(normalize(entry.normal.xyz + float3(1.0e-6, 1.0e-6, 1.0e-6)), n, blend);
         float3 meanNormal = length(blended) > 1.0e-4 ? normalize(blended) : n;
-        updated.normal = float4(meanNormal, 0.0);
+        updated.normal = float4(meanNormal, farGeometry ? 1.0 : 0.0);
         cache[index] = updated;
     }
     indexOut = index;
@@ -351,10 +377,9 @@ public void sharcPropagateToPath(WorldPush push, SharcPathState state,
     if (any(isnan(radianceValue)) || any(isinf(radianceValue))) {
         return;
     }
-    float minDist = push.sharcParams.x * SHARC_CELL_DIAGONAL;
     if (state.v0Index != SHARC_INVALID_INDEX
             && max(state.v0Throughput.r, max(state.v0Throughput.g, state.v0Throughput.b)) > 1.0e-4
-            && length(pos - state.v0Pos) > minDist) {
+            && length(pos - state.v0Pos) > state.v0CellSize * SHARC_CELL_DIAGONAL) {
         // Transport factor from the registered vertex to now. Clamped per channel: legitimate
         // chains stay well below this, while a near-zero throughput channel would otherwise turn
         // the ratio into an unusable spike.
@@ -363,7 +388,7 @@ public void sharcPropagateToPath(WorldPush push, SharcPathState state,
     }
     if (state.v1Index != SHARC_INVALID_INDEX
             && max(state.v1Throughput.r, max(state.v1Throughput.g, state.v1Throughput.b)) > 1.0e-4
-            && length(pos - state.v1Pos) > minDist) {
+            && length(pos - state.v1Pos) > state.v1CellSize * SHARC_CELL_DIAGONAL) {
         float3 weight = clamp(throughput / state.v1Throughput, float3(0.0, 0.0, 0.0), float3(16.0, 16.0, 16.0));
         sharcPropagate(push, state.v1Index, radianceValue * weight);
     }
@@ -371,11 +396,13 @@ public void sharcPropagateToPath(WorldPush push, SharcPathState state,
 
 // Registers a freshly written vertex as a back-propagation target (most recent first).
 public void sharcRegisterPathVertex(inout SharcPathState state, uint index,
-                                    float3 pos, float3 throughput) {
+                                    float3 pos, float3 throughput, float cellSize) {
     state.v1Index = state.v0Index;
     state.v1Pos = state.v0Pos;
     state.v1Throughput = state.v0Throughput;
+    state.v1CellSize = state.v0CellSize;
     state.v0Index = index;
     state.v0Pos = pos;
     state.v0Throughput = throughput;
+    state.v0CellSize = cellSize;
 }

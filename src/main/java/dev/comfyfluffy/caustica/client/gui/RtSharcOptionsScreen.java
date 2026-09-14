@@ -46,7 +46,6 @@ public final class RtSharcOptionsScreen extends RtSettingsSubScreen {
                 CausticaConfig.Rt.Sharc.TEMPORAL_BLEND,
                 CausticaConfig.Rt.Sharc.START_BOUNCE,
                 CausticaConfig.Rt.Sharc.STRENGTH,
-                CausticaConfig.Rt.Sharc.MAX_DISTANCE,
                 CausticaConfig.Rt.Sharc.FRAME_LIFETIME,
                 CausticaConfig.Rt.Sharc.NORMAL_THRESHOLD,
                 CausticaConfig.Rt.Sharc.STABLE_FRAMES,
